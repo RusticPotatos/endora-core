@@ -5,13 +5,11 @@ Source commit: baf37a7d1d6fe9b63426b23e1dd51f27eb7fb02d
 
 This repository is **Endora Core** (milestone g, decision RP1): the headless brain, HQ's engine,
 the node, the Ansible collection, the full-system bundle and every gate that guards them. Its
-history starts fresh, at a commit whose tree is the source commit above **with the privacy
-remediation applied** (below): it is not the source tree verbatim. Measured against the source
-commit, that first commit edits 202 files, renames 5 paths (one scenario file, two unit templates
-of the watch role, one deploy folder, one launchd template) and adds `MANIFEST.txt` and one test
-script. The commits after it are the restructure and later Core changes, so the difference between
-the two repositories is the remediation plus those, not one diff.
-`RusticPotatos/Endora` keeps its name and its history; the source history stays there.
+history starts fresh, as one parentless commit. Its tree is the repaired state of later Core work
+on that source: the source commit's tree, plus the changes made to Core since, plus the privacy
+remediation (below). It is not the source tree verbatim. Measured against the source commit it
+differs by 309 files (16 added, 72 deleted, 216 modified, 5 renamed). `RusticPotatos/Endora` is
+public, keeps its name and its history, and that history stays public.
 
 `sh scripts/check-core-origin.sh` holds the tree to this record: it names a full source commit,
 every workspace member and every file a workflow runs is present, and nothing private (`.local/`,
@@ -33,7 +31,9 @@ and `scripts/gate.sh` will not run without it.
 
 ## What did not travel, and why
 
-Nothing was left out of this first candidate. Two parts could be excluded only if a dependency
+Left out on purpose: the cartoon Office's third-party artwork (65 image and font assets under
+`docs/plans/endora-hq/prototype/assets` and `app/node/src/web/hq-art`) and the code that drew it,
+so this tree holds no image or font file. Two further parts could be excluded only if a dependency
 proof allowed it, and it does not:
 
 - **The sound hub** (`domains/sound`, `app/sound`, `scripts/sound-*.sh`) duplicates Endora Audio.
@@ -66,8 +66,9 @@ runs it, not here:
 Before its first publication this repository's history was rebuilt once, still unpublished, from the source
 snapshot above. The rebuild replaces owner-specific identifiers (host and device names, addresses, account
 and unit names, the name of the personal-values variable and of the git-ignored personal make file) with
-generic ones, renames the capabilities crate to `endora-bridge`, and adds `MANIFEST.txt`. Apart from that
-and the Core changes recorded above, the tree is the source snapshot; the first commit's own counts are above.
+generic ones, renames the capabilities crate to `endora-bridge`, and adds `MANIFEST.txt`. Apart from
+that and the later Core changes described at the top, the tree is the source snapshot; the counts
+are in the first paragraph.
 
 ### What the renames mean for a machine deployed before them
 
