@@ -29,7 +29,3 @@ qrcode = { version = "0.14", default-features = false }
 
 [lints.rust]
 unsafe_code = "forbid"
-
-[profile.release]
-lto = "thin"
-strip = true

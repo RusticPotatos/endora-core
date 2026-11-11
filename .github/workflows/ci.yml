@@ -86,7 +86,12 @@ jobs:
         run: sh scripts/check-core-origin.sh && sh scripts/check-core-origin.sh --self-test
 
       - name: Core's image is never published by a push (the workflow's conditions, tested)
-        run: python3 scripts/test-image-workflow.py
+        # The test needs PyYAML, which the macOS runner's python3 lacks (and PEP 668 forbids
+        # installing into it), so it runs from a throwaway venv on every runner.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/image-workflow-venv"
+          "$RUNNER_TEMP/image-workflow-venv/bin/pip" install --quiet pyyaml==6.0.3
+          "$RUNNER_TEMP/image-workflow-venv/bin/python" scripts/test-image-workflow.py
 
       - name: Whitespace / conflict-marker check
         run: git diff --check

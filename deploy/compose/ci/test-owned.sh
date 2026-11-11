@@ -134,6 +134,25 @@ volumes:
   endora-owned-fx-data:
     name: endora-owned-fx-data
 EOF
+# The same bundle with the volume declared external: a volume made by someone else, which
+# `down -v` must leave alone (a volume Compose declares itself is its to remove).
+cat > "$fx/compose.foreign.yaml" <<EOF
+name: endora
+services:
+  a:
+    image: alpine:3.21
+    container_name: endora-owned-fx-a
+    command: sleep 600
+    volumes: ["endora-owned-fx-data:/d", "/anon"]
+    networks: [fixed]
+networks:
+  fixed:
+    name: endora-owned-fx-net
+volumes:
+  endora-owned-fx-data:
+    name: endora-owned-fx-data
+    external: true
+EOF
 cat > "$fx/compose.fail.yaml" <<EOF
 services:
   b:
@@ -274,8 +293,8 @@ docker run --rm -v endora-owned-fx-data:/d alpine:3.21 sh -c "printf %s $token >
 (
   . "$here/owned.sh"
   project=$(unique_project)
-  compose() { docker compose -p "$project" -f "$fx/compose.yaml" "$@"; }
-  compose up -d --wait >/dev/null 2>&1 || exit 2     # Compose reuses the volume of that name
+  compose() { docker compose -p "$project" -f "$fx/compose.foreign.yaml" "$@"; }
+  compose up -d --wait >/dev/null 2>&1 || exit 2     # Compose uses the volume of that name, made above, and does not own it
   teardown
 )
 expect "teardown of a run that reused another's named volume succeeds" $?
