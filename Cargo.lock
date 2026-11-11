@@ -862,7 +862,7 @@ dependencies = [
 name = "endora-bridge"
 version = "0.12.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "cucumber",
  "endora-kernel",
  "endora-persistence",
@@ -967,7 +967,7 @@ dependencies = [
 name = "endora-persistence"
 version = "0.12.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "chacha20poly1305",
  "endora-kernel",
  "rusqlite",
@@ -1062,7 +1062,7 @@ dependencies = [
 name = "endora-worker"
 version = "0.12.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "cucumber",
  "endora-bridge",
  "endora-kernel",

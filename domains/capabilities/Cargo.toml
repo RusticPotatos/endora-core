@@ -17,7 +17,7 @@ serde_json = "1.0.150"
 # Spotify's sign-in without a client secret (PKCE): SHA-256 of the verifier, URL-safe base64.
 # Already in the workspace for the handheld.
 sha2 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 tungstenite = { version = "0.30.0", default-features = false, features = ["handshake", "rustls-tls-native-roots"] }
 
 [lints]

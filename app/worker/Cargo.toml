@@ -22,7 +22,7 @@ serde_json = "1.0.150"
 ureq = { version = "3.4", features = ["json", "socks-proxy"] }
 # The wing's bundles (ADR 0115) travel inside the contracts' JSON as base64: the same crate
 # the capabilities context already uses for them.
-base64 = "0.22"
+base64 = "0.23"
 
 [dev-dependencies]
 # The briefing the worker reads its task from is written by the team engine: a test reads a

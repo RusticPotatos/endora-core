@@ -15,7 +15,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # sealed text. All three were already in the lock file at these versions (the handheld's
 # vault uses the same cipher), so this adds no new crate to the build — only edges.
 chacha20poly1305 = "0.10"
-base64 = "0.22"
+base64 = "0.23"
 zeroize = "1"
 # Only for the nightly's loop (`runtime`): timers and a blocking thread, never the network. The
 # apps that run the loop turn it on; everything else in the workspace stays free of it.
