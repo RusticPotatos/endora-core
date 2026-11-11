@@ -51,7 +51,7 @@ jobs:
       - name: Nothing local reaches Core's image (the check's own test, then the build context)
         run: sh scripts/check-image-privacy.sh --self-test && sh scripts/check-image-privacy.sh context .
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Build Core's image from this commit
         uses: docker/build-push-action@v6
