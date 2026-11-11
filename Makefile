@@ -504,7 +504,7 @@ backup: ## Snapshot the running node's database (settings, keys, memory) into it
 	# ignores `backup` as an argument and would start a second server inside the container.
 	@$(COMPOSE) exec -T node grep -qa 'usage: endora-node backup' /usr/local/bin/endora-node \
 		|| { echo "The running node predates 'endora-node backup'. Deploy this version first: make deploy"; exit 1; }
-	$(COMPOSE) exec -T node endora-node backup /srv/backups/endora-$$(date +%Y%m%d-%H%M%S).db
+	$(COMPOSE) exec -T node endora-node backup /data/backups/endora-$$(date +%Y%m%d-%H%M%S).db
 
 .PHONY: data-dir-test
 data-dir-test: ## Test the data-dir guard and migration against a fake docker (no daemon needed)

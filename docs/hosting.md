@@ -72,10 +72,10 @@ endora-node backup /safe/place/snapshot.db   # the binary, with ENDORA_DB set
 ```
 
 It writes a consistent, integrity-checked copy that is readable only by its owner, and
-refuses to overwrite an earlier one. In the container it lands in `/srv/backups/`, so a
+refuses to overwrite an earlier one. In the container it lands in `/data/backups/`, so a
 backup job that covers the data folder picks it up; old snapshots are not pruned, which is
 that job's business. Run it on a schedule just before the backup runs (on a NAS, a task
-that calls `docker exec endora-node endora-node backup /srv/backups/<name>.db`). Copying
+that calls `docker exec endora-node endora-node backup /data/backups/<name>.db`). Copying
 the file by hand is only safe with the node stopped.
 
 **Keep the data where a backup tool can reach it.** In the container the data is a Docker

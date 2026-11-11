@@ -112,7 +112,7 @@ scratch file and checked before it is kept (above). You can run the same proof o
 inside the container so it sees the right database, without starting a server:
 
 ```sh
-docker compose exec node endora-node verify-backup /srv/backups/daily-YYYY-MM-DD.db
+docker compose exec node endora-node verify-backup /data/backups/daily-YYYY-MM-DD.db
 ```
 
 It restores the copy into a `.scratch` folder beside it, so the folder must be writable. It exits 0 when the copy restores and non-zero, with the reason, when it does not. The proof

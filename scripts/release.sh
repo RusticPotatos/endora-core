@@ -35,8 +35,8 @@ L=$ROOT/.local/release-$H; mkdir -p $L
 docker --context nas tag endora-node:latest endora-node:before-$H || stop "the NAS rollback tag failed"
 echo tagged
 TS=$(date -u +%Y%m%dT%H%M%SZ)
-NODE_DB=/srv/backups/before-$H-node-$TS.db
-HQ_DB_COPY=/srv/backups/before-$H-hq-$TS.db
+NODE_DB=/data/backups/before-$H-node-$TS.db
+HQ_DB_COPY=/data/backups/before-$H-hq-$TS.db
 docker --context nas exec endora-node endora-node backup $NODE_DB >$L/backup-node.log 2>&1 \
   || { head -3 $L/backup-node.log; stop "the node's backup failed"; }
 docker --context nas exec endora-node test -s $NODE_DB || stop "the node's backup is missing or empty"
