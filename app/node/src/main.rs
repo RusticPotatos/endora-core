@@ -1,0 +1,288 @@
+//! Endora node binary.
+//!
+//! The node is Endora's authoritative backend runtime — the "brain". It serves
+//! the versioned HTTP/JSON protocol that thin clients speak. This build exposes
+//! the first vertical slice (Direction & Targets); the policy boundary, the model
+//! adapter, and the rest of the learning loop arrive in later slices (see
+//! `docs/roadmap.md`).
+
+#![forbid(unsafe_code)]
+
+mod api;
+mod auth;
+mod backup;
+mod homelab_setup;
+mod mcp_catalog;
+mod retired;
+mod secrets;
+mod setup;
+mod signin;
+mod terminal_setup;
+mod tls;
+mod totp;
+
+use std::sync::Arc;
+
+use api::AppState;
+use axum::serve::ListenerExt as _;
+use endora_infrastructure::{RandomIdSource, SystemClock};
+
+/// How long the relay's count of model requests is kept: 90 days, in milliseconds.
+const CENSUS_KEPT_MS: i64 = 90 * 24 * 60 * 60 * 1000;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::args().skip(1).collect::<Vec<_>>() == ["homelab-setup"] {
+        return homelab_setup::run();
+    }
+    if std::env::args().skip(1).collect::<Vec<_>>() == ["terminal-setup"] {
+        return terminal_setup::run();
+    }
+    // Local-first defaults; all overridable by environment.
+    let db_path = std::env::var("ENDORA_DB").unwrap_or_else(|_| "endora.db".to_owned());
+    // `endora-node backup <file>`: a consistent copy of the database, then exit. Handled
+    // before anything starts, so it never opens a port or runs a migration against the
+    // live database.
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(done) = backup::dispatch(&args, &db_path) {
+        return done;
+    }
+    // `endora-node secrets rekey | forget`: looking after the secrets key (ADR 0125), then exit.
+    if let Some(done) = secrets::dispatch(&args, &db_path) {
+        return done;
+    }
+    // `endora-core setup` (`endora-node setup`): make the owner on first run, then exit.
+    if let Some(done) = setup::dispatch(&args, &db_path) {
+        return done;
+    }
+    let addr = std::env::var("ENDORA_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
+    // Credentials are sealed at rest under the key in ENDORA_SECRETS_KEY_FILE (ADR 0125),
+    // made beside the database on the first start; a database whose key is missing stops
+    // the node here rather than starting with a new key that opens none of it.
+    let store = Arc::new(secrets::open_store(&db_path)?);
+    // The relay's count of model requests (ADR 0102, amended 2026-11-04) is kept for 90 days,
+    // let go of at each start: best effort, never a reason not to start.
+    let ninety_days_ago = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        - CENSUS_KEPT_MS;
+    if let Err(e) = store.prune_relay_requests(ninety_days_ago) {
+        eprintln!("endora: could not let go of the old relay census: {e}");
+    }
+    // A zone name that is not one stops the node rather than quietly becoming UTC.
+    let time_zone = match endora_infrastructure::TimeZone::named_or_fixed(
+        &std::env::var("ENDORA_TIME_ZONE").unwrap_or_default(),
+        std::env::var("ENDORA_UTC_OFFSET_MINUTES")
+            .ok()
+            .and_then(|minutes| minutes.trim().parse::<i64>().ok())
+            .filter(|minutes| minutes.abs() <= 14 * 60)
+            .unwrap_or(0),
+    ) {
+        Ok(zone) => zone,
+        Err(error) => {
+            eprintln!("ENDORA_TIME_ZONE: {error}");
+            std::process::exit(2);
+        }
+    };
+    // Local time, not UTC, wherever the node says what time it is.
+    SystemClock::use_time_zone(time_zone);
+    // The brain's pages, and the nightly copies of them, are forgotten once (ADR 0136): the owner
+    // chose to delete them after taking a copy. Only a folder that is the brain's is touched.
+    let brain_dir = std::env::var("ENDORA_BRAIN").unwrap_or_else(|_| {
+        std::path::Path::new(&db_path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join("brain")
+            .to_string_lossy()
+            .into_owned()
+    });
+    match retired::forget_the_brain(std::path::Path::new(&brain_dir)) {
+        Ok(0) => {}
+        Ok(gone) => println!("brain: forgot its pages and their history ({gone} entries)"),
+        Err(e) => eprintln!("brain: could not forget all of {brain_dir}: {e}"),
+    }
+    let backups = std::path::Path::new(&db_path)
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new(""))
+        .join("backups");
+    match retired::forget_the_brains_copies(&backups) {
+        Ok(0) => {}
+        Ok(gone) => println!("brain: removed {gone} nightly cop(ies) of it from backups"),
+        Err(e) => eprintln!("brain: could not remove its nightly copies: {e}"),
+    }
+    let state = AppState::new(store, Arc::new(RandomIdSource), Arc::new(SystemClock))
+        .with_time_zone(time_zone)
+        .with_lab_from_env();
+    // Endora HQ (ADR 0102), when this node has one: signing with a token given here (32+
+    // characters, or HQ is left off rather than reachable with a guessable one), or with the one
+    // HQ made for itself in the volume the two share.
+    let state = match (
+        std::env::var("ENDORA_HQ_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty()),
+        std::env::var("ENDORA_HQ_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty()),
+        std::env::var("ENDORA_HQ_TOKEN_FILE")
+            .ok()
+            .filter(|f| !f.trim().is_empty()),
+    ) {
+        (Some(url), Some(token), _) if token.len() >= 32 => {
+            println!("hq: the team service at {url}");
+            state.with_hq(endora_infrastructure::HqClient::new(&url, &token))
+        }
+        (Some(url), None, Some(file)) => {
+            println!("hq: the team service at {url}, signing with the token HQ keeps");
+            state.with_hq(endora_infrastructure::HqClient::with_token_file(
+                &url,
+                std::path::Path::new(&file),
+            ))
+        }
+        (Some(_), _, _) => {
+            eprintln!(
+                "hq: no usable token for HQ (ENDORA_HQ_TOKEN of 32+ characters, or \
+                 ENDORA_HQ_TOKEN_FILE); HQ is off"
+            );
+            state
+        }
+        _ => state,
+    };
+    // endora-sound (ADR 0104), when this node has one: the same two ways to sign as HQ.
+    let state = match (
+        std::env::var("ENDORA_SOUND_URL")
+            .ok()
+            .filter(|u| !u.trim().is_empty()),
+        std::env::var("ENDORA_SOUND_TOKEN")
+            .ok()
+            .map(|t| t.trim().to_owned())
+            .filter(|t| !t.is_empty()),
+        std::env::var("ENDORA_SOUND_TOKEN_FILE")
+            .ok()
+            .filter(|f| !f.trim().is_empty()),
+    ) {
+        (Some(url), Some(token), _) if token.len() >= 32 => {
+            println!("sound: the hub at {url}");
+            state.with_sound(endora_infrastructure::SoundClient::new(&url, &token))
+        }
+        (Some(url), None, Some(file)) => {
+            println!("sound: the hub at {url}, signing with the token the hub keeps");
+            state.with_sound(endora_infrastructure::SoundClient::with_token_file(
+                &url,
+                std::path::Path::new(&file),
+            ))
+        }
+        (Some(_), _, _) => {
+            eprintln!(
+                "sound: no usable token for the hub (ENDORA_SOUND_TOKEN of 32+ characters, or \
+                 ENDORA_SOUND_TOKEN_FILE); sound is off"
+            );
+            state
+        }
+        _ => state,
+    };
+
+    println!("{}", endora_application::platform_identity());
+
+    // The tool servers the team's bridge reaches, kept connected (ADR 0108).
+    api::spawn_tool_server_upkeep(state.clone());
+    // A consistent copy of the database every night, for the house's backup to find.
+    api::spawn_snapshots(state.clone(), std::path::PathBuf::from(&db_path));
+    api::spawn_homelab(state.clone());
+    // Keeps HQ told whether the owner's Mac is free for the team's turns (ADR 0130).
+    api::spawn_mac(state.clone());
+    api::spawn_delivery(state.clone());
+    // Keeps HQ told what is left of Claude's grant, which sizes the day's pool (ADR 0113).
+    api::spawn_credits(state.clone());
+    // The team listener, in plain HTTP: HQ's model relays (ADR 0102, phase 4), the team's
+    // contracts (ADR 0106) and the team gateway (ADR 0110), served nowhere else. Published to
+    // the house's network for the Pi's runner and sandboxes; everything on it needs a token.
+    if let Some(team_addr) = std::env::var("ENDORA_TEAM_ADDR")
+        .ok()
+        .filter(|a| !a.trim().is_empty())
+    {
+        let listener = tokio::net::TcpListener::bind(&team_addr).await?;
+        println!("node's team relay listening on http://{team_addr}");
+        let relay = api::team_relay(state.clone());
+        tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, relay).await {
+                eprintln!("the team relay stopped: {e}");
+            }
+        });
+    }
+
+    let app = api::app(state);
+
+    // Optional self-signed HTTPS so the console is a secure context (browser voice
+    // needs it). No domain/proxy required; one-time cert warning per browser.
+    if std::env::var("ENDORA_TLS").ok().as_deref() == Some("1") {
+        rustls::crypto::ring::default_provider()
+            .install_default()
+            .ok();
+        let dir = std::path::Path::new(&db_path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf();
+        let mut sans = vec!["localhost".to_owned(), "127.0.0.1".to_owned()];
+        if let Ok(extra) = std::env::var("ENDORA_TLS_SAN") {
+            sans.extend(
+                extra
+                    .split(',')
+                    .map(|s| s.trim().to_owned())
+                    .filter(|s| !s.is_empty()),
+            );
+        }
+        let (cert_pem, key_pem) = tls::load_or_generate(&dir, &sans)?;
+        let config = axum_server::tls_rustls::RustlsConfig::from_pem(cert_pem, key_pem).await?;
+        let sockaddr: std::net::SocketAddr = addr.parse()?;
+        println!("node listening on https://{addr}  (self-signed TLS; db: {db_path})");
+        axum_server::bind_rustls(sockaddr, config)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        println!("node listening on http://{addr}  (db: {db_path})");
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        // No Nagle: the sound hub's live frames are 20 ms each and must not wait for company.
+        // (The TLS server above sets this itself.)
+        axum::serve(
+            listener.tap_io(|tcp| {
+                let _ = tcp.set_nodelay(true);
+            }),
+            app,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Endora is HQ (ADR 0136): the node starts what HQ and the house run on, and none of the
+    /// butler's own loops (the daily brief, research, brain folding, the mail reader, the
+    /// agenda). Their routes and data stay until the owner has taken a copy.
+    #[test]
+    fn the_node_starts_hqs_loops_and_none_of_the_butlers() {
+        let source = include_str!("main.rs");
+        let boot = source.split("#[cfg(test)]").next().unwrap_or_default();
+        for butler in [
+            "spawn_heartbeat(",
+            "spawn_research_worker(",
+            "spawn_brain_folding(",
+            "spawn_mail_reader(",
+            "spawn_agenda(",
+        ] {
+            assert!(!boot.contains(butler), "the node still starts {butler}");
+        }
+        for kept in [
+            "spawn_tool_server_upkeep(",
+            "spawn_snapshots(",
+            "spawn_homelab(",
+            "spawn_mac(",
+            "spawn_credits(",
+            "spawn_delivery(",
+        ] {
+            assert!(boot.contains(kept), "the node no longer starts {kept}");
+        }
+    }
+}

@@ -1,0 +1,213 @@
+---
+- name: Start Endora
+  block:
+    - name: Endora directory
+      ansible.builtin.file:
+        path: "{{ endora_root }}"
+        state: directory
+        mode: "0750"
+
+    # force: false, so a checkout with local edits makes this fail rather than lose them.
+    - name: Endora source
+      ansible.builtin.git:
+        repo: "{{ endora_repo }}"
+        dest: "{{ endora_root }}/src"
+        version: "{{ endora_version }}"
+        force: false
+      register: endora_source
+
+    - name: Endora data folder
+      when: endora_data_dir | length > 0
+      block:
+        - name: Check the data folder is an absolute path
+          ansible.builtin.assert:
+            that:
+              - endora_data_dir is match('/')
+            fail_msg: "endora_data_dir must be an absolute path on this host; got '{{ endora_data_dir }}'"
+
+        - name: Look for a database in the data folder
+          ansible.builtin.stat:
+            path: "{{ endora_data_dir }}/endora.db"
+          register: endora_data_db
+
+        - name: Look for the data volume
+          community.docker.docker_volume_info:
+            name: "{{ endora_project_name }}_endora-data"
+          register: endora_data_volume
+
+        - name: Refuse to start a brand-new node beside the old one's data
+          ansible.builtin.assert:
+            that:
+              - (endora_data_db.stat.exists and endora_data_db.stat.size > 0) or not endora_data_volume.exists
+            fail_msg: >-
+              {{ endora_data_dir }} holds no database, but the volume
+              {{ endora_project_name }}_endora-data does: starting now would be a brand-new node
+              with no settings. Copy the volume there first (Endora's `make migrate-data`), or
+              leave endora_data_dir empty.
+
+    # Built elsewhere and copied here by Endora's `make deploy`: a build on the NAS can run
+    # it out of memory.
+    - name: Look for the Endora image
+      community.docker.docker_image_info:
+        name: endora-node:latest
+      register: endora_image
+
+    - name: Refuse to build Endora here
+      ansible.builtin.assert:
+        that:
+          - endora_image.images | length > 0
+        fail_msg: >-
+          There is no endora-node image on this host. Build it on another machine and copy it
+          here with Endora's `make deploy` (ENDORA_BUILD_CONTEXT in its owner.mk), then run this
+          role again. It is never built on the NAS.
+
+    # Endora ADR 0128: without its LAN values the door's network would be made on the wrong
+    # interface, or not at all; and it is a door into the sound hub, which must run too.
+    - name: Check the AirPlay 2 door's settings
+      ansible.builtin.assert:
+        that:
+          - endora_sound_airplay2_missing | length == 0
+        fail_msg: >-
+          endora_sound_airplay2 needs {{ endora_sound_airplay2_missing | join(', ') }} set
+          (this role's README, "The AirPlay 2 door").
+      when: endora_sound_airplay2 | bool
+
+    - name: Look for the sound images
+      community.docker.docker_image_info:
+        name: "{{ item }}:latest"
+      loop: "{{ (['endora-sound'] if endora_sound | bool else []) + (['endora-senders'] if endora_sound_senders | bool else []) + (['endora-airplay2'] if endora_sound_airplay2 | bool else []) }}"
+      register: endora_sound_images
+
+    - name: Refuse to build the sound images here
+      ansible.builtin.assert:
+        that:
+          - item.images | length > 0
+        fail_msg: >-
+          There is no {{ item.item }} image on this host. Build it on another machine and copy it
+          here with Endora's `make deploy` (the matching profile, or SOUND_AIRPLAY2 = 1, in its
+          owner.mk), then run this role again.
+      loop: "{{ endora_sound_images.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    # Only the node reads it, but it holds what Endora knows about you: not world-readable.
+    - name: Endora's brain folder
+      ansible.builtin.file:
+        path: "{{ endora_brain_dir }}"
+        state: directory
+        mode: "0700"
+      when: endora_brain_dir | length > 0
+
+    - name: The owner's own values
+      ansible.builtin.include_tasks: owner_values.yml
+
+    - name: Endora settings
+      ansible.builtin.template:
+        src: endora.env.j2
+        dest: "{{ endora_root }}/endora.env"
+        mode: "0640"
+
+    - name: Endora host settings
+      ansible.builtin.template:
+        src: docker-compose.override.yml.j2
+        dest: "{{ endora_root }}/docker-compose.override.yml"
+        mode: "0640"
+
+    # Never built and never pulled: the image `make deploy` copied here, or nothing.
+    - name: Endora
+      community.docker.docker_compose_v2:
+        project_src: "{{ endora_root }}/src"
+        project_name: "{{ endora_project_name }}"
+        files:
+          - "{{ endora_root }}/src/docker-compose.yml"
+          - "{{ endora_root }}/docker-compose.override.yml"
+        env_files:
+          - "{{ endora_root }}/endora.env"
+        profiles: "{{ endora_profiles }}"
+        build: never
+        pull: never
+        state: present
+  when: endora_enabled is true
+
+# Endora ADR 0134: a unit that drains HQ as this host shuts down, while Docker is still up. Off
+# by default. Its own switch, not the role's: a node `make deploy` runs, with no checkout here,
+# drains the same way, with the copy of the deploy's script the role brings.
+- name: Drain HQ before this host shuts down
+  when: endora_drain_on_shutdown | bool
+  become: true
+  block:
+    # In a folder every host has: a dry run makes no folder, and a copy into one it did not
+    # make would fail.
+    - name: The drain's script
+      ansible.builtin.copy:
+        src: hq-drain.sh
+        dest: /usr/local/sbin/endora-hq-drain
+        mode: "0755"
+
+    - name: The drain's unit
+      ansible.builtin.template:
+        src: endora-drain.service.j2
+        dest: /etc/systemd/system/endora-drain.service
+        mode: "0644"
+      register: endora_drain_unit_file
+
+    # Started, not run: the unit does nothing until its host shuts down and it is stopped. A dry
+    # run that would write the unit has none to enable yet; the real run enables it.
+    - name: Enable the drain
+      ansible.builtin.systemd:
+        name: endora-drain.service
+        daemon_reload: true
+        enabled: true
+        state: started
+      when: not (ansible_check_mode and endora_drain_unit_file is changed)
+
+# Turned off: the unit is disabled and its files taken away. It is never stopped here: stopping
+# it runs its ExecStop, which would drain HQ for no restart at all.
+- name: No drain before this host shuts down
+  when: not (endora_drain_on_shutdown | bool)
+  become: true
+  block:
+    - name: Look for the drain's unit
+      ansible.builtin.stat:
+        path: /etc/systemd/system/endora-drain.service
+      register: endora_drain_unit
+
+    - name: Disable the drain
+      ansible.builtin.systemd:
+        name: endora-drain.service
+        enabled: false
+      when: endora_drain_unit.stat.exists
+
+    - name: Take the drain's unit away
+      ansible.builtin.file:
+        path: /etc/systemd/system/endora-drain.service
+        state: absent
+      when: endora_drain_unit.stat.exists
+
+    - name: Forget it
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: endora_drain_unit.stat.exists
+
+    - name: Take the drain's script away
+      ansible.builtin.file:
+        path: /usr/local/sbin/endora-hq-drain
+        state: absent
+
+# Only a node this role started is stopped: with the role disabled, an Endora deployed some
+# other way (its own `make deploy`) is left running. The data volume is never removed.
+- name: Stop Endora
+  when: endora_enabled is false
+  block:
+    - name: Look for a checkout this role made
+      ansible.builtin.stat:
+        path: "{{ endora_root }}/src/docker-compose.yml"
+      register: endora_checkout
+
+    - name: Stop Endora
+      community.docker.docker_compose_v2:
+        project_src: "{{ endora_root }}/src"
+        project_name: "{{ endora_project_name }}"
+        state: absent
+        remove_volumes: false
+      when: endora_checkout.stat.exists

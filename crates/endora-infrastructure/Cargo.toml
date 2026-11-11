@@ -1,0 +1,36 @@
+[package]
+name = "endora-infrastructure"
+description = "Endora infrastructure layer: adapters implementing application ports, including SQLite-backed persistence (ADR 0050)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+endora-application = { path = "../endora-application" }
+endora-bridge = { path = "../../domains/capabilities" }
+rusqlite = { version = "0.40", features = ["bundled"] }
+endora-persistence = { path = "../../shared/persistence" }
+uuid = { version = "1.24.1", features = ["v4"] }
+ureq = { version = "3.4", features = ["json", "socks-proxy"] }
+serde_json = "1.0.150"
+chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+chrono = { version = "0.4", default-features = false }
+# Session tokens are kept as SHA-256 digests (ADR 0125). Already in the workspace at this
+# version (the capabilities context's PKCE uses it), so no new crate.
+sha2 = "0.10"
+
+[dev-dependencies]
+# Repositories that moved to their bounded contexts (ADR 0050); the SqliteStore
+# migration/export/config tests exercise them through the context stores over
+# the same shared connection.
+endora-bridge = { path = "../../domains/capabilities" }
+endora-platform = { path = "../../domains/platform" }
+# HQ's members claim the pool by their brain's price class (ADR 0113, amended); the relay's
+# tests hold that table to the prices here, so changing one fails a test. Tests only.
+endora-team = { path = "../../domains/team" }
+
+[lints]
+workspace = true

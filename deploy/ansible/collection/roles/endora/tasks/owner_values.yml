@@ -1,0 +1,21 @@
+---
+# The owner's own values reach the node's privacy scan under one name, ENDORA_OWNER_VALUES. The
+# previous role variable is still read (defaults/main.yml), so an inventory written before the
+# rename does not quietly deploy a node that scans for shapes alone. Names only here, never a value.
+- name: The owner's values are not under two names holding different lists
+  ansible.builtin.assert:
+    that:
+      - not (endora_owner_values_conflict | bool)
+    quiet: true
+    fail_msg: >-
+      ENDORA_OWNER_VALUES and the previous role variable (the one it replaced) hold different
+      values, so it is not knowable which list is meant. Keep only ENDORA_OWNER_VALUES.
+
+- name: The owner's values came from the previous variable name
+  ansible.builtin.debug:
+    msg: >-
+      The owner's values were read from the previous role variable name; the role uses them.
+      Rename it to ENDORA_OWNER_VALUES in the inventory (and its vault key).
+  when:
+    - (ENDORA_OWNER_VALUES | string | trim | length) == 0
+    - (endora_owner_values_effective | string | trim | length) > 0

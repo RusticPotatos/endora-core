@@ -1,0 +1,46 @@
+[package]
+name = "endora-worker"
+description = "Endora HQ's worker: takes one turn of a team member, in its own container, through the team protocol and the node's model relay."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "endora-worker"
+path = "src/main.rs"
+
+[dependencies]
+# How the home lab is built (ADR 0112), the one text the house log carries too. The shared
+# kernel, which depends on nothing.
+endora-kernel = { path = "../../shared/kernel" }
+# One versioned route contract for the worker, its Claude bridge and the runner.
+endora-protocol = { path = "../../shared/protocol" }
+serde_json = "1.0.150"
+ureq = { version = "3.4", features = ["json", "socks-proxy"] }
+# The wing's bundles (ADR 0115) travel inside the contracts' JSON as base64: the same crate
+# the capabilities context already uses for them.
+base64 = "0.22"
+
+[dev-dependencies]
+# The briefing the worker reads its task from is written by the team engine: a test reads a
+# real one, so a change to its shape fails there instead of quietly losing a turn's last word.
+endora-team = { path = "../../domains/team" }
+# The node's real contracts, so a test measures a turn's first call as the model reads it
+# (ADR 0142, amended 2026-10-30: context sized to the turn).
+endora-bridge = { path = "../../domains/capabilities" }
+
+# The owner's scenarios for the worker (docs/testing.md): `features/*.feature`, run by
+# `tests/scenarios.rs` against the real binary. The same cucumber the team context's scenarios
+# use (tests only, never shipped), and the executor it runs on.
+cucumber = "0.21"
+futures = "0.3"
+
+[[test]]
+name = "scenarios"
+harness = false
+
+[lints]
+workspace = true

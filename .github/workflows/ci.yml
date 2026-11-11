@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # Run by hand on any branch (gh workflow run CI --ref <branch>), to prove a fix before it lands.
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt · clippy · test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      # The release rust-toolchain.toml pins (the one the images are built with), not floating
+      # stable: a new Rust's lints are taken on deliberately, never by surprise.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal --component rustfmt,clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace --all-features
+
+      - name: Private observer and job agent contracts
+        run: |
+          python3 scripts/test-homelab-proxy.py
+
+      - name: The AirPlay 2 door's settings and pipe
+        run: sh scripts/test-sound-airplay2.sh
+
+      - name: The Mac's brain helper and its install
+        run: sh scripts/test-mac-brain.sh
+
+      - name: The drain a deploy runs before it restarts HQ
+        run: sh scripts/test-hq-drain.sh
+
+      - name: Handheld terminal checks
+        working-directory: clients/terminal
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py' -v
+          python3 scripts/check-private.py
+          cargo build --locked -p endora-terminal
+          python3 scripts/check-pty.py ../../target/debug/endora-terminal
+          python3 scripts/check-pty.py ../../target/debug/endora-terminal linux
+
+      - name: Console screens render
+        run: node scripts/check-console.mjs
+
+      - name: Nothing personal in the tree
+        run: node scripts/check-nothing-personal.mjs
+
+      - name: The collection declares every compose variable
+        run: sh scripts/check-collection-parity.sh && sh scripts/check-collection-parity.sh --self-test
+
+      - name: This repository still holds what it was made from (docs/core-origin.md)
+        run: sh scripts/check-core-origin.sh && sh scripts/check-core-origin.sh --self-test
+
+      - name: Core's image is never published by a push (the workflow's conditions, tested)
+        run: python3 scripts/test-image-workflow.py
+
+      - name: Whitespace / conflict-marker check
+        run: git diff --check
+
+  # Endora's Ansible roles (endora.homelab): their tests, syntax and rendering.
+  ansible-collection:
+    name: ansible collection · endora.homelab
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ansible and the Docker collection
+        # community.docker pinned to a release that supports ansible-core 2.16 (5.x requires 2.17
+        # or later and only warns here), so the check runs what it says it runs.
+        run: |
+          python3 -m pip install ansible-core==2.16.3
+          ansible-galaxy collection install 'community.docker:==4.8.9'
+
+      - name: Every role's checks
+        run: sh deploy/ansible/collection/check.sh
+
+  # The handheld's release bundle: built for the device (ARM64, static musl), never on it.
+  terminal-arm64:
+    name: handheld terminal · ARM64 bundle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/terminal
+    env:
+      # Names the toolchain outright, so rustup does not read the repository's rust-toolchain.toml.
+      # That file also asks for rustfmt and clippy; this job installs a minimal toolchain, and
+      # the first cargo run inside the checkout then downloaded the two components mid-step.
+      # On the runner that sometimes failed with "detected conflict: bin/cargo-fmt" (runs
+      # 42563088520 and 42569130172), before any Endora code ran. Nothing here needs either.
+      RUSTUP_TOOLCHAIN: 1.87.0
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Toolchain with the device target
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --target aarch64-unknown-linux-musl
+
+      - name: Cross-compiler
+        run: |
+          python3 -m pip install ziglang==0.13.0
+          cargo install cargo-zigbuild --version 0.20.1 --locked
+
+      - name: Build and package
+        run: |
+          sh scripts/build-arm64.sh
+          sh scripts/package.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: endora-terminal-arm64
+          path: clients/terminal/dist/

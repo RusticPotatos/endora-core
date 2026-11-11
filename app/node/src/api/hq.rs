@@ -1,0 +1,1766 @@
+//! Endora HQ through the node (ADR 0102). The console talks to the node only; the node signs
+//! every request to HQ, and writes every action of the owner's into Endora's own audit log,
+//! which is the record. HQ's own history is for display.
+
+use super::*;
+use endora_infrastructure::HqError;
+
+/// The team's world (ADR 0122).
+mod world;
+pub(super) use world::*;
+
+pub(super) fn client(
+    state: &AppState,
+) -> Result<Arc<endora_infrastructure::HqClient>, (StatusCode, Json<serde_json::Value>)> {
+    state.hq.clone().ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({ "configured": false, "error": "HQ is not set up on this node" })),
+    ))
+}
+
+pub(super) fn failed(error: HqError) -> (StatusCode, Json<serde_json::Value>) {
+    let status = match &error {
+        HqError::Unreachable(_) => StatusCode::BAD_GATEWAY,
+        HqError::Answered { status, .. } => {
+            StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY)
+        }
+    };
+    (status, Json(json!({ "error": error.to_string() })))
+}
+
+type Answer = Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)>;
+
+async fn ask(state: &AppState, path: String, body: Option<serde_json::Value>) -> Answer {
+    let hq = client(state)?;
+    let answer = tokio::task::spawn_blocking(move || match body {
+        Some(body) => hq.post(&path, &body),
+        None => hq.get(&path),
+    })
+    .await
+    .map_err(|_| failed(HqError::Unreachable("a worker thread failed".to_owned())))?;
+    answer.map(Json).map_err(failed)
+}
+
+/// Writes an owner's action in HQ, or a team member's use of a contract, to Endora's audit
+/// log, and to Activity.
+pub(super) fn record(state: &AppState, what: &str) {
+    let now = state.clock.now();
+    if let Ok(entry) = endora_application::AuditRecord::new(
+        endora_application::AuditId::new(state.ids.new_id()),
+        now,
+        &format!("HQ: {what}"),
+    ) {
+        let _ = endora_application::AuditLog::append(state.audit.as_ref(), &entry);
+    }
+    let _ =
+        endora_application::EventLog::record(state.events.as_ref(), now, &format!("HQ: {what}"));
+    let _ = state.changes.send(());
+}
+
+/// Everything the office shows now, and the owner's switches for the team's contracts.
+pub(super) async fn hq_snapshot(State(state): State<AppState>) -> Answer {
+    let mut answer = ask(&state, "/v1/snapshot".to_owned(), None).await?;
+    answer.0["contracts"] = super::contracts::switches_said(&state);
+    // Each approval's card shows what will run, from what the node stored (ADR 0108).
+    let looked = state.clone();
+    let mut desk = answer.0["desk"].take();
+    let desk = tokio::task::spawn_blocking(move || {
+        for item in desk.as_array_mut().into_iter().flatten() {
+            if item["kind"] != "approval" {
+                continue;
+            }
+            if let Some(approval) = item["id"]
+                .as_i64()
+                .and_then(|id| super::bridge::approval_at(&looked, id))
+                .filter(|a| item["text"] == super::bridge::desk_text(a).as_str())
+            {
+                item["approval"] = super::bridge::shown(&approval);
+            }
+        }
+        desk
+    })
+    .await
+    .unwrap_or_default();
+    answer.0["desk"] = desk;
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqAfter {
+    #[serde(default)]
+    after: i64,
+    /// With `before`, the past instead: the events just below this id.
+    #[serde(default)]
+    before: Option<i64>,
+    #[serde(default)]
+    limit: Option<u32>,
+}
+
+/// The events after an id: the office's stream, resumed from the last id it saw. With
+/// `before` (and a `limit`), the events just below that id instead: the activity log going
+/// further back. Numbers only reach HQ, rebuilt here, never the caller's own text.
+pub(super) async fn hq_events(State(state): State<AppState>, Query(q): Query<HqAfter>) -> Answer {
+    let Some(before) = q.before else {
+        return ask(&state, format!("/v1/events?after={}", q.after), None).await;
+    };
+    let limit = q.limit.unwrap_or(50).min(200);
+    ask(
+        &state,
+        format!("/v1/events?before={before}&limit={limit}"),
+        None,
+    )
+    .await
+}
+
+/// Replay: one turn read back in full, for the owner's screen. Read only, so nothing is
+/// recorded; a checking credential never reaches it (`crate::auth`), as it carries what the
+/// member was told and Confidential excerpts.
+pub(super) async fn hq_run_replay(State(state): State<AppState>, Path(id): Path<i64>) -> Answer {
+    let mut answer = ask(&state, format!("/v1/runs/{id}/replay"), None).await?;
+    scrubbed(&mut answer.0);
+    Ok(answer)
+}
+
+/// Every word of a replay scrubbed of secrets on its way to the owner's screen, with the
+/// scrubber the receipts and the kept conversations already pass through: what a turn was
+/// given and said may hold a key that reached HQ before the scrubber knew its shape.
+fn scrubbed(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::String(text) => *text = endora_bridge::scrub_secrets(text),
+        serde_json::Value::Array(all) => all.iter_mut().for_each(scrubbed),
+        serde_json::Value::Object(all) => all.values_mut().for_each(scrubbed),
+        _ => {}
+    }
+}
+
+/// Owner-only retained questions; rebuild the bounded cursor route from numbers.
+pub(super) async fn hq_task_consultations(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(q): Query<HqAfter>,
+) -> Answer {
+    ask(
+        &state,
+        format!("/v1/tasks/{id}/consultations?after={}", q.after.max(0)),
+        None,
+    )
+    .await
+}
+
+/// Replay: a task's turns read back, oldest first.
+pub(super) async fn hq_task_replay(State(state): State<AppState>, Path(id): Path<i64>) -> Answer {
+    let mut answer = ask(&state, format!("/v1/tasks/{id}/replay"), None).await?;
+    scrubbed(&mut answer.0);
+    Ok(answer)
+}
+
+/// One item's Live Work map (the owner's decision M3): HQ's read, passed on as it is.
+pub(super) async fn hq_task_live(State(state): State<AppState>, Path(id): Path<i64>) -> Answer {
+    ask(&state, format!("/v1/tasks/{id}/live"), None).await
+}
+
+/// The HQ agents map (the owner's decision M5): HQ's read, passed on as it is.
+pub(super) async fn hq_team_map(State(state): State<AppState>) -> Answer {
+    ask(&state, "/v1/team-map".to_owned(), None).await
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqGoal {
+    title: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// The owner sets a goal.
+pub(super) async fn hq_goal(State(state): State<AppState>, Json(req): Json<HqGoal>) -> Answer {
+    let answer = ask(
+        &state,
+        "/v1/goals".to_owned(),
+        Some(json!({ "title": req.title, "reason": req.reason })),
+    )
+    .await?;
+    record(&state, &format!("you set a goal: {}", req.title.trim()));
+    Ok(answer)
+}
+
+/// The owner hands the team a piece of work.
+pub(super) async fn hq_task(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Answer {
+    let title = req["title"].as_str().unwrap_or_default().trim().to_owned();
+    let answer = ask(&state, "/v1/tasks".to_owned(), Some(req)).await?;
+    record(&state, &format!("you handed the team: {title}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqDecision {
+    pub(super) decision: String,
+    /// For a member's question: the owner's answer, which HQ writes in the task's thread.
+    #[serde(default)]
+    pub(super) answer: String,
+}
+
+/// The owner decides an item on their desk. An approval of the team's (ADR 0108) is decided
+/// here, on the node, which runs exactly what it stored when the owner says yes.
+pub(super) async fn hq_decide(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqDecision>,
+) -> Answer {
+    decide_on_desk(&state, id, &req.decision, &req.answer).await
+}
+
+/// Decides desk item `id`, as [`hq_decide`] does: shared with the Console contract's answer
+/// (ADR 0145), which binds and records it first.
+pub(super) async fn decide_on_desk(
+    state: &AppState,
+    id: i64,
+    decision: &str,
+    answer: &str,
+) -> Answer {
+    let state = state.clone();
+    let req = HqDecision {
+        decision: decision.to_owned(),
+        answer: answer.to_owned(),
+    };
+    client(&state)?;
+    let looked = state.clone();
+    let approval = tokio::task::spawn_blocking(move || super::bridge::approval_at(&looked, id))
+        .await
+        .unwrap_or(None);
+    if let Some(approval) = approval {
+        let decided = state.clone();
+        let decision = req.decision.clone();
+        return tokio::task::spawn_blocking(move || {
+            super::bridge::decide(&decided, &approval, &decision)
+        })
+        .await
+        .map_err(|_| failed(HqError::Unreachable("a worker thread failed".to_owned())))?
+        .map(Json)
+        .map_err(|(status, why)| (status, Json(json!({ "error": why }))));
+    }
+    let mut answer = ask(
+        &state,
+        format!("/v1/desk/{id}"),
+        Some(json!({ "decision": req.decision, "answer": req.answer })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!("you decided desk item {id}: {}", req.decision),
+    );
+    // A push the owner approved (ADR 0115): the node pushes the branch HQ named, now, and
+    // tells HQ what came of it.
+    if answer.0["push"].is_object() {
+        let pushing = state.clone();
+        let push = answer.0["push"].clone();
+        let came =
+            tokio::task::spawn_blocking(move || super::contracts::push_approved(&pushing, &push))
+                .await
+                .unwrap_or_else(|_| Err("the push failed".to_owned()));
+        answer.0["pushed"] = json!(came.is_ok());
+        answer.0["said"] = json!(came.unwrap_or_else(|why| why));
+    }
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqHire {
+    name: String,
+    /// Its model (ADR 0142); the house's own if not said.
+    #[serde(default)]
+    brain: Option<String>,
+}
+
+/// The owner hires a member (ADR 0115, 0142): HQ refuses a model it does not have; the node
+/// records who joined.
+pub(super) async fn hq_hire(State(state): State<AppState>, Json(req): Json<HqHire>) -> Answer {
+    let answer = ask(
+        &state,
+        "/v1/members".to_owned(),
+        Some(json!({
+            "name": req.name, "brain": req.brain
+        })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!(
+            "you hired {} (member {})",
+            req.name.trim(),
+            answer.0["member"]
+        ),
+    );
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqReply {
+    text: String,
+}
+
+/// The owner replies on a task: HQ writes it in the thread and wakes whoever has the task.
+pub(super) async fn hq_reply(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqReply>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/tasks/{id}/post"),
+        Some(json!({ "text": req.text })),
+    )
+    .await?;
+    record(&state, &format!("you replied on task {id}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqLeague {
+    project: i64,
+    brains: Vec<String>,
+}
+
+/// The owner starts the model league: the brains play chess against each other.
+pub(super) async fn hq_start_league(
+    State(state): State<AppState>,
+    Json(req): Json<HqLeague>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        "/v1/league".to_owned(),
+        Some(json!({ "project": req.project, "brains": req.brains })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!(
+            "you started the model league: {} play chess in project {}",
+            req.brains.join(", "),
+            req.project
+        ),
+    );
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqTaskProject {
+    project: i64,
+}
+
+/// The owner puts an open task into an active project, whose lead, tools and money it then
+/// has (ADR 0139).
+pub(super) async fn hq_task_project(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqTaskProject>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/tasks/{id}/project"),
+        Some(json!({ "project": req.project })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!("you moved task {id} into project {}", req.project),
+    );
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqNote {
+    #[serde(default)]
+    note: String,
+}
+
+/// The owner writes a goal's notes for the team, which every briefing under it carries.
+pub(super) async fn hq_goal_note(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqNote>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/goals/{id}/note"),
+        Some(json!({ "note": req.note })),
+    )
+    .await?;
+    record(&state, &format!("you wrote the team's notes for goal {id}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqBrain {
+    brain: String,
+}
+
+/// The owner sets what a member thinks with (ADR 0109): the house's model, or a Claude its
+/// role may use. HQ decides what the role may use; the node records what was set.
+pub(super) async fn hq_set_brain(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqBrain>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/members/{id}/brain"),
+        Some(json!({ "brain": req.brain })),
+    )
+    .await?;
+    // HQ answers with one of its own brains' names, never what was asked.
+    let brain = answer.0["brain"].as_str().unwrap_or("").to_owned();
+    record(
+        &state,
+        &format!("you set member {id} to think with {brain}"),
+    );
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqModel {
+    model: String,
+}
+
+/// The owner sets a member's model (ADR 0142): every turn of its runs on it.
+pub(super) async fn hq_set_model(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqModel>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/members/{id}/model"),
+        Some(json!({ "model": req.model })),
+    )
+    .await?;
+    // HQ answers with one of its own brains' names, never what was asked.
+    let brain = answer.0["model"].as_str().unwrap_or("").to_owned();
+    record(&state, &format!("you set member {id}'s model to {brain}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqRuntime {
+    runtime: String,
+}
+
+/// The owner sets what runs a member's turns (ADR 0117): Endora's worker, or Claude Code for a
+/// developer on Claude. HQ decides who may; the node records what was set.
+pub(super) async fn hq_set_runtime(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqRuntime>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/members/{id}/runtime"),
+        Some(json!({ "runtime": req.runtime })),
+    )
+    .await?;
+    let runtime = answer.0["runtime"].as_str().unwrap_or("").to_owned();
+    record(&state, &format!("you set member {id} to run on {runtime}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqName {
+    name: String,
+}
+
+/// The owner renames a member (the CEO HQ seated as Mara, say). HQ keeps names apart; the node
+/// records the name HQ kept.
+pub(super) async fn hq_rename(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqName>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/members/{id}/name"),
+        Some(json!({ "name": req.name })),
+    )
+    .await?;
+    let name = answer.0["name"].as_str().unwrap_or("").to_owned();
+    record(&state, &format!("you renamed member {id} to {name}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqWhy {
+    #[serde(default)]
+    why: String,
+}
+
+/// The kill switch: every turn stops, and every wake is turned away until the owner resumes.
+/// (When the gateway exists, the switch closes it to the team too.)
+pub(super) async fn hq_stop(State(state): State<AppState>, Json(req): Json<HqWhy>) -> Answer {
+    let answer = ask(
+        &state,
+        "/v1/stop".to_owned(),
+        Some(json!({ "why": req.why })),
+    )
+    .await?;
+    record(&state, "you pulled the kill switch");
+    Ok(answer)
+}
+
+/// The owner lets the team work again.
+pub(super) async fn hq_resume(State(state): State<AppState>) -> Answer {
+    let answer = ask(&state, "/v1/resume".to_owned(), Some(json!({}))).await?;
+    record(&state, "you let the team work again");
+    Ok(answer)
+}
+
+/// The owner makes a routine (ADR 0107): work that comes round again, as a task for one
+/// member.
+pub(super) async fn hq_add_routine(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Answer {
+    let title = req["title"].as_str().unwrap_or_default().trim().to_owned();
+    let answer = ask(&state, "/v1/routines".to_owned(), Some(req)).await?;
+    record(&state, &format!("you made a routine: {title}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqSwitch {
+    enabled: bool,
+}
+
+/// The owner switches a routine on or off.
+pub(super) async fn hq_switch_routine(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqSwitch>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/routines/{id}"),
+        Some(json!({ "enabled": req.enabled })),
+    )
+    .await?;
+    let now = if req.enabled { "on" } else { "off" };
+    record(&state, &format!("you switched routine {id} {now}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqRoutineProject {
+    #[serde(default)]
+    project: Option<i64>,
+}
+
+/// The owner moves a routine into a project, or out of one (D2).
+pub(super) async fn hq_routine_project(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqRoutineProject>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/routines/{id}/project"),
+        Some(json!({ "project": req.project })),
+    )
+    .await?;
+    record(
+        &state,
+        &match req.project {
+            Some(project) => format!("you moved routine {id} into project {project}"),
+            None => format!("you took routine {id} out of its project"),
+        },
+    );
+    Ok(answer)
+}
+
+/// The owner runs a routine now.
+pub(super) async fn hq_fire_routine(State(state): State<AppState>, Path(id): Path<i64>) -> Answer {
+    let answer = ask(&state, format!("/v1/routines/{id}/fire"), Some(json!({}))).await?;
+    record(&state, &format!("you ran routine {id} now"));
+    Ok(answer)
+}
+
+/// The owner makes a project (ADR 0113): HQ checks it and its cap.
+pub(super) async fn hq_add_project(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Answer {
+    let title = req["title"].as_str().unwrap_or_default().trim().to_owned();
+    let answer = ask(&state, "/v1/projects".to_owned(), Some(req)).await?;
+    record(&state, &format!("you made a project: {title}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqProjectAction {
+    action: String,
+}
+
+/// The owner pauses, resumes, drops, reopens or finishes a project.
+pub(super) async fn hq_change_project(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqProjectAction>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}"),
+        Some(json!({ "action": req.action })),
+    )
+    .await?;
+    // HQ answers with one of its own statuses, never what was asked.
+    let now = answer.0["status"].as_str().unwrap_or("").to_owned();
+    record(&state, &format!("you set project {id} {now}"));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqCap {
+    #[serde(default)]
+    cap: Option<serde_json::Value>,
+}
+
+/// The owner sets, raises or takes away a project's monthly cap.
+pub(super) async fn hq_project_cap(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqCap>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}/cap"),
+        Some(json!({ "cap": req.cap })),
+    )
+    .await?;
+    let cap = answer.0["cap"].as_i64();
+    record(
+        &state,
+        &match cap {
+            Some(micros) => format!(
+                "you capped project {id} at ${}.{:02} a month",
+                micros / 1_000_000,
+                (micros % 1_000_000) / 10_000
+            ),
+            None => format!("you took project {id}'s cap away"),
+        },
+    );
+    Ok(answer)
+}
+
+/// The owner starts a chess match (ADR 0135): `{project, kind: "chess", players: [white,
+/// black], seed}`, the seed optional.
+pub(super) async fn hq_start_scenario(
+    State(state): State<AppState>,
+    Json(req): Json<serde_json::Value>,
+) -> Answer {
+    let answer = ask(&state, "/v1/scenarios".to_owned(), Some(req.clone())).await?;
+    let players = req["players"]
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    record(
+        &state,
+        &format!(
+            "you started a chess match between members {players} in project {} (seed {}): task {}",
+            req["project"], answer.0["seed"], answer.0["task"]
+        ),
+    );
+    Ok(answer)
+}
+
+/// A scenario as the owner's screen shows it: where it stands and its log, step by step.
+/// One task whole, as the owner opens it: the snapshot carries finished work in brief.
+pub(super) async fn hq_task_shown(State(state): State<AppState>, Path(id): Path<i64>) -> Answer {
+    ask(&state, format!("/v1/tasks/{id}"), None).await
+}
+
+pub(super) async fn hq_scenario(State(state): State<AppState>, Path(task): Path<i64>) -> Answer {
+    ask(&state, format!("/v1/scenarios/{task}"), None).await
+}
+
+#[derive(Deserialize)]
+pub(super) struct LeaguePage {
+    #[serde(default)]
+    page: Option<usize>,
+}
+
+/// The league's finished games, newest first, a page at a time, for the owner's Chess tab.
+pub(super) async fn hq_league_games(
+    State(state): State<AppState>,
+    Query(q): Query<LeaguePage>,
+) -> Answer {
+    let page = q.page.unwrap_or(1);
+    ask(&state, format!("/v1/league/games?page={page}"), None).await
+}
+
+/// A game in PGN as HQ wrote it, passed on as plain text named `file`, to copy or keep.
+async fn pgn_passed(state: &AppState, path: String, file: String) -> Response {
+    let hq = match client(state) {
+        Ok(hq) => hq,
+        Err(failed) => return failed.into_response(),
+    };
+    let answer = tokio::task::spawn_blocking(move || hq.get_text(&path))
+        .await
+        .map_err(|_| HqError::Unreachable("a worker thread failed".to_owned()))
+        .and_then(|got| got);
+    let pgn = match answer {
+        Ok(pgn) => pgn,
+        Err(error) => return failed(error).into_response(),
+    };
+    (
+        StatusCode::OK,
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8".to_owned(),
+            ),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{file}\""),
+            ),
+        ],
+        pgn,
+    )
+        .into_response()
+}
+
+/// A Holodeck match in PGN: the league's games under the league, their sides the brains.
+pub(super) async fn hq_scenario_pgn(
+    State(state): State<AppState>,
+    Path(task): Path<i64>,
+) -> Response {
+    pgn_passed(
+        &state,
+        format!("/v1/scenarios/{task}/pgn"),
+        format!("endora-match-{task}.pgn"),
+    )
+    .await
+}
+
+/// A game of the office's chess in PGN.
+pub(super) async fn hq_chess_pgn(State(state): State<AppState>, Path(id): Path<i64>) -> Response {
+    pgn_passed(
+        &state,
+        format!("/v1/chess/{id}/pgn"),
+        format!("endora-office-chess-{id}.pgn"),
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqProjectTools {
+    #[serde(default)]
+    tools: Option<Vec<String>>,
+}
+
+/// The owner sets the tools a project's work is given (the Holodeck plan's phase 4), or takes
+/// the list away.
+/// The owner resets the model league, recorded in the audit log.
+pub(super) async fn hq_reset_league(State(state): State<AppState>) -> Answer {
+    let answer = ask(&state, "/v1/league/reset".to_owned(), Some(json!({}))).await?;
+    record(
+        &state,
+        &format!(
+            "you reset the model league: {} games set aside, {} stopped",
+            answer.0["set_aside"], answer.0["stopped"]
+        ),
+    );
+    Ok(answer)
+}
+
+/// The owner's cut-over to one team of loops (ADR 0142), recorded in the audit log.
+pub(super) async fn hq_one_team(State(state): State<AppState>) -> Answer {
+    let answer = ask(&state, "/v1/one-team".to_owned(), Some(json!({}))).await?;
+    record(
+        &state,
+        &format!("you made the team one team of loops: {}", answer.0),
+    );
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqLoopRank {
+    rank: u8,
+}
+
+/// The owner sets the rank a loop's items start at (ADR 0142): 1 (Opus) to 6 (the house's
+/// model).
+pub(super) async fn hq_loop_rank(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqLoopRank>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}/rank"),
+        Some(json!({ "rank": req.rank })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!("you set loop {id} to start at rank {}", req.rank),
+    );
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqLoopItems {
+    items: u8,
+}
+
+/// The owner sets how many items a loop has in hand at once (ADR 0142): 1 to 4, each with a
+/// different member.
+pub(super) async fn hq_loop_items(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqLoopItems>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}/items"),
+        Some(json!({ "items": req.items })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!("you set loop {id} to {} items at once", req.items),
+    );
+    Ok(answer)
+}
+
+/// A loop's lessons (ADR 0142, amended 2026-10-31): the few lines every work turn on it reads.
+pub(super) async fn hq_loop_lessons(State(state): State<AppState>, Path(id): Path<i64>) -> Answer {
+    ask(&state, format!("/v1/projects/{id}/lessons"), None).await
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqDelivery {
+    #[serde(default)]
+    cards: Option<bool>,
+    #[serde(default)]
+    merge_develop: Option<bool>,
+}
+
+/// The owner's settings for accepted work (ADR 0115, amended 2026-10-31): the "Ready to merge"
+/// and "Push" cards back on the desk, and HQ merging pushed branches into the fork's develop.
+pub(super) async fn hq_delivery(
+    State(state): State<AppState>,
+    Json(req): Json<HqDelivery>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        "/v1/delivery".to_owned(),
+        Some(json!({ "cards": req.cards, "merge_develop": req.merge_develop })),
+    )
+    .await?;
+    let said = |on: Option<bool>, what: &str| {
+        on.map(|on| format!("{what} {}", if on { "on" } else { "off" }))
+    };
+    let changed: Vec<String> = [
+        said(req.cards, "merge cards on the desk"),
+        said(req.merge_develop, "merging develop"),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    record(&state, &format!("you turned {}", changed.join(" and ")));
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqLoopLessons {
+    lessons: Vec<String>,
+}
+
+/// The owner sets a loop's lessons, the whole list.
+pub(super) async fn hq_set_loop_lessons(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqLoopLessons>,
+) -> Answer {
+    let count = req.lessons.len();
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}/lessons"),
+        Some(json!({ "lessons": req.lessons })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!("you set loop {id}'s lessons ({count} lines)"),
+    );
+    Ok(answer)
+}
+
+pub(super) async fn hq_project_tools(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqProjectTools>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}/tools"),
+        Some(json!({ "tools": req.tools })),
+    )
+    .await?;
+    let said = match answer.0["tools"].as_array() {
+        Some(tools) if tools.is_empty() => {
+            format!("you gave project {id}'s work none of the node's tools")
+        }
+        Some(tools) => format!(
+            "you gave project {id}'s work these tools alone: {}",
+            tools
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        None => format!("you took project {id}'s list of tools away"),
+    };
+    record(&state, &said);
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqProjectRepo {
+    #[serde(default)]
+    url: Option<String>,
+}
+
+/// The owner names the repository outside the lab a project's work is in (ADR 0115, amended
+/// 2026-11-01: round 4's F4), or takes it away: HQ keeps a public GitHub address alone, and its
+/// refusal of anything else is passed on. Recorded.
+pub(super) async fn hq_project_repo(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<HqProjectRepo>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        format!("/v1/projects/{id}/repo"),
+        Some(json!({ "url": req.url })),
+    )
+    .await?;
+    let said = match answer.0["repo"].as_str() {
+        Some(repo) => format!("you named {repo} as project {id}'s repository outside the lab"),
+        None => format!("you took project {id}'s repository outside the lab away"),
+    };
+    record(&state, &said);
+    Ok(answer)
+}
+
+#[derive(Deserialize)]
+pub(super) struct HqPoolTopUp {
+    amount_micros: i64,
+}
+
+/// The owner tops today's pool up (ADR 0113 rule 6): audited, with the amount.
+pub(super) async fn hq_pool_top_up(
+    State(state): State<AppState>,
+    Json(req): Json<HqPoolTopUp>,
+) -> Answer {
+    let answer = ask(
+        &state,
+        "/v1/pool/top-up".to_owned(),
+        Some(json!({ "amount_micros": req.amount_micros })),
+    )
+    .await?;
+    record(
+        &state,
+        &format!(
+            "you topped the pool up by ${}.{:02} for today",
+            req.amount_micros / 1_000_000,
+            req.amount_micros % 1_000_000 / 10_000
+        ),
+    );
+    Ok(answer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::relay::tests::{fake, node};
+    use super::*;
+
+    #[tokio::test]
+    async fn retained_task_history_uses_a_fixed_read_route_and_preserves_the_page() {
+        let expected = json!({"source":"legacy-task-consultation","task":7,"records":[{"id":"legacy-consult:9","question":"<b>retained question</b>","answer":null}],"after":9,"has_more":true});
+        let page = expected.clone();
+        let (url, seen) = fake(Arc::new(move |_, _| {
+            (200, "application/json", page.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let received = hq_task_consultations(
+            State(state.clone()),
+            Path(7),
+            Query(HqAfter {
+                after: -1,
+                before: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(received.0, expected);
+        assert_eq!(
+            seen.lock().unwrap()[0].0,
+            "/v1/tasks/7/consultations?after=0"
+        );
+        assert!(
+            endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_replay_is_read_from_hq_as_it_answers_and_records_nothing() {
+        let (url, seen) = fake(Arc::new(|path, _| {
+            (
+                200,
+                "application/json",
+                json!({ "asked": path }).to_string(),
+            )
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let run = hq_run_replay(State(state.clone()), Path(1599))
+            .await
+            .unwrap();
+        let task = hq_task_replay(State(state.clone()), Path(7)).await.unwrap();
+        assert_eq!(run.0, json!({ "asked": "/v1/runs/1599/replay" }));
+        assert_eq!(task.0, json!({ "asked": "/v1/tasks/7/replay" }));
+        let paths: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(paths, ["/v1/runs/1599/replay", "/v1/tasks/7/replay"]);
+        let audit = endora_application::AuditLog::recent(state.audit.as_ref(), 10).unwrap();
+        assert!(audit.is_empty(), "reading is not an action");
+    }
+
+    #[tokio::test]
+    async fn the_owners_reply_and_a_goals_notes_pass_through_signed_and_are_recorded() {
+        let (url, seen) = fake(Arc::new(|_, _| {
+            (200, "application/json", json!({ "ok": true }).to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let _ = hq_reply(
+            State(state.clone()),
+            Path(7),
+            Json(HqReply {
+                text: "Leave the old player alone.".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let _ = hq_goal_note(
+            State(state.clone()),
+            Path(1),
+            Json(HqNote {
+                note: "The SSD is the owner's.".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let sent: Vec<(String, serde_json::Value)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), serde_json::from_str(b).unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (
+                    "/v1/tasks/7/post".to_owned(),
+                    json!({ "text": "Leave the old player alone." })
+                ),
+                (
+                    "/v1/goals/1/note".to_owned(),
+                    json!({ "note": "The SSD is the owner's." })
+                ),
+            ]
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        for line in [
+            "HQ: you replied on task 7",
+            "HQ: you wrote the team's notes for goal 1",
+        ] {
+            assert!(audit.iter().any(|a| a == line), "{line}: {audit:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owner_renames_a_member_through_the_node() {
+        let (url, seen) = fake(Arc::new(|path, _| {
+            if path.ends_with("/name") {
+                return (
+                    200,
+                    "application/json",
+                    json!({ "member": 5, "name": "Jane Doe" }).to_string(),
+                );
+            }
+            (200, "application/json", json!({ "kept": true }).to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let renamed = hq_rename(
+            State(state.clone()),
+            Path(5),
+            Json(HqName {
+                name: "Jane Doe".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(renamed.0["name"], "Jane Doe");
+        let sent: Vec<(String, serde_json::Value)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), serde_json::from_str(b).unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            [(
+                "/v1/members/5/name".to_owned(),
+                json!({ "name": "Jane Doe" })
+            ),]
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        let line = "HQ: you renamed member 5 to Jane Doe";
+        assert!(audit.iter().any(|a| a == line), "{line}: {audit:?}");
+    }
+
+    #[tokio::test]
+    async fn the_owner_sets_a_members_runtime_through_the_node_and_it_is_recorded() {
+        let (url, seen) = fake(Arc::new(|_, body| {
+            if body.contains("lead") {
+                return (
+                    400,
+                    "application/json",
+                    json!({ "error": "no" }).to_string(),
+                );
+            }
+            (
+                200,
+                "application/json",
+                json!({ "member": 5, "runtime": "claude-code" }).to_string(),
+            )
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let answer = hq_set_runtime(
+            State(state.clone()),
+            Path(5),
+            Json(HqRuntime {
+                runtime: "claude-code".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.0["runtime"], "claude-code");
+        let sent = seen.lock().unwrap()[0].clone();
+        assert_eq!(sent.0, "/v1/members/5/runtime");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent.2).unwrap(),
+            json!({ "runtime": "claude-code" })
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a == "HQ: you set member 5 to run on claude-code"),
+            "{audit:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_sets_a_members_brain_through_the_node_and_it_is_recorded() {
+        let (url, seen) = fake(Arc::new(|_, body| {
+            if body.contains("opus") {
+                return (
+                    400,
+                    "application/json",
+                    json!({ "error": "a lead thinks with local, claude-sonnet-5-5, claude-haiku-5-5 only" })
+                        .to_string(),
+                );
+            }
+            (
+                200,
+                "application/json",
+                json!({ "member": 1, "brain": "claude-sonnet-5-5" }).to_string(),
+            )
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let set = |brain: &str| {
+            hq_set_brain(
+                State(state.clone()),
+                Path(1),
+                Json(HqBrain {
+                    brain: brain.to_owned(),
+                }),
+            )
+        };
+        let answer = set("claude-sonnet-5-5").await.unwrap();
+        assert_eq!(answer.0["brain"], "claude-sonnet-5-5");
+        let refused = set("claude-opus-5-5").await.unwrap_err();
+        assert_eq!(
+            refused.0,
+            StatusCode::BAD_REQUEST,
+            "HQ's refusal, passed on"
+        );
+        let sent: Vec<(String, serde_json::Value)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), serde_json::from_str(b).unwrap()))
+            .collect();
+        assert_eq!(
+            sent[0],
+            (
+                "/v1/members/1/brain".to_owned(),
+                json!({ "brain": "claude-sonnet-5-5" })
+            )
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a == "HQ: you set member 1 to think with claude-sonnet-5-5"),
+            "{audit:?}"
+        );
+        assert_eq!(
+            audit.len(),
+            1,
+            "a refusal changes nothing, and is not recorded as done"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owners_routines_pass_through_signed_and_are_recorded() {
+        let (url, seen) = fake(Arc::new(|path, _| {
+            let body = if path.ends_with("/fire") {
+                json!({ "fired": "created", "task": 4 })
+            } else {
+                json!({ "routine": 2 })
+            };
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let made = json!({ "title": "Check the home lab", "goal": 1, "assignee": 1,
+                           "every_ms": 21_600_000 });
+        let answer = hq_add_routine(State(state.clone()), Json(made.clone()))
+            .await
+            .unwrap();
+        assert_eq!(answer.0["routine"], 2);
+        let switched = hq_switch_routine(
+            State(state.clone()),
+            Path(2),
+            Json(HqSwitch { enabled: false }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(switched.0["routine"], 2);
+        let fired = hq_fire_routine(State(state.clone()), Path(2))
+            .await
+            .unwrap();
+        assert_eq!(fired.0["fired"], "created");
+        let sent: Vec<(String, String)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), b.clone()))
+            .collect();
+        assert_eq!(sent[0].0, "/v1/routines");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent[0].1).unwrap(),
+            made
+        );
+        assert_eq!(sent[1].0, "/v1/routines/2");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent[1].1).unwrap(),
+            json!({ "enabled": false })
+        );
+        assert_eq!(sent[2].0, "/v1/routines/2/fire");
+        let signed = seen.lock().unwrap()[0]
+            .1
+            .iter()
+            .any(|(k, v)| k == "authorization" && v == &format!("Bearer {}", "n".repeat(32)));
+        assert!(signed, "signed with HQ's token");
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        for line in [
+            "HQ: you made a routine: Check the home lab",
+            "HQ: you switched routine 2 off",
+            "HQ: you ran routine 2 now",
+        ] {
+            assert!(audit.iter().any(|a| a == line), "{line}: {audit:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owner_tops_the_pool_up_through_the_node_and_it_is_recorded() {
+        let (url, seen) = fake(Arc::new(|_, _| {
+            (200, "application/json", json!({}).to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let _ = hq_pool_top_up(
+            State(state.clone()),
+            Json(HqPoolTopUp {
+                amount_micros: 2_333_333,
+            }),
+        )
+        .await
+        .unwrap();
+        let sent: Vec<(String, String)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), b.clone()))
+            .collect();
+        assert_eq!(sent[0].0, "/v1/pool/top-up");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&sent[0].1).unwrap(),
+            json!({ "amount_micros": 2_333_333 })
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a == "HQ: you topped the pool up by $2.33 for today"),
+            "{audit:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_starts_and_reads_a_scenario_through_the_node() {
+        let (url, seen) = fake(Arc::new(|path, _| {
+            let body = if path == "/v1/scenarios" {
+                json!({ "task": 41, "seed": 7 })
+            } else {
+                json!({ "task": 41, "end": "black_won", "log": [] })
+            };
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let matched = hq_start_scenario(
+            State(state.clone()),
+            Json(json!({ "project": 3, "kind": "chess", "players": [2, 7], "seed": 7 })),
+        )
+        .await
+        .unwrap();
+        assert_eq!(matched.0["task"], 41);
+        let shown = hq_scenario(State(state.clone()), Path(41)).await.unwrap();
+        assert_eq!(shown.0["end"], "black_won");
+        let sent: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(sent, ["/v1/scenarios", "/v1/scenarios/41"]);
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        let line =
+            "HQ: you started a chess match between members 2, 7 in project 3 (seed 7): task 41";
+        assert!(audit.iter().any(|a| a == line), "{line}: {audit:?}");
+    }
+
+    #[tokio::test]
+    async fn a_game_is_passed_on_as_pgn_in_plain_text() {
+        let (url, seen) = fake(Arc::new(|path, _| {
+            if path == "/v1/chess/9/pgn" {
+                return (
+                    404,
+                    "application/json",
+                    json!({ "error": "no such chess game" }).to_string(),
+                );
+            }
+            (
+                200,
+                "text/plain; charset=utf-8",
+                "[Event \"Endora model league\"]\n\n1. e4 *\n".to_owned(),
+            )
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let res = hq_scenario_pgn(State(state.clone()), Path(41)).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("text/plain")
+        );
+        assert!(
+            res.headers()["content-disposition"]
+                .to_str()
+                .unwrap()
+                .contains("endora-match-41.pgn")
+        );
+        let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        assert_eq!(
+            &bytes[..],
+            b"[Event \"Endora model league\"]\n\n1. e4 *\n".as_slice()
+        );
+        let missing = hq_chess_pgn(State(state.clone()), Path(9)).await;
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        let sent: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(sent, ["/v1/scenarios/41/pgn", "/v1/chess/9/pgn"]);
+    }
+
+    /// What a turn was given reaches the owner's screen only through the node, and the node
+    /// scrubs every word of a replay with the scrubber the receipts and the kept conversations
+    /// use: a key, a token or a link's password planted anywhere in it never reaches the page.
+    #[tokio::test]
+    async fn a_secret_planted_in_a_replay_never_reaches_the_page() {
+        let planted = [
+            "sk-ant-abcdefabcdefabcdefabcdef",
+            "ghp_abcdefabcdefabcdefabcdefabcdefab",
+            "hunter2",
+            "AKIAIOSFODNN7EXAMPLE",
+        ];
+        let turn = json!({
+            "run": 3, "task": 7,
+            "moments": [
+                { "kind": "briefing", "text": "You are Bo. The key is sk-ant-abcdefabcdefabcdefabcdef." },
+                { "kind": "call", "tool": "container_logs", "args": "password=hunter2",
+                  "excerpt": "pulled https://jane:hunter2@example.com/x.git" },
+            ],
+            "transcript": { "runtime": "worker", "est_tokens": 40, "text":
+                "--- tools ---\npost\n--- system ---\nYou are Bo.\n--- user ---\nUse ghp_abcdefabcdefabcdefabcdefabcdefab \
+                 and AKIAIOSFODNN7EXAMPLE.\n" },
+        });
+        let answered = turn.clone();
+        let (url, _) = fake(Arc::new(move |path, _| {
+            let body = if path.starts_with("/v1/tasks/") {
+                json!({ "task": 7, "runs": [answered.clone()] })
+            } else {
+                json!({ "replay": answered.clone() })
+            };
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let one = hq_run_replay(State(state.clone()), Path(3))
+            .await
+            .unwrap()
+            .0;
+        let all = hq_task_replay(State(state), Path(7)).await.unwrap().0;
+        for page in [one.to_string(), all.to_string()] {
+            for secret in planted {
+                assert!(!page.contains(secret), "{secret} reached the page: {page}");
+            }
+            assert!(page.contains("[redacted]"), "{page}");
+            assert!(
+                page.contains("--- tools ---\\npost"),
+                "the rest is kept: {page}"
+            );
+            assert!(
+                page.contains("[redacted]@example.com/x.git"),
+                "a link keeps its host: {page}"
+            );
+        }
+        assert_eq!(
+            all["runs"][0]["transcript"]["est_tokens"], 40,
+            "numbers stay numbers"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_leagues_finished_games_are_asked_of_hq_a_page_at_a_time() {
+        let (url, seen) = fake(Arc::new(|_, _| {
+            let body = json!({ "page": 2, "pages": 3, "total": 21, "games": [] });
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let answer = hq_league_games(State(state.clone()), Query(LeaguePage { page: Some(2) }))
+            .await
+            .unwrap();
+        assert_eq!(answer.0["pages"], 3);
+        let first = hq_league_games(State(state), Query(LeaguePage { page: None }))
+            .await
+            .unwrap();
+        assert_eq!(first.0["pages"], 3);
+        let sent: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(sent, ["/v1/league/games?page=2", "/v1/league/games?page=1"]);
+    }
+
+    #[tokio::test]
+    async fn an_opened_task_is_asked_of_hq_whole() {
+        let (url, seen) = fake(Arc::new(|_, _| {
+            (
+                200,
+                "application/json",
+                json!({ "id": 7, "thread": [] }).to_string(),
+            )
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let answer = hq_task_shown(State(state), Path(7)).await.unwrap();
+        assert_eq!(answer.0["id"], 7);
+        let sent: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(sent, ["/v1/tasks/7"]);
+    }
+
+    #[tokio::test]
+    async fn the_owners_league_reset_passes_through_and_is_recorded() {
+        let (url, seen) = fake(Arc::new(|_, _| {
+            let body = json!({ "set_aside": 12, "stopped": 2 });
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let answer = hq_reset_league(State(state.clone())).await.unwrap();
+        assert_eq!(answer.0["set_aside"], 12);
+        let sent: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .collect();
+        assert_eq!(sent, ["/v1/league/reset"]);
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a == "HQ: you reset the model league: 12 games set aside, 2 stopped"),
+            "{audit:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owner_moving_a_task_into_a_project_passes_through_and_is_recorded() {
+        let (url, seen) = fake(Arc::new(|_, _| {
+            let body = json!({ "task": 676, "project": 2 });
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let answer = hq_task_project(
+            State(state.clone()),
+            Path(676),
+            Json(HqTaskProject { project: 2 }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.0["project"], 2);
+        let sent: Vec<(String, serde_json::Value)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), serde_json::from_str(b).unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            [("/v1/tasks/676/project".to_owned(), json!({ "project": 2 }))]
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        assert!(
+            audit
+                .iter()
+                .any(|a| a == "HQ: you moved task 676 into project 2"),
+            "{audit:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_owners_outside_repository_of_a_project_passes_through_to_hq() {
+        let (url, seen) = fake(Arc::new(|_, body| {
+            let sent: serde_json::Value = serde_json::from_str(body).unwrap();
+            let body = json!({ "project": 3, "repo": sent["url"] });
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let answer = hq_project_repo(
+            State(state.clone()),
+            Path(3),
+            Json(HqProjectRepo {
+                url: Some("https://github.com/example/tiny".to_owned()),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.0["repo"], "https://github.com/example/tiny");
+        let sent = seen.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(sent.0, "/v1/projects/3/repo");
+    }
+
+    #[tokio::test]
+    async fn the_owners_list_of_a_projects_tools_passes_through_and_is_recorded() {
+        let (url, seen) = fake(Arc::new(|_, body| {
+            let sent: serde_json::Value = serde_json::from_str(body).unwrap();
+            let body = json!({ "project": 3, "tools": sent["tools"] });
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        for tools in [
+            Some(vec![
+                "homelab_status".to_owned(),
+                "container_logs".to_owned(),
+            ]),
+            Some(Vec::new()),
+            None,
+        ] {
+            let answer = hq_project_tools(
+                State(state.clone()),
+                Path(3),
+                Json(HqProjectTools { tools }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(answer.0["project"], 3);
+        }
+        let sent: Vec<(String, serde_json::Value)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), serde_json::from_str(b).unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                (
+                    "/v1/projects/3/tools".to_owned(),
+                    json!({ "tools": ["homelab_status", "container_logs"] })
+                ),
+                ("/v1/projects/3/tools".to_owned(), json!({ "tools": [] })),
+                ("/v1/projects/3/tools".to_owned(), json!({ "tools": null })),
+            ]
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        for line in [
+            "HQ: you gave project 3's work these tools alone: homelab_status, container_logs",
+            "HQ: you gave project 3's work none of the node's tools",
+            "HQ: you took project 3's list of tools away",
+        ] {
+            assert!(audit.iter().any(|a| a == line), "{line}: {audit:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owners_projects_pass_through_signed_and_are_recorded() {
+        let (url, seen) = fake(Arc::new(|path, _| {
+            let body = if path.ends_with("/cap") {
+                json!({ "project": 3, "cap": 12_500_000 })
+            } else if path.ends_with("/reports_to") {
+                json!({ "member": 5, "reports_to": 2 })
+            } else if path == "/v1/projects" {
+                json!({ "project": 3 })
+            } else {
+                json!({ "project": 3, "status": "paused" })
+            };
+            (200, "application/json", body.to_string())
+        }));
+        let state = node(&url, "http://127.0.0.1:9");
+        let made = json!({ "goal": 1, "title": "Upkeep", "lead": 2, "cap": 10 });
+        let answer = hq_add_project(State(state.clone()), Json(made.clone()))
+            .await
+            .unwrap();
+        assert_eq!(answer.0["project"], 3);
+        let answer = hq_change_project(
+            State(state.clone()),
+            Path(3),
+            Json(HqProjectAction {
+                action: "pause".to_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.0["status"], "paused");
+        let answer = hq_project_cap(
+            State(state.clone()),
+            Path(3),
+            Json(HqCap {
+                cap: Some(json!("12.50")),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(answer.0["cap"], 12_500_000);
+        let sent: Vec<(String, serde_json::Value)> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(p, _, b)| (p.clone(), serde_json::from_str(b).unwrap()))
+            .collect();
+        assert_eq!(
+            sent,
+            [
+                ("/v1/projects".to_owned(), made),
+                ("/v1/projects/3".to_owned(), json!({ "action": "pause" })),
+                ("/v1/projects/3/cap".to_owned(), json!({ "cap": "12.50" })),
+            ]
+        );
+        let audit: Vec<String> = endora_application::AuditLog::recent(state.audit.as_ref(), 10)
+            .unwrap()
+            .iter()
+            .map(|r| r.summary().to_owned())
+            .collect();
+        for line in [
+            "HQ: you made a project: Upkeep",
+            "HQ: you set project 3 paused",
+            "HQ: you capped project 3 at $12.50 a month",
+        ] {
+            assert!(audit.iter().any(|a| a == line), "{line}: {audit:?}");
+        }
+    }
+}

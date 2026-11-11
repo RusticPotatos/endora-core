@@ -1,0 +1,25 @@
+# Keep the build context small and reproducible.
+target/
+**/target/
+.git/
+# Claude Code's worktrees: each a whole copy of the repository with its own build output,
+# many gigabytes, and nothing an image is built from.
+.claude/
+**/*.db
+**/*.db-wal
+**/*.db-shm
+.env
+.env.*
+# The bundle's own settings (deploy/compose/.env) and any other nested env file: they hold tokens.
+**/.env
+**/.env.*
+owner.mk
+**/owner.mk
+docker-compose.override.yml
+**/*.local
+**/*.local.*
+**/*.pem
+**/*.key
+**/*.log
+# the previous name of owner.mk stays ignored too
+[l]ocal.mk

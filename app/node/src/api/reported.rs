@@ -1,0 +1,684 @@
+//! What a Claude Code turn's sandbox says its own tools did (ADR 0117): Claude Code's
+//! `PostToolUse` hook, in the worksite, posts each call of Bash, Edit, Read and the rest here
+//! with the turn's token, and the node tells HQ, which keeps it as a receipt marked
+//! **sandbox-reported**. The node did not witness these calls (they ran in the sandbox), so a
+//! receipt of one may be cited for what the sandbox did, never as a reading of the lab now: the
+//! evidence rule holds a live criterion to a node-witnessed reading.
+//!
+//! Only a running turn HQ says Claude Code runs is heard; the team's own tools
+//! (`mcp__endora__*`) are left out, since the node and HQ record those themselves as they
+//! answer them. What is kept is short and scrubbed of secrets and of the turn's own token.
+//!
+//! Beside it, what every turn's worker says of the whole turn (ADR 0129): its conversation as
+//! text, told at the turn's end with the turn's token. The node scrubs it with the same scrubber
+//! as the receipts, holds it to a megabyte and tells HQ, which keeps it for a while.
+
+use super::*;
+use axum::body::Bytes;
+use axum::http::HeaderMap;
+
+use super::relay::{token_of, turn_of};
+
+/// The tools that change the sandbox's files: a receipt of one acts. A command is counted as
+/// a look, whatever it did: the sandbox is disposable, and only a branch submitted to the node
+/// leaves it.
+const CHANGES: [&str; 3] = ["Edit", "Write", "NotebookEdit"];
+
+fn refuse(status: StatusCode, message: &str) -> Response {
+    (status, Json(json!({ "error": message }))).into_response()
+}
+
+/// Whether a response says it is an error: a string that starts "Error:". Claude Code reports a
+/// call it denied, and a command that failed, as a `PostToolUse` carrying such a string. A
+/// command that merely printed the word has an object for a response (`stdout`, `stderr`), so
+/// it is not mistaken for one.
+fn says_error(response: &serde_json::Value) -> bool {
+    response.as_str().is_some_and(|s| s.starts_with("Error:"))
+}
+
+/// A value as one line of text: a string as it is, anything else as compact JSON.
+fn text_of(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// What a call was asked, in short: a command, a file or a pattern, by its tool.
+fn args_of(tool: &str, input: &serde_json::Value) -> String {
+    let field = |k: &str| input[k].as_str().map(str::to_owned);
+    let main = match tool {
+        // The worksite's shell (climb 2, S1) says its command, as Claude Code's Bash does.
+        "Bash" | "shell" => field("command"),
+        "Read" | "Edit" | "Write" | "NotebookEdit" => field("file_path"),
+        "Glob" | "Grep" => field("pattern"),
+        _ => None,
+    };
+    main.unwrap_or_else(|| text_of(input))
+}
+
+/// What a call gave back, in short: a command's output, or the tool's answer.
+fn excerpt_of(response: &serde_json::Value) -> String {
+    let stdout = response["stdout"].as_str().unwrap_or("");
+    let stderr = response["stderr"].as_str().unwrap_or("");
+    if !stdout.is_empty() || !stderr.is_empty() {
+        return format!("{stdout} {stderr}").trim().to_owned();
+    }
+    text_of(response)
+}
+
+/// Whether the worksite's shell says its command completed: neither timed out nor killed. A
+/// worker shell's receipt is `ok` exactly then: its observation was acquired. That is not exit
+/// success (the exit code is in the arguments), not a healthy environment, and not task success.
+fn shell_completed(response: &serde_json::Value) -> bool {
+    response["timed_out"] != true && response["killed"] != true && response["exit_code"].is_i64()
+}
+
+/// The worksite's shell's status as the receipt's arguments begin: its exit code, or that it
+/// timed out or was killed, and what the shell cut, then a space. From the report's fields alone.
+fn shell_status(response: &serde_json::Value) -> String {
+    let mut status = if response["timed_out"] == true {
+        "[timed out]".to_owned()
+    } else if let Some(code) = response["exit_code"].as_i64() {
+        format!("[exit {code}]")
+    } else {
+        "[killed]".to_owned()
+    };
+    if let (Some(cut), Some(printed)) = (response["cut"].as_u64(), response["printed"].as_u64()) {
+        if cut > 0 {
+            status.push_str(&format!(" [output cut: {cut} of {printed} bytes]"));
+        }
+    }
+    status.push(' ');
+    status
+}
+
+/// `POST /team-relay/receipt`: one call of a Claude Code turn's own tools, as its hook said
+/// it, or one command of the worksite's shell (climb 2, S1). Answered with the receipt's id, or `skipped` for the team's own tools.
+pub(super) async fn sandbox_receipt(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(hq) = state.hq.clone() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "HQ is not set up on this node",
+        );
+    };
+    let token = token_of(&headers);
+    let turn = match turn_of(hq.clone(), token.clone(), relay_wording).await {
+        Ok(turn) => turn,
+        Err(refused) => return refused,
+    };
+    let Ok(said) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return refuse(StatusCode::BAD_REQUEST, "the body is not JSON");
+    };
+    let tool = said["tool_name"].as_str().unwrap_or("").trim().to_owned();
+    // Climb 2, S1: a Claude Code turn's hook reports its own tools; the worksite's own shell (a
+    // worker turn) reports its commands, and nothing else.
+    let worker_shell = !turn.claude_code && tool == "shell";
+    if !turn.claude_code && !worker_shell {
+        return refuse(
+            StatusCode::FORBIDDEN,
+            "only a Claude Code turn's sandbox, or the worksite's shell, reports its own tools",
+        );
+    }
+    if tool.is_empty() {
+        return refuse(StatusCode::BAD_REQUEST, "a report names its tool_name");
+    }
+    if tool.starts_with("mcp__") {
+        return Json(json!({ "skipped": "the team's own tools are recorded as they answer" }))
+            .into_response();
+    }
+    let hidden = |text: String| -> String {
+        let text = endora_bridge::scrub_secrets(&text);
+        if token.is_empty() {
+            return text;
+        }
+        text.replace(&token, "[the turn's token]")
+    };
+    let failed = if worker_shell {
+        // Completed is ok, whatever the exit code: a check that exits 1 is a reading.
+        !shell_completed(&said["tool_response"])
+    } else {
+        said["hook_event_name"] == "PostToolUseFailure"
+            || said["tool_response"]["interrupted"] == true
+            || said["tool_response"]["is_error"] == true
+            || says_error(&said["tool_response"])
+            || says_error(&said["error"])
+    };
+    // The shell's status, written from the report's own fields, never from what it printed; it
+    // leads the arguments, so every cut after it (the node's here, HQ's at 120 characters) keeps it.
+    let status = if worker_shell {
+        shell_status(&said["tool_response"])
+    } else {
+        String::new()
+    };
+    let excerpt = if said["error"].is_null() {
+        excerpt_of(&said["tool_response"])
+    } else {
+        text_of(&said["error"])
+    };
+    let reported = json!({
+        "token": token,
+        "tool": tool,
+        "args": format!(
+            "{status}{}",
+            hidden(args_of(&tool, &said["tool_input"]))
+                .chars()
+                .take(400usize.saturating_sub(status.chars().count()))
+                .collect::<String>()
+        ),
+        "excerpt": hidden(excerpt).chars().take(1_000).collect::<String>(),
+        "ok": !failed,
+        "act": CHANGES.contains(&tool.as_str()),
+        "confidential": false,
+        "sandbox": true,
+    });
+    let kept = tokio::task::spawn_blocking(move || hq.post("/v1/team/receipt", &reported)).await;
+    match kept {
+        Ok(Ok(answer)) => Json(json!({ "receipt": answer["receipt"] })).into_response(),
+        Ok(Err(endora_infrastructure::HqError::Answered { status: 404, .. })) => {
+            refuse(StatusCode::UNAUTHORIZED, "no running turn has that token")
+        }
+        _ => refuse(StatusCode::BAD_GATEWAY, "HQ kept no receipt"),
+    }
+}
+
+/// The most of a turn's conversation the node passes on to HQ: a megabyte, its head and its
+/// tail (ADR 0129). HQ holds the same line when it keeps it; the node holds it first so that
+/// nothing larger is ever sent.
+const CONVERSATION_MOST: usize = 1024 * 1024;
+
+/// `text` held to `most` bytes: its head and its tail, with a line where the middle was cut.
+fn held_to(text: &str, most: usize) -> String {
+    if text.len() <= most {
+        return text.to_owned();
+    }
+    let mark = |removed: usize| {
+        format!(
+            "\n[... cut by the node: {removed} bytes removed from the middle of this conversation ...]\n"
+        )
+    };
+    let room = most.saturating_sub(mark(text.len()).len());
+    let mut head = (room / 2).min(text.len());
+    while !text.is_char_boundary(head) {
+        head -= 1;
+    }
+    let mut tail = text.len().saturating_sub(room - room / 2);
+    while !text.is_char_boundary(tail) {
+        tail += 1;
+    }
+    format!("{}{}{}", &text[..head], mark(tail - head), &text[tail..])
+}
+
+/// `POST /team-relay/transcript`: what a turn said, told by its own worker after every model
+/// round and at the end of the turn, with the turn's token (ADR 0129, amended 2026-11-01). The
+/// node scrubs it of secrets with the scrubber the receipts use, and of the turn's own token,
+/// holds it to a megabyte (head and tail, the cut marked), and tells HQ, which keeps it for
+/// thirty days. Any running turn's worker may tell its own; HQ keeps the latest an attempt.
+pub(super) async fn turn_transcript(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(hq) = state.hq.clone() else {
+        return refuse(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "HQ is not set up on this node",
+        );
+    };
+    let token = token_of(&headers);
+    if let Err(refused) = turn_of(hq.clone(), token.clone(), relay_wording).await {
+        return refused;
+    }
+    let Ok(said) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return refuse(StatusCode::BAD_REQUEST, "the body is not JSON");
+    };
+    let text = said["text"].as_str().unwrap_or("");
+    if text.trim().is_empty() {
+        return refuse(StatusCode::BAD_REQUEST, "a conversation says something");
+    }
+    let mut text = endora_bridge::scrub_secrets(text);
+    if !token.is_empty() {
+        text = text.replace(&token, "[the turn's token]");
+    }
+    let told = json!({
+        "token": token,
+        "runtime": said["runtime"].as_str().unwrap_or("worker"),
+        "text": held_to(&text, CONVERSATION_MOST),
+    });
+    let kept = tokio::task::spawn_blocking(move || hq.post("/v1/team/transcript", &told)).await;
+    match kept {
+        Ok(Ok(answer)) => Json(answer).into_response(),
+        Ok(Err(endora_infrastructure::HqError::Answered { status: 404, .. })) => {
+            refuse(StatusCode::UNAUTHORIZED, "no running turn has that token")
+        }
+        Ok(Err(endora_infrastructure::HqError::Answered {
+            status: 400,
+            message,
+        })) => refuse(StatusCode::CONFLICT, &message),
+        _ => refuse(StatusCode::BAD_GATEWAY, "HQ kept no conversation"),
+    }
+}
+
+/// How this route words a refusal of the token: as the rest of the team listener does.
+fn relay_wording(status: StatusCode, _kind: &str, message: &str) -> Response {
+    refuse(status, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::relay::tests::{fake, node};
+    use super::*;
+    use axum::body::Body;
+    use http_body_util::BodyExt as _;
+    use tower::ServiceExt as _;
+
+    fn report(token: Option<&str>, body: &serde_json::Value) -> axum::http::Request<Body> {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/team-relay/receipt")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        req.body(Body::from(body.to_string())).unwrap()
+    }
+
+    async fn answer(
+        state: &AppState,
+        req: axum::http::Request<Body>,
+    ) -> (StatusCode, serde_json::Value) {
+        let res = team_relay(state.clone()).oneshot(req).await.unwrap();
+        let status = res.status();
+        let body = res.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null),
+        )
+    }
+
+    fn tell_transcript(token: Option<&str>, body: &serde_json::Value) -> axum::http::Request<Body> {
+        let mut req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/team-relay/transcript")
+            .header("content-type", "application/json");
+        if let Some(token) = token {
+            req = req.header("authorization", format!("Bearer {token}"));
+        }
+        req.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[test]
+    fn a_long_conversation_is_held_to_its_head_and_tail_with_the_cut_marked() {
+        assert_eq!(held_to("short", 100), "short");
+        let long = format!("HEAD{}TAIL{}", "é".repeat(50_000), "x".repeat(10));
+        let held = held_to(&long, 4_000);
+        assert!(held.len() <= 4_000, "{}", held.len());
+        assert!(held.starts_with("HEAD") && held.ends_with('x'));
+        assert!(held.contains("cut by the node"), "{held}");
+    }
+
+    #[tokio::test]
+    async fn a_turns_worker_tells_its_conversation_scrubbed_of_secrets_and_capped_and_hq_keeps_it()
+    {
+        let (hq_url, seen) = fake(Arc::new(|path, body| match path {
+            "/v1/team/turn" if body.contains("\"tok\"") => (
+                200,
+                "application/json",
+                json!({ "run": 7, "member": "Rae", "left": 1000,
+                        "cloud": false, "brain": "local", "runtime": "worker" })
+                .to_string(),
+            ),
+            "/v1/team/turn" => (404, "application/json", "{}".to_owned()),
+            "/v1/team/transcript" => (
+                200,
+                "application/json",
+                r#"{"kept":true,"cut":false,"est_tokens":9,"tier":"internal"}"#.to_owned(),
+            ),
+            _ => (200, "application/json", "{}".to_owned()),
+        }));
+        let state = node(&hq_url, "http://127.0.0.1:9");
+        let talk = json!({ "runtime": "worker", "text":
+            "--- assistant ---\nThe key is password=hunter2 and my token is tok, ok." });
+        for token in [None, Some("bad")] {
+            let (got, _) = answer(&state, tell_transcript(token, &talk)).await;
+            assert_eq!(got, StatusCode::UNAUTHORIZED, "{token:?}");
+        }
+        let (empty, _) = answer(
+            &state,
+            tell_transcript(Some("tok"), &json!({ "runtime": "worker", "text": "  " })),
+        )
+        .await;
+        assert_eq!(empty, StatusCode::BAD_REQUEST);
+        let (status, said) = answer(&state, tell_transcript(Some("tok"), &talk)).await;
+        assert_eq!(status, StatusCode::OK, "{said}");
+        assert_eq!(said["kept"], true);
+        let told: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p == "/v1/team/transcript")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect();
+        assert_eq!(told.len(), 1, "only a turn that runs has its words told");
+        assert_eq!(
+            told[0]["token"], "tok",
+            "named by the turn's own token, to HQ"
+        );
+        let text = told[0]["text"].as_str().unwrap();
+        assert!(!text.contains("hunter2"), "scrubbed: {text}");
+        assert!(
+            !text.contains("is tok,"),
+            "the turn's own token is hidden: {text}"
+        );
+        assert!(text.contains("[the turn's token]"), "{text}");
+        // A conversation over a megabyte reaches HQ held to it, head and tail.
+        let huge = format!("START{}END", "line of talk\n".repeat(200_000));
+        let (status, _) = answer(
+            &state,
+            tell_transcript(Some("tok"), &json!({ "runtime": "worker", "text": huge })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let sent: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p == "/v1/team/transcript")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect();
+        let text = sent[1]["text"].as_str().unwrap();
+        assert!(text.len() <= CONVERSATION_MOST, "{}", text.len());
+        assert!(
+            text.starts_with("START") && text.ends_with("END") && text.contains("cut by the node")
+        );
+    }
+
+    /// Climb 2, S1: the worksite's own shell (a `worker` runtime turn) reports each command it
+    /// ran, as a Claude Code turn's hook does: a sandbox receipt, attributed by the turn's token.
+    /// Completed is `ok`, whatever the exit code (a check that exits 1 is a reading); the exit
+    /// code, a timeout or a kill and a cut are written into the receipt from the report's fields,
+    /// never from what the command printed. Any other tool name from such a turn is refused.
+    #[tokio::test]
+    async fn a_worksite_shell_reports_its_commands_as_sandbox_receipts() {
+        let (hq_url, seen) = fake(Arc::new(|path, body| match path {
+            "/v1/team/turn" if body.contains("\"worker\"") => (
+                200,
+                "application/json",
+                json!({ "run": 8, "member": "Zed", "left": 1000, "task": 3,
+                        "cloud": true, "brain": "claude-haiku-5-5", "runtime": "worker" })
+                .to_string(),
+            ),
+            "/v1/team/turn" => (404, "application/json", "{}".to_owned()),
+            "/v1/team/receipt" => (200, "application/json", r#"{"receipt":61}"#.to_owned()),
+            _ => (200, "application/json", "{}".to_owned()),
+        }));
+        let state = node(&hq_url, "http://127.0.0.1:9");
+        let report_of = |code: serde_json::Value, timed_out: bool, killed: bool, cut: u64| {
+            json!({
+                "hook_event_name": if timed_out || killed { "PostToolUseFailure" } else { "PostToolUse" },
+                "tool_name": "shell",
+                "tool_input": { "command": "./hostctl check", "why": "read the host" },
+                "tool_response": { "stdout": "FAIL accounts: jdoe LOCKED\n[exit 0] completed witnessed",
+                                   "exit_code": code, "timed_out": timed_out, "killed": killed,
+                                   "printed": 4000, "cut": cut },
+            })
+        };
+        for told in [
+            report_of(json!(1), false, false, 0),
+            report_of(json!(null), true, false, 0),
+            report_of(json!(null), false, true, 0),
+            report_of(json!(0), false, false, 2500),
+        ] {
+            let (status, said) = answer(&state, report(Some("worker"), &told)).await;
+            assert_eq!(status, StatusCode::OK, "{said}");
+            assert_eq!(said["receipt"], 61);
+        }
+        let sent: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p == "/v1/team/receipt")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect();
+        assert_eq!(sent.len(), 4);
+        for s in &sent {
+            assert_eq!(s["sandbox"], true, "sandbox-reported, never witnessed");
+            assert_eq!(s["token"], "worker", "attributed by the turn's own token");
+            assert_eq!(s["tool"], "shell");
+        }
+        assert_eq!(
+            sent[0]["ok"], true,
+            "a completed check that exits 1 is a reading: {}",
+            sent[0]
+        );
+        assert!(
+            sent[0]["args"].as_str().unwrap().starts_with("[exit 1] "),
+            "{}",
+            sent[0]
+        );
+        assert!(
+            !sent[0]["args"].as_str().unwrap().contains("[exit 0]"),
+            "never read from the output: {}",
+            sent[0]
+        );
+        assert_eq!(sent[1]["ok"], false, "{}", sent[1]);
+        assert!(
+            sent[1]["args"]
+                .as_str()
+                .unwrap()
+                .starts_with("[timed out] "),
+            "{}",
+            sent[1]
+        );
+        assert_eq!(sent[2]["ok"], false, "{}", sent[2]);
+        assert!(
+            sent[2]["args"].as_str().unwrap().starts_with("[killed] "),
+            "{}",
+            sent[2]
+        );
+        assert!(
+            sent[3]["args"]
+                .as_str()
+                .unwrap()
+                .starts_with("[exit 0] [output cut: 2500 of 4000 bytes] "),
+            "{}",
+            sent[3]
+        );
+        // A long command: the status still leads, so HQ's own cut (120 characters) keeps it.
+        let mut long = report_of(json!(1), false, false, 0);
+        long["tool_input"]["command"] =
+            json!(format!("./hostctl check {}", "--verbose ".repeat(60)));
+        let (status, _) = answer(&state, report(Some("worker"), &long)).await;
+        assert_eq!(status, StatusCode::OK);
+        let last: serde_json::Value = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _, _)| p == "/v1/team/receipt")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .unwrap();
+        let args = last["args"].as_str().unwrap();
+        assert!(
+            args.starts_with("[exit 1] ./hostctl check --verbose"),
+            "{args}"
+        );
+        assert!(args.chars().count() <= 400, "{}", args.chars().count());
+        let other = json!({ "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": { "command": "ls" }, "tool_response": { "stdout": "", "stderr": "" } });
+        let (refused, _) = answer(&state, report(Some("worker"), &other)).await;
+        assert_eq!(
+            refused,
+            StatusCode::FORBIDDEN,
+            "a worker turn reports its shell alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claude_code_turns_hook_reports_its_tools_as_sandbox_receipts_and_nothing_else_does()
+    {
+        let (hq_url, seen) = fake(Arc::new(|path, body| match path {
+            "/v1/team/turn" if body.contains("\"cc\"") => (
+                200,
+                "application/json",
+                json!({ "run": 7, "member": "Rae", "left": 1000,
+                        "cloud": true, "brain": "claude-haiku-5-5", "runtime": "claude-code" })
+                .to_string(),
+            ),
+            "/v1/team/turn" if body.contains("\"worker\"") => (
+                200,
+                "application/json",
+                json!({ "run": 8, "member": "Zed", "left": 1000,
+                        "cloud": true, "brain": "claude-haiku-5-5", "runtime": "worker" })
+                .to_string(),
+            ),
+            "/v1/team/turn" => (404, "application/json", "{}".to_owned()),
+            "/v1/team/receipt" => (200, "application/json", r#"{"receipt":52}"#.to_owned()),
+            _ => (200, "application/json", "{}".to_owned()),
+        }));
+        let state = node(&hq_url, "http://127.0.0.1:9");
+        let bash = json!({
+            "session_id": "s", "hook_event_name": "PostToolUse", "tool_name": "Bash",
+            "tool_input": { "command": "git log --oneline -1 # cc", "description": "look" },
+            "tool_response": { "stdout": "abc123 tidy (token cc) password=hunter2", "stderr": "",
+                               "interrupted": false },
+            "tool_use_id": "toolu_1", "duration_ms": 40,
+        });
+        for (token, status) in [
+            (None, StatusCode::UNAUTHORIZED),
+            (Some("bad"), StatusCode::UNAUTHORIZED),
+            (Some("worker"), StatusCode::FORBIDDEN),
+        ] {
+            let (got, _) = answer(&state, report(token, &bash)).await;
+            assert_eq!(got, status, "{token:?}");
+        }
+        let (status, said) = answer(&state, report(Some("cc"), &bash)).await;
+        assert_eq!(status, StatusCode::OK, "{said}");
+        assert_eq!(said["receipt"], 52);
+        let edit = json!({ "hook_event_name": "PostToolUse", "tool_name": "Edit",
+            "tool_input": { "file_path": "/work/repo/roles/x/tasks/main.yml", "old_string": "a", "new_string": "b" },
+            "tool_response": { "filePath": "/work/repo/roles/x/tasks/main.yml" } });
+        answer(&state, report(Some("cc"), &edit)).await;
+        let failed = json!({ "hook_event_name": "PostToolUseFailure", "tool_name": "Bash",
+            "tool_input": { "command": "ansible-lint" }, "error": "exit 2" });
+        answer(&state, report(Some("cc"), &failed)).await;
+        let (_, skipped) = answer(
+            &state,
+            report(
+                Some("cc"),
+                &json!({ "tool_name": "mcp__endora__post",
+            "tool_input": {}, "tool_response": {} }),
+            ),
+        )
+        .await;
+        assert!(skipped["skipped"].is_string(), "{skipped}");
+        let told: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p == "/v1/team/receipt")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect();
+        assert_eq!(told.len(), 3, "the team's own tool is not told twice");
+        assert_eq!(
+            (
+                &told[0]["tool"],
+                &told[0]["sandbox"],
+                &told[0]["ok"],
+                &told[0]["act"]
+            ),
+            (&json!("Bash"), &json!(true), &json!(true), &json!(false))
+        );
+        assert_eq!(
+            told[0]["token"], "cc",
+            "named by the turn's own token, to HQ"
+        );
+        let args = told[0]["args"].as_str().unwrap();
+        let excerpt = told[0]["excerpt"].as_str().unwrap();
+        assert!(args.starts_with("git log --oneline -1"), "{args}");
+        assert!(
+            !args.contains(" cc") && !excerpt.contains(" cc)"),
+            "no token: {args} / {excerpt}"
+        );
+        assert!(!excerpt.contains("hunter2"), "scrubbed: {excerpt}");
+        assert_eq!(
+            (&told[1]["tool"], &told[1]["args"], &told[1]["act"]),
+            (
+                &json!("Edit"),
+                &json!("/work/repo/roles/x/tasks/main.yml"),
+                &json!(true)
+            )
+        );
+        assert_eq!(
+            (&told[2]["ok"], &told[2]["excerpt"]),
+            (&json!(false), &json!("exit 2"))
+        );
+    }
+
+    /// Live (2026-10-18, task 674): Claude Code reported a call it had denied, and a command
+    /// that failed, as a `PostToolUse` whose response is a string starting "Error:", not as a
+    /// failure, and the node kept them as done. A refused call must never show as one: a
+    /// receipt may be cited "for what the sandbox did" (ADR 0117).
+    #[tokio::test]
+    async fn a_denied_call_is_kept_as_refused() {
+        let (hq_url, seen) = fake(Arc::new(|path, body| match path {
+            "/v1/team/turn" if body.contains("\"cc\"") => (
+                200,
+                "application/json",
+                json!({ "run": 7, "member": "Rae", "left": 1000,
+                        "cloud": true, "brain": "claude-haiku-5-5", "runtime": "claude-code" })
+                .to_string(),
+            ),
+            "/v1/team/turn" => (404, "application/json", "{}".to_owned()),
+            "/v1/team/receipt" => (200, "application/json", r#"{"receipt":52}"#.to_owned()),
+            _ => (200, "application/json", "{}".to_owned()),
+        }));
+        let state = node(&hq_url, "http://127.0.0.1:9");
+        let hook = |tool_response: serde_json::Value| {
+            json!({
+                "hook_event_name": "PostToolUse", "tool_name": "Bash",
+                "tool_input": { "command": "for f in a b; do echo $f; done" },
+                "tool_response": tool_response,
+            })
+        };
+        let responses = [
+            // Denied, as the model read it.
+            json!(
+                "Error: Permission to use Bash has been denied because Claude Code is running in don't ask mode."
+            ),
+            // A command that failed: the same string, beside the failure event's own report.
+            json!("Error: Exit code 1\nyamllint: 3 errors"),
+            // A command that printed the word ran: its response is an object, whatever it says.
+            json!({ "stdout": "Error: not really\n", "stderr": "", "interrupted": false }),
+            // A string that only mentions one is no error.
+            json!("Read the file (no Error: in it)"),
+            json!({ "stdout": "a\nb\n", "stderr": "", "interrupted": false }),
+        ];
+        for response in responses {
+            let (status, _) = answer(&state, report(Some("cc"), &hook(response))).await;
+            assert_eq!(status, StatusCode::OK);
+        }
+        let told: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p == "/v1/team/receipt")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect();
+        let kept: Vec<bool> = told.iter().map(|t| t["ok"].as_bool().unwrap()).collect();
+        assert_eq!(kept, [false, false, true, true, true], "{told:?}");
+        assert!(
+            told[0]["excerpt"]
+                .as_str()
+                .unwrap()
+                .contains("don't ask mode"),
+            "the denial is kept in words: {}",
+            told[0]
+        );
+    }
+}

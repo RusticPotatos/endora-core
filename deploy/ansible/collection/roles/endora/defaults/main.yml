@@ -1,0 +1,162 @@
+---
+# Endora, a self-hosted butler for the house: https://github.com/RusticPotatoes/Endora
+#
+# Starts Endora on the NAS with the project's own docker-compose.yml, checked out at a branch
+# or tag, and this host's settings. It never builds: a release build needs several GB of
+# memory for minutes, and on a NAS that shares its memory with Home Assistant one ran the box
+# out of memory and swap and the house stopped answering. Build the image on another machine
+# with Endora's `make deploy` (ENDORA_BUILD_CONTEXT), which copies it here; this role starts
+# it. The Compose project name is the one `make deploy` uses, so both reach the same
+# containers and the same data volume. See this role's README.md.
+endora_enabled: false
+
+endora_repo: https://github.com/RusticPotatoes/Endora.git
+# A branch, tag or commit: where the compose file comes from. Keep it the version whose image
+# `make deploy` last copied here.
+endora_version: develop
+
+# The checkout and the files this role writes. Endora's data is not kept here (below).
+endora_root: "{{ docker_home }}/endora"
+endora_project_name: endora
+
+# Where the node keeps its database (every setting, key and sign-in secret) and TLS
+# certificate. Empty: the Docker volume `<project>_endora-data`, which is outside your
+# backups. To keep it in a folder your backups reach, copy the volume there first with
+# Endora's `make migrate-data`, then set this: the role refuses to start the node on an
+# empty folder while the volume still holds a database, because that would be a brand-new
+# node.
+endora_data_dir: ""
+
+# What Endora knows about you: markdown pages with their own git history (Endora ADR 0101),
+# mounted into the node at /brain. Beside Endora's other folders by default, so it sits with
+# the rest of your containers' data; the node also copies it into its nightly backups.
+# Empty: the Docker volume `<project>_endora-brain`.
+endora_brain_dir: "{{ endora_root }}/brain"
+
+# An OpenAI-compatible model endpoint. The default is the ollama role on this host.
+endora_model_url: http://host.docker.internal:11434/v1
+endora_model: qwen2.5:7b
+
+# Your time zone by name, so patterns are on your clock and the daily brief keeps its hour when
+# the clocks change. The NAS's own zone by default.
+endora_time_zone: "{{ ansible_nas_timezone | default('') }}"
+
+# The address the node's self-signed certificate is issued for, so the browser warning is
+# accepted once for the address you use. Empty: the certificate names localhost only.
+endora_tls_san: "{{ ansible_default_ipv4.address | default('') }}"
+
+# Endora's read-only view of the containers on this host (its `homelab` Compose profile):
+# fixed GET routes over the Docker socket, nothing that starts, stops or execs.
+endora_docker_observer: false
+
+
+# Endora HQ (Endora ADR 0102): the team service, run beside the node from the same image, with a
+# scripted demo team until real workers exist. It makes its own token for the node.
+endora_hq: false
+endora_hq_demo: true
+
+# endora-sound (Endora ADR 0104): the sound hub (its `sound` profile, with the Spotify
+# receiver) and its AirPlay senders (`senders`, which cannot run beside an ansible-nas owntone
+# container: both take UDP 319/320). Their images come from `make deploy`, like the node's.
+endora_sound: false
+endora_sound_senders: false
+
+# The AirPlay 2 door (Endora ADR 0128): "Endora Mixer" as AirPlay 2, so an Apple TV keeps
+# lip-sync, in its own container on a LAN address of its own (a macvlan network on this
+# host's LAN interface), the classic door retired while it runs. The four network values are
+# yours and required (the role stops without them); the README says how to find each one.
+endora_sound_airplay2: false
+# The NAS's LAN interface (`ip -br link` on the NAS: the one that is UP with the LAN address).
+endora_sound_airplay2_parent: ""
+# The LAN, as CIDR, and its router.
+endora_sound_airplay2_subnet: ""
+endora_sound_airplay2_gateway: ""
+# A free address on the LAN outside the router's DHCP pool, reserved there for the door.
+endora_sound_airplay2_ip: ""
+# Optional: the door's MAC address (a locally administered one); empty is the compose default.
+endora_sound_airplay2_mac: ""
+# Optional: an existing macvlan network on the LAN to join instead of making one (Docker allows
+# one per subnet; a Pi-hole on its own address has one). `docker network ls --filter
+# driver=macvlan` on the NAS.
+endora_sound_airplay2_network: ""
+# The name it is announced under on the LAN (mDNS).
+endora_sound_airplay2_hostname: endora-mixer
+# Seconds the door hands its sound over early, for the mix and the speaker after it, so an
+# Apple TV's picture and the sound line up. 0 to 2; tune by ear.
+endora_sound_airplay2_latency: 0.5
+# What is missing for the door, which the role refuses to start without.
+endora_sound_airplay2_missing: >-
+  {{ (['endora_sound_airplay2_parent'] if not endora_sound_airplay2_parent else [])
+     + (['endora_sound_airplay2_subnet'] if not endora_sound_airplay2_subnet else [])
+     + (['endora_sound_airplay2_gateway'] if not endora_sound_airplay2_gateway else [])
+     + (['endora_sound_airplay2_ip'] if not endora_sound_airplay2_ip else [])
+     + (['endora_sound'] if not (endora_sound | bool) else []) }}
+
+# Parity with `make deploy` and the owner's owner.mk (docs/where-things-go.md): every other
+# setting docker-compose.yml reads. Empty = not rendered = the compose file's own default, so
+# a run with none of them set changes nothing. Secrets are folders or files here, never values.
+# The team's runner (the `workers` profile): holds Docker's socket, so off; it needs endora_hq.
+endora_workers: false
+# The router the node asks for device names (ADR 0130). Empty: 1.1.1.1.
+endora_lan_dns: ""
+# Seconds between ticks of HQ's engine. Empty: 30.
+endora_hq_tick_seconds: ""
+# Host folders for HQ's and the sound hub's data. Empty: Docker volumes.
+endora_hq_dir: ""
+endora_sound_dir: ""
+# A fixed offset from UTC in minutes (e.g. -300), the fallback when no time zone is set.
+endora_utc_offset_minutes: ""
+# Model names for the node's router and synthesis steps. Empty: the main model.
+endora_router_model: ""
+endora_synth_model: ""
+# The lab's ansible-nas (ADR 0112), which the team's homelab_map reads: owner/repo or an address.
+endora_ansible_nas_repo: ""
+# The branch of it to read. Empty: the fork's default.
+endora_ansible_nas_ref: ""
+# Containers you retired but kept, shown on the team's map: name=note;name=note
+endora_lab_retired: ""
+# Your own values (name, city, anyone you live with), comma separated, for the privacy scan of
+# HQ's branches before they are pushed to your public fork (ADR 0115, amended 2026-10-31). Keep
+# them in your vault (ENDORA_OWNER_VALUES: "{{ vault_ENDORA_OWNER_VALUES }}"), never in a
+# tracked file. Empty: the scan reads shapes and the secret tripwire only.
+ENDORA_OWNER_VALUES: ""
+# The variable was renamed. An inventory that still sets the previous role variable (usually
+# `{{ vault_<previous name> }}`) keeps working: the role uses its value and says so, instead of
+# rendering a node with no personal values and a privacy scan that reads shapes alone. The two
+# below are what the role renders and refuses on; set neither. Two different lists are refused
+# (tasks/owner_values.yml).
+endora_owner_values_effective: >-
+  {{ ENDORA_OWNER_VALUES
+     if (ENDORA_OWNER_VALUES | string | trim | length > 0)
+     else (lookup('vars', 'endora_per' ~ 'sonal_values', default='') | string) }}
+endora_owner_values_conflict: >-
+  {%- set current = (ENDORA_OWNER_VALUES | string).split(',') | map('trim') | reject('equalto', '') | unique | sort | list -%}
+  {%- set previous = (lookup('vars', 'endora_per' ~ 'sonal_values', default='') | string).split(',') | map('trim') | reject('equalto', '') | unique | sort | list -%}
+  {{ (current | length > 0) and (previous | length > 0) and (current != previous) }}
+# A host folder holding one file `key`, an ed25519 deploy key (mode 0600) for the engineering
+# wing's pushes (ADR 0115). Empty: the node cannot push.
+endora_git_push_key_dir: ""
+# A host folder holding one file `token` (mode 0600), the bench's credential (ADR 0123). Empty:
+# no bench.
+endora_bench_token_dir: ""
+# What the bench may spend a day, in cents. Empty: 200.
+endora_bench_cap_cents: ""
+
+# A drain before this host shuts down (Endora ADR 0134). On, a systemd unit asks HQ to stop
+# starting turns and waits for the ones under way, as the host shuts down and while Docker is
+# still up, so a reboot (your 04:00 security one) does not cut a turn in the middle of a step.
+# Its own switch: it works whether this role runs Endora or `make deploy` does. Off by
+# default: it adds a wait, up to the cap below, to every shutdown.
+endora_drain_on_shutdown: false
+# How long, in seconds, a shutdown waits for the turns under way. What is still running then is
+# cut and tried again after the boot. The unit's own timeout is this and a minute.
+endora_drain_cap_seconds: 300
+
+# The Compose profiles the node is started with.
+endora_profiles: >-
+  {{ (['homelab'] if endora_docker_observer | bool else [])
+     + (['hq'] if endora_hq | bool else [])
+     + (['workers'] if endora_workers | bool else [])
+     + (['sound'] if endora_sound | bool else [])
+     + (['senders'] if endora_sound_senders | bool else [])
+     + (['airplay2'] if endora_sound_airplay2 | bool else []) }}

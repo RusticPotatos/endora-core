@@ -1,0 +1,191 @@
+//! Assigned work nobody will come back to: an open task with a member, no turn queued,
+//! running or waiting to retry and no wake held for it, for ten minutes, gets one recovery
+//! wake for its member; still stranded ten minutes after that, it goes on the owner's desk as
+//! stuck, once. It is never handed to anyone else.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use super::engine::{Author, Engine, STRANDED_AFTER_MS, Settings};
+use super::ports::{Clock, NewTask, TeamStore};
+use crate::application::desk_ports::DeskStore;
+use crate::domain::{MemberId, Priority, Receipt, TaskId, TaskStatus, WakeReason};
+use crate::infrastructure::{SimulatedRunner, SqliteTeamStore};
+
+struct Hands(AtomicI64);
+impl Clock for &Hands {
+    fn now(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+type Hq<'a> = Engine<SqliteTeamStore, SimulatedRunner, &'a Hands>;
+
+const NOON: i64 = 1_792_166_400_000;
+
+/// A task handed to Linus whose first turn ran and ended without claiming it: `todo`, an
+/// assignee, no owner, and nothing queued for it.
+fn stranded(clock: &Hands) -> (Hq<'_>, MemberId, TaskId) {
+    let hq = Engine::new(
+        SqliteTeamStore::in_memory().unwrap(),
+        SimulatedRunner::new(4),
+        clock,
+        Settings::default(),
+    );
+    hq.hire("Ada", 25, 2, 0).unwrap();
+    let dev = hq.hire("Linus", 40, 2, 4).unwrap();
+    let goal = hq
+        .set_goal(
+            "Keep the home lab healthy",
+            "you asked for it",
+            Author::Owner,
+        )
+        .unwrap();
+    let task = hq
+        .add_task(
+            Author::Owner,
+            NewTask {
+                goal,
+                project: None,
+                parent: None,
+                title: "Clear the stuck downloads".to_owned(),
+                description: String::new(),
+                assignee: Some(dev),
+                priority: Priority::Normal,
+                waits_on: Vec::new(),
+            },
+        )
+        .unwrap();
+    hq.tick().unwrap();
+    let first = hq.runner().started()[0].clone();
+    hq.runner().finish(first.run, true);
+    hq.tick().unwrap();
+    (hq, dev, task)
+}
+
+fn later(clock: &Hands, ms: i64) {
+    clock.0.fetch_add(ms, Ordering::SeqCst);
+}
+
+fn recoveries(hq: &Hq<'_>, task: TaskId) -> Vec<Receipt> {
+    hq.store()
+        .wakes()
+        .unwrap()
+        .into_iter()
+        .filter(|w| w.task == Some(task) && w.reason == WakeReason::AssignmentRecovery)
+        .map(|w| w.receipt)
+        .collect()
+}
+
+fn stuck(hq: &Hq<'_>, task: TaskId) -> usize {
+    hq.store()
+        .desk()
+        .unwrap()
+        .iter()
+        .filter(|d| d.kind == "stuck" && d.task == Some(task))
+        .count()
+}
+
+#[test]
+fn stranded_assigned_work_gets_one_recovery_wake_after_ten_minutes() {
+    let clock = Hands(AtomicI64::new(NOON));
+    let (hq, dev, task) = stranded(&clock);
+    assert_eq!(
+        hq.store().task(task).unwrap().unwrap().status,
+        TaskStatus::Todo
+    );
+    later(&clock, STRANDED_AFTER_MS - 1_000);
+    hq.tick().unwrap();
+    assert!(recoveries(&hq, task).is_empty(), "not ten minutes yet");
+    later(&clock, 2_000);
+    hq.tick().unwrap();
+    assert_eq!(recoveries(&hq, task), [Receipt::Queued]);
+    let woke = hq.store().wakes().unwrap().pop().unwrap();
+    assert_eq!((woke.member, woke.task), (dev, Some(task)));
+    assert!(
+        !WakeReason::AssignmentRecovery.brings_news(),
+        "the back-off applies"
+    );
+    assert_eq!(
+        WakeReason::from_name("assignment_recovery"),
+        Some(WakeReason::AssignmentRecovery)
+    );
+    // Its turn is queued, then running: not stranded, so no second wake.
+    hq.tick().unwrap();
+    later(&clock, STRANDED_AFTER_MS + 1);
+    hq.tick().unwrap();
+    assert_eq!(recoveries(&hq, task).len(), 1, "one recovery wake");
+}
+
+#[test]
+fn a_paused_member_is_not_woken_and_its_work_is_not_called_stuck() {
+    let clock = Hands(AtomicI64::new(NOON));
+    let (hq, dev, task) = stranded(&clock);
+    hq.pause(dev, true).unwrap();
+    for _ in 0..3 {
+        later(&clock, STRANDED_AFTER_MS + 1);
+        hq.tick().unwrap();
+    }
+    assert!(recoveries(&hq, task).is_empty());
+    assert_eq!(stuck(&hq, task), 0);
+}
+
+/// Found by checking HQ against the design it borrows (2026-10-17): a task waiting on one
+/// that was dropped was released as if the wait were done, though the work it waited for
+/// never happened. A dropped wait releases nothing; the waiting task's member is told why in
+/// its thread and woken once, ten minutes on, through stranded recovery; still stuck after
+/// that, it goes on the desk.
+///
+/// Given a task that waits on another,
+/// when the one it waits on is dropped,
+/// then it is not woken as if its wait were done, and its member is told the wait was dropped.
+#[test]
+fn a_dropped_wait_releases_nothing_and_its_member_is_told() {
+    let clock = Hands(AtomicI64::new(NOON));
+    let (hq, dev, first) = stranded(&clock);
+    let goal = hq.store().task(first).unwrap().unwrap().goal;
+    let after = hq
+        .add_task(
+            Author::Owner,
+            NewTask {
+                goal,
+                project: None,
+                parent: None,
+                title: "Restore from the backup".to_owned(),
+                description: String::new(),
+                assignee: Some(dev),
+                priority: Priority::Normal,
+                waits_on: vec![first],
+            },
+        )
+        .unwrap();
+    hq.drop_task(first).unwrap();
+    hq.tick().unwrap();
+    let wait_finished = |hq: &Hq<'_>| {
+        hq.store()
+            .wakes()
+            .unwrap()
+            .iter()
+            .filter(|w| w.task == Some(after) && w.reason == WakeReason::WaitFinished)
+            .count()
+    };
+    assert_eq!(
+        wait_finished(&hq),
+        0,
+        "a dropped wait is not a finished one"
+    );
+    // Its member is told at once that the wait was dropped (ADR 0124), not ten minutes on.
+    let told_at_once = hq
+        .store()
+        .wakes()
+        .unwrap()
+        .iter()
+        .filter(|w| w.task == Some(after) && w.reason == WakeReason::WaitDropped)
+        .count();
+    assert_eq!(told_at_once, 1, "its member is woken once");
+    let told = hq.store().thread(after).unwrap();
+    assert!(
+        told.iter().any(|p| p.text.contains("was dropped")),
+        "the thread says why: {told:?}"
+    );
+    assert_eq!(wait_finished(&hq), 0);
+}

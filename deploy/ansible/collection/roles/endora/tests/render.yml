@@ -1,0 +1,356 @@
+---
+# What the node is started with:
+#   ANSIBLE_ROLES_PATH=roles ansible-playbook roles/endora/tests/render.yml
+- name: Endora renders its settings
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    docker_home: /tmp/endora-render-test
+    out: /tmp/endora-render-test/out
+  # vars_files, not include_vars: included vars would outrank the per-task values below.
+  vars_files:
+    - ../defaults/main.yml
+  tasks:
+    - name: Output folder
+      ansible.builtin.file:
+        path: "{{ out }}"
+        state: directory
+        mode: "0700"
+
+    - name: With mail, a data folder and the brain's folder
+      ansible.builtin.template:
+        src: ../templates/endora.env.j2
+        dest: "{{ out }}/full.env"
+        mode: "0600"
+      vars:
+        mail_mirror_enabled: true
+        mail_mirror_root: /srv/mail-mirror
+        endora_time_zone: America/New_York
+        endora_data_dir: /data/endora
+        endora_hq: true
+        # Left over in an inventory from before OpenBao left Endora (ADR 0144): rendered nowhere.
+        endora_vault_url: http://openbao:8200
+        endora_vault_network: openbao
+        endora_passkey_rp_id: endora.example.test
+
+    - name: Nothing switched on
+      ansible.builtin.template:
+        src: ../templates/endora.env.j2
+        dest: "{{ out }}/bare.env"
+        mode: "0600"
+      vars:
+        endora_time_zone: ""
+        endora_brain_dir: ""
+
+    - name: With the sound hub and its AirPlay 2 door
+      ansible.builtin.template:
+        src: ../templates/endora.env.j2
+        dest: "{{ out }}/door.env"
+        mode: "0600"
+      vars:
+        endora_sound: true
+        endora_sound_airplay2: true
+        endora_sound_airplay2_parent: eth0
+        endora_sound_airplay2_subnet: 172.31.99.0/24
+        endora_sound_airplay2_gateway: 192.0.2.1
+        endora_sound_airplay2_ip: 172.31.99.10
+        endora_sound_airplay2_latency: 0.25
+
+    - name: With the door joining a macvlan network the LAN already has
+      ansible.builtin.template:
+        src: ../templates/endora.env.j2
+        dest: "{{ out }}/shared.env"
+        mode: "0600"
+      vars:
+        endora_sound: true
+        endora_sound_airplay2: true
+        endora_sound_airplay2_parent: eth0
+        endora_sound_airplay2_subnet: 172.31.99.0/24
+        endora_sound_airplay2_gateway: 192.0.2.1
+        endora_sound_airplay2_ip: 172.31.99.10
+        endora_sound_airplay2_network: lan_macvlan
+
+    # Parity with `make deploy` and the owner's owner.mk: every other setting the compose file
+    # reads. Set, each is rendered exactly; unset (the bare case), none is.
+    - name: With every remaining setting
+      ansible.builtin.template:
+        src: ../templates/endora.env.j2
+        dest: "{{ out }}/all.env"
+        mode: "0600"
+      vars:
+        endora_lan_dns: 192.0.2.1
+        endora_hq: true
+        endora_hq_tick_seconds: 15
+        endora_hq_dir: /srv/endora/hq
+        endora_sound_dir: /srv/endora/sound
+        endora_utc_offset_minutes: -300
+        endora_router_model: router-model
+        endora_synth_model: synth-model
+        endora_ansible_nas_repo: example/ansible-nas
+        endora_ansible_nas_ref: main
+        endora_lab_retired: "old-box=kept for parts"
+        ENDORA_OWNER_VALUES: "John Doe,New York"
+        endora_git_push_key_dir: /srv/endora/git-key
+        endora_bench_token_dir: /srv/endora/bench
+        endora_bench_cap_cents: 500
+
+    - name: Override with an address
+      ansible.builtin.template:
+        src: ../templates/docker-compose.override.yml.j2
+        dest: "{{ out }}/san.yml"
+        mode: "0600"
+      vars:
+        endora_tls_san: 172.31.99.10
+
+    - name: Override without one
+      ansible.builtin.template:
+        src: ../templates/docker-compose.override.yml.j2
+        dest: "{{ out }}/nosan.yml"
+        mode: "0600"
+      vars:
+        endora_tls_san: ""
+
+    # The drain before this host shuts down (Endora ADR 0134): the unit a NAS reboot stops.
+    - name: The drain on shutdown, with the defaults
+      ansible.builtin.template:
+        src: ../templates/endora-drain.service.j2
+        dest: "{{ out }}/drain.service"
+        mode: "0600"
+
+    - name: The drain on shutdown, with a shorter cap
+      ansible.builtin.template:
+        src: ../templates/endora-drain.service.j2
+        dest: "{{ out }}/drain-short.service"
+        mode: "0600"
+      vars:
+        endora_drain_cap_seconds: 120
+
+    - name: Read them back
+      ansible.builtin.set_fact:
+        drain: "{{ lookup('file', out ~ '/drain.service').splitlines() }}"
+        drain_short: "{{ lookup('file', out ~ '/drain-short.service').splitlines() }}"
+        full: "{{ lookup('file', out ~ '/full.env').splitlines() }}"
+        bare: "{{ lookup('file', out ~ '/bare.env').splitlines() }}"
+        door: "{{ lookup('file', out ~ '/door.env').splitlines() }}"
+        shared: "{{ lookup('file', out ~ '/shared.env').splitlines() }}"
+        all: "{{ lookup('file', out ~ '/all.env').splitlines() }}"
+        san: "{{ lookup('file', out ~ '/san.yml') | from_yaml }}"
+        nosan: "{{ lookup('file', out ~ '/nosan.yml') | from_yaml }}"
+
+    - name: Check them
+      ansible.builtin.assert:
+        that:
+          - "full | select('match', 'ENDORA_BUILD') | list | length == 0"
+          - "'ENDORA_TIME_ZONE=America/New_York' in full"
+          - "'ENDORA_DATA_DIR=/data/endora' in full"
+          # The brain sits beside Endora's other folders unless told otherwise.
+          - "'ENDORA_BRAIN_DIR=/tmp/endora-render-test/endora/brain' in full"
+          - "bare | select('match', 'ENDORA_BRAIN_DIR') | list | length == 0"
+          # HQ is off unless asked for.
+          - "'ENDORA_HQ_URL=http://hq:8790' in full"
+          - "'ENDORA_HQ_DEMO=1' in full"
+          - "bare | select('match', 'ENDORA_HQ') | list | length == 0"
+          - "'ENDORA_MODEL_URL=http://host.docker.internal:11434/v1' in full"
+          # OpenBao is not part of Endora (ADR 0144): no vault address, network or passkey
+          # name is rendered, even from a leftover inventory variable.
+          - "full | select('match', 'ENDORA_VAULT') | list | length == 0"
+          - "full | select('match', 'ENDORA_PASSKEY_RP_ID') | list | length == 0"
+          # Off by default: the data volume rather than a folder, and never a mail copy (the
+          # chat's mail reader was retired, ADR 0136).
+          - "bare | select('match', 'ENDORA_OWN_WORK') | list | length == 0"
+          - "'ENDORA_TIME_ZONE=' in bare"
+          - "full | select('match', 'ENDORA_MAIL_DIR') | list | length == 0"
+          - "bare | select('match', 'ENDORA_DATA_DIR') | list | length == 0"
+          - "san.services.node.environment.ENDORA_TLS_SAN == '172.31.99.10'"
+          - "nosan.services == {}"
+          # The sound hub and the AirPlay 2 door (ADR 0128): off unless asked for; with the
+          # door, its LAN values for the compose file's macvlan network, and the lead.
+          - "bare | select('match', 'ENDORA_SOUND_URL|SOUND_AIRPLAY2') | list | length == 0"
+          - "'ENDORA_SOUND_URL=http://sound:8791' in door"
+          - "'SOUND_AIRPLAY2=1' in door"
+          - "'SOUND_AIRPLAY2_PARENT=eth0' in door"
+          - "'SOUND_AIRPLAY2_SUBNET=172.31.99.0/24' in door"
+          - "'SOUND_AIRPLAY2_GATEWAY=192.0.2.1' in door"
+          - "'SOUND_AIRPLAY2_IP=172.31.99.10' in door"
+          - "'SOUND_AIRPLAY2_HOSTNAME=endora-mixer' in door"
+          - "'SOUND_AIRPLAY2_LATENCY=0.25' in door"
+          - "door | select('match', 'SOUND_AIRPLAY2_MAC') | list | length == 0"
+          # Its own network unless told to join one the LAN already has.
+          - "door | select('match', 'SOUND_AIRPLAY2_NETWORK|SOUND_AIRPLAY2_SHARED') | list | length == 0"
+          - "'SOUND_AIRPLAY2_NETWORK=lan_macvlan' in shared"
+          - "'SOUND_AIRPLAY2_SHARED=true' in shared"
+          # Parity: nothing set renders none of these (the compose defaults apply), none of
+          # them in the other cases either; all set renders each exactly.
+          - "bare | select('match', 'ENDORA_LAN_DNS|ENDORA_HQ_TICK_SECONDS|ENDORA_HQ_DIR|ENDORA_SOUND_DIR|ENDORA_UTC_OFFSET_MINUTES|ENDORA_ROUTER_MODEL|ENDORA_SYNTH_MODEL|ENDORA_ANSIBLE_NAS_|ENDORA_LAB_RETIRED|ENDORA_GIT_PUSH_KEY|ENDORA_BENCH_') | list | length == 0"
+          # Always rendered, empty when there are none: docker-compose.yml refuses to start with it unset.
+          - "'ENDORA_OWNER_VALUES=' in bare"
+          - "full | select('match', 'ENDORA_LAN_DNS|ENDORA_HQ_TICK_SECONDS|ENDORA_HQ_DIR|ENDORA_SOUND_DIR|ENDORA_UTC_OFFSET_MINUTES|ENDORA_ROUTER_MODEL|ENDORA_SYNTH_MODEL|ENDORA_ANSIBLE_NAS_|ENDORA_LAB_RETIRED|ENDORA_GIT_PUSH_KEY|ENDORA_BENCH_') | list | length == 0"
+          - "'ENDORA_OWNER_VALUES=' in full"
+          - "'ENDORA_LAN_DNS=192.0.2.1' in all"
+          - "'ENDORA_HQ_TICK_SECONDS=15' in all"
+          - "'ENDORA_HQ_DIR=/srv/endora/hq' in all"
+          - "'ENDORA_SOUND_DIR=/srv/endora/sound' in all"
+          - "'ENDORA_UTC_OFFSET_MINUTES=-300' in all"
+          - "'ENDORA_ROUTER_MODEL=router-model' in all"
+          - "'ENDORA_SYNTH_MODEL=synth-model' in all"
+          - "'ENDORA_ANSIBLE_NAS_REPO=example/ansible-nas' in all"
+          - "'ENDORA_ANSIBLE_NAS_REF=main' in all"
+          - "'ENDORA_LAB_RETIRED=old-box=kept for parts' in all"
+          - "'ENDORA_OWNER_VALUES=John Doe,New York' in all"
+          - "'ENDORA_GIT_PUSH_KEY=/srv/endora/git-key' in all"
+          - "'ENDORA_BENCH_TOKEN=/srv/endora/bench' in all"
+          - "'ENDORA_BENCH_CAP_CENTS=500' in all"
+
+    # The idiom for "run this when the host shuts down, while Docker is still up" (ADR 0134):
+    # a oneshot that stays "active" once started, ordered After=docker.service. Units stop in
+    # the reverse of the order they started, so this one is stopped, and its ExecStop run, before
+    # Docker begins to stop. It is not DefaultDependencies=no: that is for units that must run
+    # before the system is up or after it is nearly down, and this one wants Docker running.
+    - name: The unit runs the drain as its host shuts down, before Docker stops
+      ansible.builtin.assert:
+        that:
+          - "'Type=oneshot' in drain"
+          - "'RemainAfterExit=yes' in drain"
+          - "'ExecStart=/bin/true' in drain"
+          - "'After=docker.service' in drain"
+          - "'Wants=docker.service' in drain"
+          - "'WantedBy=multi-user.target' in drain"
+          - "drain | select('match', 'DefaultDependencies') | list | length == 0"
+          # Not Requires: restarting Docker must not restart, and so drain, this unit's job.
+          - "drain | select('match', 'Requires=|BindsTo=|PartOf=') | list | length == 0"
+          # The drain waits up to its cap, so systemd must wait longer than the cap, or it kills
+          # the wait: the default of 90 seconds would cut a five-minute cap short.
+          - "'Environment=DRAIN_CAP=300' in drain"
+          - "'TimeoutStopSec=360' in drain"
+          - "'Environment=DRAIN_CAP=120' in drain_short"
+          - "'TimeoutStopSec=180' in drain_short"
+          - "'Environment=HQ_CONTAINER=endora-hq' in drain"
+          # The role's own copy of the deploy's script, so the guards are the ones a deploy has
+          # with no checkout on the host (Endora run by `make deploy`); a failed drain (the `-`)
+          # never holds the shutdown; and the unit does nothing once the role has taken its file
+          # away, though systemd still holds it in memory until the next boot.
+          - "drain | select('match', 'ExecStop=-/bin/sh -c ') | list | length == 1"
+          - "drain | select('search', 'test -f /etc/systemd/system/endora-drain.service') | list | length == 1"
+          - "drain | select('search', 'exec sh /usr/local/sbin/endora-hq-drain drain') | list | length == 1"
+          - "drain | select('search', 'endora-render-test') | list | length == 0"
+
+    - name: The shutdown drain is off by default, and turning it off never drains
+      ansible.builtin.assert:
+        that:
+          - "endora_drain_on_shutdown is false"
+          - "endora_drain_cap_seconds == 300"
+          - "drain_on | length == 1"
+          - "'endora_drain_on_shutdown' in drain_on[0].when"
+          - "drain_off | length == 1"
+          - "'endora_drain_on_shutdown' in drain_off[0].when"
+          # Whether this role runs Endora or `make deploy` does, as on the NAS: the drain is its
+          # own switch.
+          - "'endora_enabled' not in drain_on[0].when"
+          - "'endora_enabled' not in drain_off[0].when"
+          # The script goes with the unit, and is taken away with it.
+          - "on_copy | length == 1"
+          - "on_copy[0].src == 'hq-drain.sh'"
+          - "on_copy[0].dest == '/usr/local/sbin/endora-hq-drain'"
+          - "off_file | selectattr('path', 'equalto', '/usr/local/sbin/endora-hq-drain') | list | length == 1"
+          # Stopping the unit runs its ExecStop, which drains HQ: turning the drain off must
+          # not, so its tasks only disable the unit and take its file away.
+          - "off_systemd | length == 2"
+          - "off_systemd | selectattr('state', 'defined') | list | length == 0"
+          # And turned on, it is enabled and started: started does nothing until shutdown.
+          - "on_systemd | length == 1"
+          - "on_systemd[0].state == 'started' and on_systemd[0].enabled"
+          # A dry run writes no unit, so there is none to enable: the enable waits for the real
+          # run then, and a first --check does not fail on it.
+          - "on_enable | length == 1"
+          - "'ansible_check_mode' in on_enable[0].when"
+          - "on_unit | length == 1 and on_unit[0].register == 'endora_drain_unit_file'"
+          - "'ansible.builtin.template' in on_unit[0]"
+          # And the script goes where a folder already is: a dry run makes no folder either.
+          - "on_file | length == 0"
+      vars:
+        tasks: "{{ lookup('file', '../tasks/main.yml') | from_yaml }}"
+        # By key: a dotted module name would be read as nested attributes.
+        off_systemd: >-
+          {{ drain_off[0].block | map('dict2items') | flatten
+             | selectattr('key', 'equalto', 'ansible.builtin.systemd')
+             | map(attribute='value') | list }}
+        on_systemd: >-
+          {{ drain_on[0].block | map('dict2items') | flatten
+             | selectattr('key', 'equalto', 'ansible.builtin.systemd')
+             | map(attribute='value') | list }}
+        on_copy: >-
+          {{ drain_on[0].block | map('dict2items') | flatten
+             | selectattr('key', 'equalto', 'ansible.builtin.copy')
+             | map(attribute='value') | list }}
+        on_enable: "{{ drain_on[0].block | selectattr('name', 'equalto', 'Enable the drain') | list }}"
+        on_unit: "{{ drain_on[0].block | selectattr('register', 'defined') | list }}"
+        on_file: >-
+          {{ drain_on[0].block | map('dict2items') | flatten
+             | selectattr('key', 'equalto', 'ansible.builtin.file')
+             | map(attribute='value') | list }}
+        off_file: >-
+          {{ drain_off[0].block | map('dict2items') | flatten
+             | selectattr('key', 'equalto', 'ansible.builtin.file')
+             | map(attribute='value') | list }}
+        drain_on: "{{ tasks | selectattr('name', 'equalto', 'Drain HQ before this host shuts down') | list }}"
+        drain_off: "{{ tasks | selectattr('name', 'equalto', 'No drain before this host shuts down') | list }}"
+
+    - name: No profiles and everything missing, with nothing set
+      ansible.builtin.assert:
+        that:
+          - "endora_profiles == []"
+          - "endora_sound_airplay2_missing == ['endora_sound_airplay2_parent', 'endora_sound_airplay2_subnet', 'endora_sound_airplay2_gateway', 'endora_sound_airplay2_ip', 'endora_sound']"
+
+    - name: The hub, its senders and the door, with the door's values
+      ansible.builtin.assert:
+        that:
+          - "endora_profiles == ['sound', 'senders', 'airplay2']"
+          - "endora_sound_airplay2_missing == []"
+      vars: &door
+        endora_sound: true
+        endora_sound_senders: true
+        endora_sound_airplay2: true
+        endora_sound_airplay2_parent: eth0
+        endora_sound_airplay2_subnet: 172.31.99.0/24
+        endora_sound_airplay2_gateway: 192.0.2.1
+        endora_sound_airplay2_ip: 172.31.99.10
+
+    - name: The team's runner is the workers profile, and needs HQ
+      ansible.builtin.assert:
+        that:
+          - "endora_profiles == ['homelab', 'hq', 'workers']"
+      vars:
+        endora_docker_observer: true
+        endora_hq: true
+        endora_workers: true
+
+    - name: The door without the hub is refused
+      ansible.builtin.assert:
+        that:
+          - "endora_sound_airplay2_missing == ['endora_sound']"
+      vars:
+        <<: *door
+        endora_sound: false
+
+    # The rule this role exists to keep: Endora is never built or pulled on the NAS.
+    - name: Every Compose call in the role neither builds nor pulls
+      ansible.builtin.assert:
+        that:
+          - compose | length == 2
+          - started | length == 1
+          - started | map(attribute='build') | list == ['never']
+          - started | map(attribute='pull') | list == ['never']
+      vars:
+        tasks: "{{ lookup('file', '../tasks/main.yml') | from_yaml }}"
+        # By key: a dotted module name would be read as nested attributes.
+        compose: >-
+          {{ tasks | map(attribute='block') | flatten | map('dict2items') | flatten
+             | selectattr('key', 'equalto', 'community.docker.docker_compose_v2')
+             | map(attribute='value') | list }}
+        started: "{{ compose | selectattr('state', 'equalto', 'present') | list }}"
+
+    - name: Clean up
+      ansible.builtin.file:
+        path: /tmp/endora-render-test
+        state: absent

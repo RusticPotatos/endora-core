@@ -1,0 +1,211 @@
+//! Caps on a runaway (ADR 0133), in the engine: a member's waste of turns on the house's own
+//! models, which cost nothing and so are bounded by nothing else (ten in a row today that showed
+//! nothing; amended 2026-11-01, D15, in place of sixty turns a day whatever they did), and the
+//! tripwire that stops the team itself when it starts more turns in ten minutes than any real
+//! work does.
+//!
+//! The scripted demo ran 1,539 turns in 3 h 40 min, and until now only the owner could pull the
+//! kill switch: the plan's tripwires were never built. Both caps are on from the start, because a
+//! runaway is what they are for. The first loses nothing (a turn past its member's waste waits for
+//! the day to turn, like a turn waiting for budget or for the Mac); the second stops the team the
+//! way the owner's switch does, with one card on the desk saying who started how many, and the
+//! owner resumes it as ever. A scripted team (the demo) is exempt from both.
+
+use std::collections::HashMap;
+
+use serde_json::{Value, json};
+
+use super::{Done, Engine};
+use crate::application::ports::{Clock, Run, TeamStore, WorkerAdapter};
+use crate::domain::caps::{self, Runaway};
+use crate::domain::guards::THRESHOLDS;
+use crate::domain::money;
+use crate::domain::{Brain, EventKind, MemberId, Millis};
+
+/// Where HQ keeps when the owner last resumed the team: the turns it started before are the
+/// owner's to have looked at, and do not count against what comes next.
+const TRIPWIRE_SINCE: &str = "tripwire_since";
+/// Where HQ keeps who stopped the team, while it is stopped: `owner` or `tripwire`.
+pub(super) const STOPPED_BY: &str = "stopped_by";
+
+/// Why the tripwire says it stopped the team.
+pub(super) const TRIPPED: &str = "stopped by the runaway tripwire";
+
+/// What the caps read of the turns started, once for a tick and kept up as turns start in it.
+pub(super) struct Starts {
+    /// Every turn started in the tripwire's window: who, and when.
+    recent: Vec<(MemberId, Millis)>,
+    /// How many of each member's turns today on the house's own models, newest back, showed
+    /// nothing: a turn that did something sets it back to none.
+    wasted_today: HashMap<MemberId, usize>,
+    /// When the owner last resumed the team.
+    since: Millis,
+    /// The team is scripted (the demo): neither cap applies to it.
+    exempt: bool,
+}
+
+impl Starts {
+    /// How many of `run`'s member's turns today on the house's own models, newest back, showed
+    /// nothing (ADR 0133, amended 2026-11-01). A turn still to settle, or that never started,
+    /// says nothing either way and is passed over.
+    pub(super) fn free_turns_wasted_of(&self, run: &Run) -> usize {
+        if self.exempt {
+            return 0;
+        }
+        self.wasted_today.get(&run.member).copied().unwrap_or(0)
+    }
+
+    /// The runaway the team has come to, if starting one more turn would make one.
+    pub(super) fn runaway(&self, now: Millis) -> Option<Runaway> {
+        if self.exempt {
+            return None;
+        }
+        caps::runaway(&self.recent, now, self.since)
+    }
+
+    /// A turn of `member`'s just started: the tripwire counts it. What it comes to is known only
+    /// once it ends, so the check on waste reads it then.
+    pub(super) fn started(&mut self, member: MemberId, now: Millis) {
+        self.recent.push((member, now));
+    }
+}
+
+impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
+    /// What the caps read of the turns started so far, as of `now`.
+    pub(super) fn starts_read(&self, now: Millis) -> Done<Starts> {
+        let day = self.today();
+        let offset = self.settings.offset_minutes;
+        let today = (
+            money::day_start(day, offset),
+            money::day_start(day + 1, offset),
+        );
+        let since = self
+            .store
+            .setting(TRIPWIRE_SINCE)?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(Millis::MIN);
+        let mut starts = Starts {
+            recent: Vec::new(),
+            wasted_today: HashMap::new(),
+            since,
+            exempt: self.settings.scripted,
+        };
+        // A scenario's turns are bounded by its world (its move limit, its re-wakes), not by its
+        // player's day: live, the league's black side waited for tomorrow mid-game (2026-10-26).
+        let mut worlds: HashMap<crate::domain::TaskId, bool> = HashMap::new();
+        let mut runs = self.store.runs()?;
+        runs.sort_by_key(|r| (r.started_at, r.id));
+        // A turn that kept new work on its item moved it (D12), whatever its label says.
+        let mut branches = self.store.branches()?;
+        branches.sort_by_key(|b| b.id);
+        for run in runs {
+            let Some(at) = run.started_at else {
+                continue;
+            };
+            if now - at < THRESHOLDS.runaway_window_ms {
+                starts.recent.push((run.member, at));
+            }
+            if !(today.0 <= at && at < today.1 && run.brain.is_some_and(Brain::house)) {
+                continue;
+            }
+            let in_a_world = match run.task {
+                Some(task) => match worlds.get(&task) {
+                    Some(known) => *known,
+                    None => {
+                        let known = self.in_a_scenario(task)?;
+                        worlds.insert(task, known);
+                        known
+                    }
+                },
+                None => false,
+            };
+            // Oldest first: a turn that showed nothing adds one, a turn that did something sets
+            // the member's run of waste back to none, and one not settled says nothing.
+            if in_a_world {
+                continue;
+            }
+            let kept = run.task.is_some_and(|task| {
+                let of_it: Vec<_> = branches
+                    .iter()
+                    .filter(|b| b.task == task)
+                    .cloned()
+                    .collect();
+                crate::domain::handover::kept_new_work(&of_it, run.id.0)
+            });
+            match run.label {
+                Some(label) if kept || label.productive() => {
+                    starts.wasted_today.insert(run.member, 0);
+                }
+                Some(_) => *starts.wasted_today.entry(run.member).or_insert(0) += 1,
+                None => {}
+            }
+        }
+        Ok(starts)
+    }
+
+    /// The team started as many turns as it may in the tripwire's window and another was about to
+    /// start: HQ stops the team itself, the way the owner's switch does, and leaves one card on
+    /// the owner's desk saying who started how many (ADR 0133). The owner resumes it as ever.
+    pub(super) fn trip(&self, ran: &Runaway) -> Done<()> {
+        let members = self.store.members()?;
+        let name = |id: MemberId| {
+            members
+                .iter()
+                .find(|m| m.id == id)
+                .map_or_else(|| "someone".to_owned(), |m| m.name.clone())
+        };
+        let window = THRESHOLDS.runaway_window_ms;
+        let per: Vec<Value> = ran
+            .by_member
+            .iter()
+            .map(|(m, turns)| json!({ "member": m.0, "name": name(*m), "turns": turns }))
+            .collect();
+        self.stop_all_held_lock(
+            "tripwire",
+            TRIPPED,
+            json!({ "turns": ran.started, "window_ms": window, "members": per }),
+        )?;
+        // One card, however often it trips before the owner has looked.
+        if self
+            .store
+            .desk()?
+            .iter()
+            .any(|d| d.kind == "tripwire" && d.status == "waiting")
+        {
+            return Ok(());
+        }
+        let text = format!(
+            "Stopped by the runaway tripwire: the team started {} turns in {} minutes, and \
+             another was about to start; more than {} is a runaway. Turns started, by member: \
+             {}. Every turn was stopped, and nothing starts until you resume. The activity log \
+             shows what they were doing.",
+            ran.started,
+            window / 60_000,
+            THRESHOLDS.runaway_turns,
+            ran.said(name)
+        );
+        let desk = self
+            .store
+            .add_desk("tripwire", None, None, None, &text, self.clock.now())?;
+        self.emit(
+            EventKind::DeskAdded,
+            json!({ "item": desk.0, "kind": "tripwire" }),
+        )
+    }
+
+    /// The owner resumes the team (the lock held): what it started before is not held against
+    /// what it starts next, and the tripwire's card, if it was the wire that stopped it, is
+    /// answered.
+    pub(super) fn resume_held_lock(&self) -> Done<()> {
+        self.store.set_stopped(false)?;
+        self.store
+            .set_setting(TRIPWIRE_SINCE, &self.clock.now().to_string())?;
+        self.store.set_setting(STOPPED_BY, "")?;
+        for item in self.store.desk()? {
+            if item.kind == "tripwire" && item.status == "waiting" {
+                self.settle_desk_item(item.id, &item.kind, "resumed")?;
+            }
+        }
+        self.emit(EventKind::Resumed, json!({ "by": "owner" }))
+    }
+}

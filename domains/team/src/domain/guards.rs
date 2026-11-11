@@ -1,0 +1,845 @@
+//! Guards against how agent teams fail (ADR 0124), as pure rules over HQ's record.
+//!
+//! A team of models fails in a few known ways that no single turn shows: work that stops by
+//! accident and is nudged for ever; talk about work that stands in for the work; a task
+//! bounced between its worker and its checkers; a member woken again and again for nothing; a
+//! claim that was wrong copied from note to note; proof polished after it was enough; a fence
+//! pushed at by members who believe they should be outside it. Each guard here is a rule over
+//! what HQ already keeps, never a model's opinion of itself.
+//!
+//! Every guard's number is in one table, [`THRESHOLDS`], so it can be tuned from how often a
+//! finding was real ([`precision`]): a guard that never fires looks the same as one that works,
+//! and a guard that fires on everything is worse than none.
+
+use super::evidence::Label;
+use super::money::Micros;
+use super::work::{Millis, TaskStatus};
+
+/// A minute, in milliseconds.
+const MINUTE: Millis = 60_000;
+/// A day, in milliseconds.
+const DAY: Millis = 24 * 60 * MINUTE;
+
+/// Every guard's threshold, in one place (ADR 0124): tuned from measured precision, never
+/// scattered through the code that enforces them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Thresholds {
+    /// Turns in a row that showed nothing, each after a wake, before a member stops being woken
+    /// on a task.
+    pub redundant_wakes: usize,
+    /// The fewest shingles a new ask must share with one waiting to be the same ask.
+    pub same_ask_shared_least: usize,
+    /// How often the tick looks for process-health findings.
+    pub look_every_ms: Millis,
+    /// How alike, both ways, a new question or decision for the owner must be to one waiting
+    /// on the desk to be the same ask (in percent of each one's shingles the other holds).
+    pub same_ask_percent: usize,
+    /// How many of a member's turns in a row today on the house's own models, the Mac or the
+    /// NAS's, may show nothing (ADR 0133, amended 2026-11-01): they cost nothing, so no budget
+    /// stops a member that is going nowhere with them. Past it the member's work turns wait
+    /// until the day turns. Turns that do something are never counted (D15: Bo stopped at a
+    /// fixed sixty a day whatever his turns achieved).
+    pub free_turns_wasted: usize,
+    /// The most turns the whole team starts within [`Self::runaway_window_ms`] before HQ stops it
+    /// itself (ADR 0133): the one that would be the next is a runaway, and trips the wire.
+    pub runaway_turns: usize,
+    /// How far back the tripwire counts the turns the team started.
+    pub runaway_window_ms: Millis,
+}
+
+/// The thresholds HQ starts with (ADR 0124): loose enough to learn real numbers before they
+/// bite, from each finding's verdict.
+pub const THRESHOLDS: Thresholds = Thresholds {
+    redundant_wakes: 3,
+    same_ask_shared_least: 2,
+    look_every_ms: 5 * MINUTE,
+    same_ask_percent: 60,
+    free_turns_wasted: 10,
+    runaway_turns: 40,
+    runaway_window_ms: 10 * MINUTE,
+};
+
+/// Whether a new ask for the owner (`new`, a fingerprint) is the same as one waiting
+/// (`waiting`): each holds at least [`Thresholds::same_ask_percent`] of the other's shingles,
+/// and at least [`Thresholds::same_ask_shared_least`] of them (ADR 0124).
+#[must_use]
+pub fn same_ask(waiting: &[String], new: &[String]) -> bool {
+    let one = likeness(waiting, new);
+    let other = likeness(new, waiting);
+    let least = THRESHOLDS.same_ask_shared_least;
+    one.shared >= least
+        && one.percent >= THRESHOLDS.same_ask_percent
+        && other.percent >= THRESHOLDS.same_ask_percent
+}
+
+/// A text's words, as a fingerprint reads them: lowercase, letters and digits only.
+#[must_use]
+pub fn words(text: &str) -> Vec<String> {
+    let cleaned: String = text
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_lowercase().next().unwrap_or(c)
+            } else {
+                ' '
+            }
+        })
+        .collect();
+    cleaned.split_whitespace().map(str::to_owned).collect()
+}
+
+/// A text's fingerprint: its words two at a time (one at a time for a one-word text), each
+/// once, sorted. An ask is compared by its fingerprint, never as an exact string: model text
+/// paraphrases, and an exact comparison of model output is a mistake this project has made.
+#[must_use]
+pub fn fingerprint(text: &str) -> Vec<String> {
+    let words = words(text);
+    let mut shingles: Vec<String> = if words.len() < 2 {
+        words
+    } else {
+        words.windows(2).map(|w| w.join(" ")).collect()
+    };
+    shingles.sort();
+    shingles.dedup();
+    shingles
+}
+
+/// How alike a text is to another: how many of the other's shingles it holds, and what share of
+/// them that is, in whole percent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Likeness {
+    /// The other's shingles the text holds.
+    pub shared: usize,
+    /// What share of the other's shingles that is.
+    pub percent: usize,
+}
+
+/// How alike `text` (a fingerprint) is to `claim`, the other (one too).
+#[must_use]
+pub fn likeness(claim: &[String], text: &[String]) -> Likeness {
+    if claim.is_empty() {
+        return Likeness {
+            shared: 0,
+            percent: 0,
+        };
+    }
+    let shared = claim.iter().filter(|s| text.contains(s)).count();
+    Likeness {
+        shared,
+        percent: shared * 100 / claim.len(),
+    }
+}
+
+/// What a guard refuses (ADR 0124), as the member or the owner reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GuardRefusal {
+    /// A closing reason not in the set for the status it closes to.
+    NotAClosure(TaskStatus),
+    /// Work closed as superseded names the task that carries it on.
+    NoSuccessor,
+    /// A task is not its own successor.
+    SuccessorIsItself(super::work::TaskId),
+    /// A task is made to wait on work already finished: done, so there is nothing to wait for,
+    /// or dropped, so what it waited for will not happen.
+    WaitsOnFinished {
+        /// The finished task.
+        task: super::work::TaskId,
+        /// How it finished.
+        status: TaskStatus,
+    },
+    /// An approval asked for says which of its task's criteria it serves.
+    ApprovalServesWhich {
+        /// The task the turn is on.
+        task: super::work::TaskId,
+        /// Its criteria, in order.
+        criteria: Vec<String>,
+    },
+    /// The task has no criteria, so an approval asked for has nothing to serve.
+    ApprovalNothingToServe {
+        /// The task the turn is on.
+        task: super::work::TaskId,
+    },
+}
+
+impl core::fmt::Display for GuardRefusal {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotAClosure(status) => write!(
+                f,
+                "work {} says why, one of: {} (a duplicate names the task it duplicates)",
+                status.name(),
+                super::closure::Closure::names(*status).join(", ")
+            ),
+            Self::NoSuccessor => f.write_str(
+                "work done as superseded names the task that carries it on: give its number as \
+                 `successor`",
+            ),
+            Self::SuccessorIsItself(task) => write!(
+                f,
+                "#{task} cannot be its own successor: name the task that carries the work on"
+            ),
+            Self::WaitsOnFinished { task, status } => {
+                if *status == TaskStatus::Dropped {
+                    return write!(
+                        f,
+                        "#{task} was dropped, so what a task waits on it for will not happen: \
+                         leave it out of waits_on, or wait on the task that carries its work on"
+                    );
+                }
+                write!(
+                    f,
+                    "#{task} is {} already, so there is nothing to wait for: leave it out of \
+                     waits_on",
+                    status.name()
+                )
+            }
+            Self::ApprovalServesWhich { task, criteria } => {
+                let listed: Vec<String> = criteria
+                    .iter()
+                    .enumerate()
+                    .map(|(i, c)| format!("{}. {c}", i + 1))
+                    .collect();
+                write!(
+                    f,
+                    "which of #{task}'s criteria does asking the owner serve? Give serves (its \
+                     number or its words): {}. A request that serves none of them never reaches \
+                     the owner's desk",
+                    listed.join("; ")
+                )
+            }
+            Self::ApprovalNothingToServe { task } => write!(
+                f,
+                "#{task} has no criteria, so there is nothing for asking the owner to serve: a \
+                 lead says what done means with narrow_criteria, and anyone else asks its lead \
+                 in the task's thread, or asks the owner in words with ask_owner"
+            ),
+        }
+    }
+}
+
+/// Which of `criteria` (counted from 1) `said` names: its number (`2`, `#2`, `criterion 2`)
+/// or its words, case and spacing aside. `None` when it names none of them.
+#[must_use]
+pub fn serves(criteria: &[super::evidence::Criterion], said: &str) -> Option<usize> {
+    let squeezed = |s: &str| {
+        s.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase()
+    };
+    let said = squeezed(said);
+    let number = said
+        .trim_start_matches("criterion")
+        .trim()
+        .trim_start_matches('#')
+        .trim()
+        .parse::<usize>()
+        .ok();
+    if let Some(n) = number.filter(|n| (1..=criteria.len()).contains(n)) {
+        return Some(n);
+    }
+    if said.is_empty() {
+        return None;
+    }
+    criteria
+        .iter()
+        .position(|c| squeezed(&c.text) == said)
+        .map(|i| i + 1)
+}
+
+/// Which of its task's `criteria` (counted from 1) a request for the owner's yes serves, by
+/// number or words as [`serves`] reads them (ADR 0124, amended): a request that serves none, or
+/// for a task with no criteria at all, never reaches the owner's desk. Live, a developer on the
+/// house's small model asked the owner to approve a web map search "to find the NAS backup
+/// location", with coordinates it had invented; it served nothing its task asked for.
+///
+/// # Errors
+/// [`GuardRefusal::ApprovalNothingToServe`] for a task with no criteria,
+/// [`GuardRefusal::ApprovalServesWhich`] (listing them) for a `said` that names none.
+pub fn approval_serves(
+    task: super::work::TaskId,
+    criteria: &[super::evidence::Criterion],
+    said: Option<&str>,
+) -> Result<usize, GuardRefusal> {
+    if criteria.is_empty() {
+        return Err(GuardRefusal::ApprovalNothingToServe { task });
+    }
+    said.and_then(|said| serves(criteria, said))
+        .ok_or_else(|| GuardRefusal::ApprovalServesWhich {
+            task,
+            criteria: criteria.iter().map(|c| c.text.clone()).collect(),
+        })
+}
+
+/// The two windows the process-health detectors look over: a day, and a week.
+pub const WINDOWS: [(Millis, &str); 2] = [(DAY, "24 h"), (7 * DAY, "7 d")];
+
+// ---- the stopped diagnosis ------------------------------------------------------------------
+
+/// Whether open work is moving, and if it stopped, whether on purpose (ADR 0124).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stopped {
+    /// A turn is queued, running or waiting to retry on it, or a wake is held for it.
+    Working,
+    /// Stopped by accident: its member is idle and it is still owed. Only this climbs the
+    /// escalation ladder.
+    Parked,
+    /// Stopped on purpose: blocked with a named reason and something live that will bring it
+    /// back (a check-back pending, an answer awaited, the work it waits on).
+    Held,
+    /// HQ cannot tell. Never taken for fine: the area's lead looks at it once.
+    Indeterminate,
+}
+
+impl Stopped {
+    /// Stable lowercase name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Parked => "parked",
+            Self::Held => "held",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// The diagnosis of one open task: where it is, and why, in a few words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Diagnosis {
+    /// Where it is.
+    pub stopped: Stopped,
+    /// Why, in a few words a briefing or the screen can say.
+    pub why: &'static str,
+}
+
+/// What the diagnosis reads of one task, worked out from the record at the moment it is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskFacts {
+    /// Where the task is.
+    pub status: TaskStatus,
+    /// Its holder, if anyone holds it (taken or handed to): whether that member is at work.
+    pub holder_at_work: Option<bool>,
+    /// A turn on it is running, or queued and ready to start, or waiting to retry.
+    pub live_turn: bool,
+    /// A turn on it is queued but waits to start, for budget or for the Mac (ADR 0131): the
+    /// wait is its wake. Work whose only turn waits is held, never parked.
+    pub waiting_turn: bool,
+    /// A wake for it is held behind another member's turn.
+    pub held_wake: bool,
+    /// It waits on open work: a task it waits for, or one of its sub-tasks.
+    pub waits_on_open_work: bool,
+    /// A task it waits on was dropped: that wait will never end by itself.
+    pub wait_dropped: bool,
+    /// A member said why it is blocked (a move to blocked carries a reason).
+    pub blocked_reason: bool,
+    /// Something live will bring it back: a pending check-back of its holder's, a question or
+    /// approval of its holder's still waiting, a huddle or a ladder rung being decided.
+    pub live_wake: bool,
+    /// The newest turn on it failed for good, its retries spent: the runner stopped it, not its
+    /// member. (A turn that ran out of time is its member's, and parks the work.)
+    pub last_turn_failed: bool,
+    /// Its holder was woken on it [`Thresholds::redundant_wakes`] times in a row for nothing.
+    pub woken_for_nothing: bool,
+}
+
+/// The stopped diagnosis of an open task (ADR 0124): read-time and pure, never stored, so it
+/// cannot go stale. `None` for finished work, which owes nothing.
+#[must_use]
+pub fn diagnose(facts: &TaskFacts) -> Option<Diagnosis> {
+    let said = |stopped, why| Some(Diagnosis { stopped, why });
+    if facts.status.finished() {
+        return None;
+    }
+    if facts.live_turn || facts.held_wake {
+        return said(Stopped::Working, "a turn on it is queued, running or held");
+    }
+    // A turn that waits for budget or for the Mac is a live wake: the work stopped on purpose,
+    // not by accident, and nothing is nudged, found stuck or climbed while it does (ADR 0131).
+    if facts.waiting_turn {
+        return said(
+            Stopped::Held,
+            "its turn waits for budget or for the Mac, and starts when it can",
+        );
+    }
+    let Some(at_work) = facts.holder_at_work else {
+        return said(Stopped::Indeterminate, "nobody holds it");
+    };
+    if facts.last_turn_failed {
+        return said(
+            Stopped::Indeterminate,
+            "its last turn failed: the runner stopped it, not its member",
+        );
+    }
+    if facts.woken_for_nothing {
+        return said(
+            Stopped::Parked,
+            "its member was woken on it again and again, and nothing came of it",
+        );
+    }
+    if !at_work {
+        return said(
+            Stopped::Held,
+            "its member is paused or on furlough, by the owner",
+        );
+    }
+    if facts.wait_dropped {
+        return said(Stopped::Parked, "what it waited on was dropped");
+    }
+    if facts.waits_on_open_work {
+        return said(Stopped::Held, "it waits on open work, whose end wakes it");
+    }
+    let named = facts.status != TaskStatus::Blocked || facts.blocked_reason;
+    if facts.live_wake && named {
+        return said(
+            Stopped::Held,
+            "a check-back or an answer it waits for will bring it back",
+        );
+    }
+    if facts.live_wake {
+        return said(
+            Stopped::Parked,
+            "it is blocked, and nobody said on what: a wake alone does not hold it",
+        );
+    }
+    said(Stopped::Parked, "its member is idle and it is still owed")
+}
+
+/// The key a recovery wake is recorded under before it is sent (ADR 0124): the task, the
+/// member woken, why, and what HQ saw of the task. The same key is never sent twice: only
+/// something new on the task (a post, a move, evidence, another wake) makes a new one.
+#[must_use]
+pub fn nudge_key(task: i64, member: i64, reason: &str, saw: &str) -> String {
+    format!("{task}:{member}:{reason}:{saw}")
+}
+
+// ---- process health ---------------------------------------------------------------------------
+
+/// What one ended turn did, as the outcomes line reads it from the record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnSeen {
+    /// When it ended.
+    pub ended_at: Millis,
+    /// Its label.
+    pub label: Label,
+    /// It was woken to test or accept work (a review round), or for a huddle.
+    pub checking: bool,
+    /// An act of its succeeded.
+    pub acted: bool,
+    /// It submitted a branch.
+    pub branch: bool,
+    /// Evidence it cited was judged to meet a criterion.
+    pub criterion_met: bool,
+    /// It took a reading nobody on the task had taken before.
+    pub new_evidence: bool,
+    /// It put a question up the chain or to the owner.
+    pub asked: bool,
+    /// What it spent, as the ledger kept it (ADR 0133): a finding says what the talk cost.
+    pub spent: Micros,
+}
+
+/// What a turn was, to the outcomes line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnKind {
+    /// It changed the product: an act, a branch, a criterion met.
+    Product,
+    /// It coordinated: talk, a re-check with nothing new, a review round, a question.
+    Coordination,
+    /// Neither: an empty turn, a first reading, a move with nothing behind it.
+    Neither,
+}
+
+/// What a turn was (ADR 0124): product change, coordination, or neither.
+#[must_use]
+pub const fn turn_kind(t: &TurnSeen) -> TurnKind {
+    let product = t.acted || t.branch || t.criterion_met;
+    if matches!(t.label, Label::Advanced) && product {
+        return TurnKind::Product;
+    }
+    if t.checking {
+        return TurnKind::Coordination;
+    }
+    match t.label {
+        Label::TalkOnly => TurnKind::Coordination,
+        Label::Checked if !t.new_evidence => TurnKind::Coordination,
+        Label::Blocked if t.asked => TurnKind::Coordination,
+        _ => TurnKind::Neither,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_fingerprint_is_its_words_two_at_a_time_lowercase_without_punctuation() {
+        assert_eq!(
+            fingerprint("Sonarr needs a restart, every night!"),
+            [
+                "a restart",
+                "every night",
+                "needs a",
+                "restart every",
+                "sonarr needs"
+            ]
+        );
+        assert_eq!(fingerprint("Deluge."), ["deluge"]);
+        assert_eq!(fingerprint("  "), Vec::<String>::new());
+    }
+
+    fn idle(status: TaskStatus) -> TaskFacts {
+        TaskFacts {
+            status,
+            holder_at_work: Some(true),
+            live_turn: false,
+            waiting_turn: false,
+            held_wake: false,
+            waits_on_open_work: false,
+            wait_dropped: false,
+            blocked_reason: false,
+            live_wake: false,
+            last_turn_failed: false,
+            woken_for_nothing: false,
+        }
+    }
+
+    fn stopped(facts: TaskFacts) -> Stopped {
+        diagnose(&facts).expect("open work").stopped
+    }
+
+    #[test]
+    fn work_with_a_turn_is_working_and_finished_work_owes_nothing() {
+        let running = TaskFacts {
+            live_turn: true,
+            ..idle(TaskStatus::Doing)
+        };
+        assert_eq!(stopped(running), Stopped::Working);
+        let held = TaskFacts {
+            held_wake: true,
+            ..idle(TaskStatus::Todo)
+        };
+        assert_eq!(stopped(held), Stopped::Working);
+        assert_eq!(diagnose(&idle(TaskStatus::Done)), None);
+        assert_eq!(diagnose(&idle(TaskStatus::Dropped)), None);
+    }
+
+    /// A turn that waits for budget or for the Mac is a live wake (ADR 0131): work whose only
+    /// turn waits is held, however long, and whatever its member's status, and is never parked
+    /// for the ladder to climb. A turn that runs beside it makes the work simply working.
+    #[test]
+    fn work_whose_turn_waits_for_budget_or_the_mac_is_held_never_parked() {
+        for status in [
+            TaskStatus::Todo,
+            TaskStatus::Doing,
+            TaskStatus::Blocked,
+            TaskStatus::InReview,
+        ] {
+            let waiting = TaskFacts {
+                waiting_turn: true,
+                ..idle(status)
+            };
+            let found = diagnose(&waiting).expect("open work");
+            assert_eq!(found.stopped, Stopped::Held, "{status:?}");
+            assert!(found.why.contains("waits for budget or for the Mac"));
+        }
+        let and_running = TaskFacts {
+            waiting_turn: true,
+            live_turn: true,
+            ..idle(TaskStatus::Doing)
+        };
+        assert_eq!(stopped(and_running), Stopped::Working);
+        // Without the wait it is the accident it was.
+        assert_eq!(stopped(idle(TaskStatus::Doing)), Stopped::Parked);
+        // Finished work owes nothing, a turn waiting for it or not.
+        let finished = TaskFacts {
+            waiting_turn: true,
+            ..idle(TaskStatus::Done)
+        };
+        assert_eq!(diagnose(&finished), None);
+    }
+
+    #[test]
+    fn an_idle_member_with_work_still_owed_has_parked_it() {
+        for status in [TaskStatus::Todo, TaskStatus::Doing, TaskStatus::InReview] {
+            assert_eq!(stopped(idle(status)), Stopped::Parked, "{status:?}");
+        }
+    }
+
+    /// Stopped on purpose is blocked with a reason and something live to bring it back; a
+    /// blocked task whose wake was spent, or that nobody said why it is blocked, is parked.
+    #[test]
+    fn blocked_with_a_reason_and_a_live_wake_is_held_and_without_either_parked() {
+        let held = TaskFacts {
+            blocked_reason: true,
+            live_wake: true,
+            ..idle(TaskStatus::Blocked)
+        };
+        assert_eq!(stopped(held), Stopped::Held);
+        let spent = TaskFacts {
+            blocked_reason: true,
+            ..idle(TaskStatus::Blocked)
+        };
+        assert_eq!(stopped(spent), Stopped::Parked, "its wake was spent");
+        let unnamed = TaskFacts {
+            live_wake: true,
+            ..idle(TaskStatus::Blocked)
+        };
+        assert_eq!(stopped(unnamed), Stopped::Parked, "nobody said on what");
+        let planned = TaskFacts {
+            live_wake: true,
+            ..idle(TaskStatus::Doing)
+        };
+        assert_eq!(
+            stopped(planned),
+            Stopped::Held,
+            "its member's own check-back"
+        );
+    }
+
+    #[test]
+    fn a_wait_on_open_work_holds_it_and_a_dropped_wait_parks_it() {
+        let waiting = TaskFacts {
+            waits_on_open_work: true,
+            ..idle(TaskStatus::Blocked)
+        };
+        assert_eq!(stopped(waiting), Stopped::Held);
+        let dropped = TaskFacts {
+            wait_dropped: true,
+            waits_on_open_work: true,
+            ..idle(TaskStatus::Blocked)
+        };
+        assert_eq!(stopped(dropped), Stopped::Parked);
+    }
+
+    /// Unknown is a value: what HQ cannot tell is never taken for fine.
+    #[test]
+    fn what_hq_cannot_tell_is_indeterminate_never_fine() {
+        let nobody = TaskFacts {
+            holder_at_work: None,
+            ..idle(TaskStatus::Todo)
+        };
+        assert_eq!(stopped(nobody), Stopped::Indeterminate);
+        let failed = TaskFacts {
+            last_turn_failed: true,
+            ..idle(TaskStatus::Doing)
+        };
+        assert_eq!(stopped(failed), Stopped::Indeterminate);
+        let paused = TaskFacts {
+            holder_at_work: Some(false),
+            ..idle(TaskStatus::Doing)
+        };
+        assert_eq!(
+            stopped(paused),
+            Stopped::Held,
+            "the owner paused its member"
+        );
+    }
+
+    #[test]
+    fn a_member_woken_again_and_again_for_nothing_has_parked_it_whatever_it_waits_on() {
+        let woken = TaskFacts {
+            woken_for_nothing: true,
+            live_wake: true,
+            blocked_reason: true,
+            ..idle(TaskStatus::Blocked)
+        };
+        assert_eq!(stopped(woken), Stopped::Parked);
+    }
+
+    #[test]
+    fn a_nudge_is_keyed_by_what_it_saw() {
+        let a = nudge_key(4, 2, "recovery", "doing|posts:3");
+        assert_eq!(a, "4:2:recovery:doing|posts:3");
+        assert_ne!(a, nudge_key(4, 2, "recovery", "doing|posts:4"));
+    }
+
+    /// Talk is coordination, by the turns' labels: a turn that took
+    /// a first reading, or nothing, is neither; a review round and a re-check are.
+    #[test]
+    fn only_coordination_turns_are_talk() {
+        let now = 10 * DAY;
+        let at = |label: Label| TurnSeen {
+            ended_at: now - 1_000,
+            ..seen(label)
+        };
+        let turns = [
+            at(Label::Empty),
+            TurnSeen {
+                new_evidence: true,
+                ..at(Label::Checked)
+            },
+            at(Label::Advanced),
+            TurnSeen {
+                checking: true,
+                ..at(Label::Empty)
+            },
+            at(Label::Checked),
+            TurnSeen {
+                asked: true,
+                ..at(Label::Blocked)
+            },
+            at(Label::TalkOnly),
+        ];
+        let talk = turns
+            .iter()
+            .filter(|t| turn_kind(t) == TurnKind::Coordination)
+            .count();
+        assert_eq!(talk, 4);
+    }
+
+    fn seen(label: Label) -> TurnSeen {
+        TurnSeen {
+            ended_at: 100,
+            label,
+            checking: false,
+            acted: false,
+            branch: false,
+            criterion_met: false,
+            new_evidence: false,
+            asked: false,
+            spent: 0,
+        }
+    }
+
+    #[test]
+    fn product_change_is_an_act_a_branch_or_a_criterion_met_and_talk_is_coordination() {
+        let acted = TurnSeen {
+            acted: true,
+            ..seen(Label::Advanced)
+        };
+        assert_eq!(turn_kind(&acted), TurnKind::Product);
+        let claimed = seen(Label::Advanced);
+        assert_eq!(
+            turn_kind(&claimed),
+            TurnKind::Neither,
+            "a move is not product"
+        );
+        assert_eq!(turn_kind(&seen(Label::TalkOnly)), TurnKind::Coordination);
+        assert_eq!(turn_kind(&seen(Label::Checked)), TurnKind::Coordination);
+        let first_look = TurnSeen {
+            new_evidence: true,
+            ..seen(Label::Checked)
+        };
+        assert_eq!(turn_kind(&first_look), TurnKind::Neither);
+        let review = TurnSeen {
+            checking: true,
+            ..seen(Label::Advanced)
+        };
+        assert_eq!(turn_kind(&review), TurnKind::Coordination, "a review round");
+        let asked = TurnSeen {
+            asked: true,
+            ..seen(Label::Blocked)
+        };
+        assert_eq!(turn_kind(&asked), TurnKind::Coordination);
+        assert_eq!(turn_kind(&seen(Label::Blocked)), TurnKind::Neither);
+        assert_eq!(turn_kind(&seen(Label::Empty)), TurnKind::Neither);
+    }
+
+    #[test]
+    fn a_criterion_is_named_by_number_or_words() {
+        use super::super::evidence::Criterion;
+        let c = [
+            Criterion::new("The cause is found", false),
+            Criterion::new("Sonarr is running", true),
+        ];
+        for said in [
+            "2",
+            "#2",
+            "criterion 2",
+            " Criterion  2 ",
+            "sonarr is  RUNNING",
+        ] {
+            assert_eq!(serves(&c, said), Some(2), "{said:?}");
+        }
+        for said in ["", "3", "0", "sonarr", "the fix"] {
+            assert_eq!(serves(&c, said), None, "{said:?}");
+        }
+    }
+
+    #[test]
+    fn a_request_for_the_owners_yes_serves_a_criterion_of_its_task_or_is_refused_saying_which() {
+        use super::super::evidence::Criterion;
+        use super::super::work::TaskId;
+        let c = [
+            Criterion::new("The cause is found", false),
+            Criterion::new("Sonarr is running", true),
+        ];
+        let task = TaskId(7);
+        assert_eq!(approval_serves(task, &c, Some("2")), Ok(2));
+        assert_eq!(
+            approval_serves(task, &c, Some("the cause is  FOUND")),
+            Ok(1),
+            "by its words, case and spacing aside"
+        );
+        for said in [None, Some(""), Some("  "), Some("3"), Some("the moon base")] {
+            let refused = approval_serves(task, &c, said).unwrap_err().to_string();
+            assert!(
+                refused.contains("which of #7's criteria does asking the owner serve?")
+                    && refused.contains("1. The cause is found; 2. Sonarr is running")
+                    && refused.contains("never reaches the owner's desk"),
+                "{said:?}: {refused}"
+            );
+        }
+        // A task with no criteria has nothing to serve, however the request is worded.
+        let nothing = approval_serves(task, &[], Some("1")).unwrap_err();
+        assert_eq!(nothing, GuardRefusal::ApprovalNothingToServe { task });
+        let words = nothing.to_string();
+        assert!(
+            words.contains("#7 has no criteria")
+                && words.contains("narrow_criteria")
+                && words.contains("ask_owner"),
+            "{words}"
+        );
+    }
+
+    /// Live, 18 October 2026: the CEO put the same board decision on the desk twice, once a
+    /// task, both checks exiting 127.
+    #[test]
+    fn the_same_ask_from_two_tasks_is_one_and_a_different_one_is_not() {
+        let first = fingerprint(
+            "Decision: Install ansible-playbook, ansible-lint and yamllint on the dev node?\n\
+             Recommendation: Yes.\nWhy: The check exited 127.\nEvidence: task 671",
+        );
+        let again = fingerprint(
+            "Decision: Install ansible-playbook, ansible-lint and yamllint on the dev node?\n\
+             Recommendation: Yes, once.\nWhy: The check exited 127.\nEvidence: task 672",
+        );
+        let other = fingerprint(
+            "Decision: Give sonarr 2 GB of memory?\nRecommendation: Yes.\nWhy: It was killed \
+             for memory three times.\nEvidence: task 690",
+        );
+        assert!(same_ask(&first, &again));
+        assert!(!same_ask(&first, &other));
+        assert!(
+            !same_ask(&first, &fingerprint("Install yamllint?")),
+            "a short ask inside a long one is not the same ask"
+        );
+        let short = fingerprint("Install yamllint on the dev node?");
+        assert!(
+            !same_ask(&short, &first),
+            "nor is a long ask that holds a short one waiting: each must hold the other's"
+        );
+        assert!(
+            !same_ask(&first, &short),
+            "whichever of the two is waiting and which is new"
+        );
+    }
+
+    /// The caps on a runaway (ADR 0133) start well above the live record of 17 and 18 October
+    /// (201 turns in 39 hours between all the members) and well below the scripted demo's
+    /// 1,539 turns in 3 h 40 min: forty a team in ten minutes, which is four a minute and only
+    /// turns that end at once can make. A member on the house's own models is stopped by waste,
+    /// not a count (amended 2026-11-01, D15): ten turns in a row that showed nothing.
+    #[test]
+    fn the_caps_on_a_runaway_start_where_adr_0133_says() {
+        let t = THRESHOLDS;
+        assert_eq!(t.free_turns_wasted, 10);
+        assert_eq!((t.runaway_turns, t.runaway_window_ms), (40, 10 * MINUTE));
+    }
+
+    #[test]
+    fn the_thresholds_start_where_adr_0124_says() {
+        let t = THRESHOLDS;
+        assert_eq!(t.redundant_wakes, 3);
+    }
+}

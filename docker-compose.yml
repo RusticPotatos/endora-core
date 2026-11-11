@@ -1,0 +1,493 @@
+# Simplest dev deployment. Compose builds + runs on the target host — no
+# registry, native to that host's arch. Out of the box this is the local Docker
+# daemon, so a fresh clone works with no setup. (Run Compose directly and it asks for
+# ENDORA_OWNER_VALUES to be set, even to nothing: `ENDORA_OWNER_VALUES= docker compose up`.)
+#
+#   make deploy                                     # build + start
+#   make deploy-logs                                # follow logs
+#   make deploy-down                                # stop (data volume kept)
+#
+# To deploy to an always-on box instead, point Docker at it — per invocation:
+#
+#   make deploy DOCKER_CONTEXT=nas
+#
+# ...or once, per machine, in `owner.mk` (git-ignored):
+#
+#   DOCKER_CONTEXT = nas
+#
+# The Makefile pins COMPOSE_PROJECT_NAME=endora, so a deploy run from a git
+# worktree still targets the real containers and the real data volume rather
+# than inventing a new project named after the directory.
+#
+# then open https://<host>:8787  (ENDORA_TLS is on; accept the self-signed
+# cert once — see docs/hosting.md)
+#
+# The node requires bearer authentication for /v1. Keep its published port on a
+# trusted network and use HTTPS for credentials. See docs/hosting.md.
+
+# Every service here is released by Endora (`make deploy`, or the endora.homelab collection's
+# `endora` role), never by Watchtower: its images are built here, not pulled, and a container
+# recreated at night cuts the team's turns. Watchtower failed nightly on docker-observer, which
+# runs in the node's network ("Unable to resolve network container"), and HQ could not tell
+# why containers had restarted (D11). scripts/check-collection-parity.sh holds every service to it.
+x-released-by-endora: &released-by-endora
+  com.centurylinklabs.watchtower.enable: "false"
+
+services:
+  docker-observer:
+    # Explicit opt-in; fixed GET routes are the boundary, not a read-only socket mount.
+    profiles: [homelab]
+    labels: *released-by-endora
+    image: endora-node:latest
+    entrypoint: [python3, /usr/local/lib/endora/homelab-docker-proxy.py]
+    network_mode: "service:node"
+    depends_on:
+      node:
+        condition: service_started
+        restart: true
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+  # Endora HQ (ADR 0102): the team service, in the same image as the node. Reachable only by
+  # the node, on this project's network: no port is published. The Pi reaches its worker and
+  # runner doors through the node's team gateway (ADR 0110). Its database is its own; it
+  # holds no secret but the token it makes for the node, and nothing private. A scripted
+  # demo team (HQ_DEMO=1) works on the simulated runner until real workers exist.
+  hq:
+    profiles: [hq]
+    labels: *released-by-endora
+    image: endora-node:latest
+    container_name: endora-hq
+    entrypoint: [endora-hq]
+    restart: unless-stopped
+    environment:
+      HQ_ADDR: 0.0.0.0:8790
+      HQ_DB: /data/hq.db
+      HQ_TOKEN_FILE: /token/token
+      # The runner's own token, made like the node's, in a volume only HQ and the runner mount.
+      HQ_RUNNER_TOKEN_FILE: /runner-token/token
+      HQ_DEMO: "${ENDORA_HQ_DEMO:-1}"
+      HQ_TICK_SECONDS: "${ENDORA_HQ_TICK_SECONDS:-30}"
+      # The owner's day, for "today" on the scorecard, the ledger's days and the briefings:
+      # the same zone the node is given (above the node's own block).
+      ENDORA_TIME_ZONE: "${ENDORA_TIME_ZONE-}"
+      ENDORA_UTC_OFFSET_MINUTES: "${ENDORA_UTC_OFFSET_MINUTES:-0}"
+      # Two malloc arenas, not glibc's eight per core. Each request runs on a blocking thread,
+      # and each thread's arena kept what a snapshot build had used (about 48 MB) for good: on
+      # the NAS's eight cores, eight such arenas reached the cap and HQ was killed, 31 times in
+      # a week, mostly with a console open and nothing else happening.
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - ${ENDORA_HQ_DIR:-endora-hq-data}:/data
+      - endora-hq-token:/token
+      - endora-hq-runner-token:/runner-token
+    networks:
+      default: {}
+      # Also on the team's fenced network, where a worker's one door into HQ is the team
+      # protocol, opened only by its turn's token.
+      team:
+        aliases: [hq]
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # A small service on a NAS whose memory is tight: a hard cap, not a hope. It idles near
+    # 100 MB since the record's search index (ADR 0129); 128m was killed applying a large paste.
+    # What filled 384m was idle malloc arenas, not data (MALLOC_ARENA_MAX above).
+    mem_limit: 384m
+  # The runner (ADR 0102, phase 4): starts each turn HQ hands it as a fresh worker container,
+  # from this same image, on the fenced `team` network. It holds Docker's socket, which is as
+  # good as holding the host, so it is a profile of its own, off until the owner turns it on,
+  # and it takes nothing from HQ but a run and its token: the image, the mounts, the network
+  # and the limits are its own. HQ hands it turns only with the demo off.
+  runner:
+    profiles: [workers]
+    labels: *released-by-endora
+    image: endora-node:latest
+    container_name: endora-runner
+    entrypoint: [endora-runner]
+    restart: unless-stopped
+    environment:
+      HQ_URL: http://hq:8790
+      HQ_RUNNER_TOKEN_FILE: /runner-token/token
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # The token HQ makes for the runner. Read-only here; only HQ writes it.
+      - endora-hq-runner-token:/runner-token:ro
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # It only asks and tells; each worker has its own cap, set by the runner.
+    mem_limit: 64m
+  # endora-sound (ADR 0104), when its `sound` profile runs: append `sound` to COMPOSE_PROFILES
+  # and set ENDORA_SOUND_URL=http://sound:8791 in owner.mk. Its own image (ffmpeg is in it,
+  # not in the node's), no published port: the node is its remote, through the token the two
+  # share. Radio stations need the internet; nothing else does.
+  sound:
+    profiles: [sound]
+    labels: *released-by-endora
+    build:
+      context: .
+      target: sound
+    image: endora-sound:latest
+    container_name: endora-sound
+    restart: unless-stopped
+    environment:
+      # The AirPlay senders, on the host's network, reached through the host; each instance's
+      # API needs the password the senders made, which only this hub is given.
+      SOUND_SENDERS: "http://host.docker.internal:3701,http://host.docker.internal:3702,http://host.docker.internal:3703,http://host.docker.internal:3704"
+      SOUND_SENDER_PASSWORD_FILE: /sender-secret/password
+      # Spotify plays into the hub through its own receiver, below.
+      SOUND_SPOTIFY: "on"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${ENDORA_SOUND_DIR:-endora-sound-data}:/data
+      - endora-sound-token:/token
+      # The pipes the hub writes and the senders play, one per sender.
+      - endora-sound-pipes:/pipes
+      - endora-sound-secret:/sender-secret:ro
+    tmpfs:
+      - /tmp
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    # Decoding stations and encoding streams is ffmpeg's work; a hard cap on a tight NAS.
+    mem_limit: 256m
+  # Spotify into endora-sound (ADR 0104): a Spotify Connect receiver called "Endora" (librespot,
+  # the image the ansible-nas Spotify receiver already uses, pinned to the build on the NAS)
+  # writing into the hub's Spotify pipe. On the host's network so the Spotify app finds it;
+  # pick "Endora" in the app's devices once, and it keeps its own login after that. Beside the
+  # old ansible-nas receiver, which it does not clash with.
+  spotify:
+    profiles: [sound]
+    labels: *released-by-endora
+    image: giof71/librespot@sha256:0c7cd19a49547cd0e34ac7c6d9aadd4b2703c5cb13acd1dbfd4982c311d478fb
+    container_name: endora-spotify
+    restart: unless-stopped
+    network_mode: host
+    depends_on: [sound]
+    environment:
+      DEVICE_NAME: Endora
+      BACKEND: pipe
+      DEVICE: /pipes/spotify.pcm
+      FORMAT: S16
+      BITRATE: "320"
+      INITIAL_VOLUME: "100"
+      ENABLE_SYSTEM_CACHE: "Y"
+      DISABLE_AUDIO_CACHE: "Y"
+    volumes:
+      - endora-sound-pipes:/pipes
+      # Its Spotify login, kept once given.
+      - endora-spotify-login:/data/system-cache
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+  # endora-sound's AirPlay senders (ADR 0104): one shared airptpd clock and four stock OwnTone
+  # instances, on the host's network because AirPlay speakers are found and reached over
+  # mDNS. Its own profile, senders, kept out of COMPOSE_PROFILES until the ansible-nas
+  # owntone role is retired: the two cannot run on one host (both take the AirPlay clock's
+  # ports and the speakers), so a routine deploy must never start it beside the old one.
+  senders:
+    profiles: [senders]
+    labels: *released-by-endora
+    build:
+      context: .
+      target: senders
+    image: endora-senders:latest
+    container_name: endora-senders
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # 1: the AirPlay doors are the airplay2 container's (below, ADR 0128) and none run here.
+      # Anything else: the classic doors run here, as before. `make deploy` sets it from
+      # owner.mk, and adds the airplay2 profile with it.
+      SOUND_AIRPLAY2: "${SOUND_AIRPLAY2:-0}"
+    volumes:
+      - endora-sound-pipes:/pipes
+      - endora-senders-data:/data
+      - endora-sound-secret:/secret
+    tmpfs:
+      - /run
+      - /tmp
+    read_only: true
+    # Only what it needs: the clock's ports below 1024, OwnTone and avahi dropping to their
+    # own users, and its folders made theirs.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE, KILL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+  # endora-sound's AirPlay 2 door (ADR 0128), "Endora Mixer": shairport-sync for AirPlay 2 and
+  # its nqptp clock, so an Apple TV holds its picture back to match the door's sound. On a LAN
+  # address of its own (the airplay2-lan network below): nqptp needs UDP 319/320, which the
+  # senders' airptpd holds on the host. It shares only the pipes volume with the hub, which
+  # is all the two need: the NAS itself cannot reach a macvlan container's address, and does
+  # not have to. Its own profile, airplay2, which `make deploy` adds when owner.mk says
+  # SOUND_AIRPLAY2 = 1 (with the network's values, docs/homelab.md).
+  airplay2:
+    profiles: [airplay2]
+    labels: *released-by-endora
+    build:
+      context: .
+      target: airplay2
+    image: endora-airplay2:latest
+    container_name: endora-airplay2
+    restart: unless-stopped
+    # The name it announces itself by on the LAN (mDNS), and what avahi calls the host.
+    hostname: "${SOUND_AIRPLAY2_HOSTNAME:-endora-mixer}"
+    environment:
+      SOUND_AIRPLAY2_HOSTNAME: "${SOUND_AIRPLAY2_HOSTNAME:-endora-mixer}"
+      # Seconds the door hands its sound over early, for the mix and the speaker after it, so
+      # the picture and the sound line up. Tune it by ear against a video (docs/homelab.md).
+      SOUND_AIRPLAY2_LATENCY: "${SOUND_AIRPLAY2_LATENCY:-0.5}"
+      SOUND_AIRPLAY2_INTERFACE: eth0
+    networks:
+      airplay2-lan:
+        ipv4_address: "${SOUND_AIRPLAY2_IP:-192.0.2.10}"
+        # Fixed, so the router sees one device and keeps its reservation across restarts.
+        mac_address: "${SOUND_AIRPLAY2_MAC:-aa:bb:cc:dd:ee:20}"
+    volumes:
+      - endora-sound-pipes:/pipes
+    tmpfs:
+      - /run
+      - /tmp
+    read_only: true
+    # Only what it needs: the clock's ports below 1024, avahi and the receivers dropping to
+    # their own users, and avahi's folder made its own.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID, NET_BIND_SERVICE, KILL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+  node:
+    labels: *released-by-endora
+    build:
+      context: .
+      args:
+        # Stamped by `make deploy` (git short SHA); shows in /health + the header.
+        ENDORA_BUILD: "${ENDORA_BUILD:-dev}"
+    image: endora-node:latest
+    container_name: endora-node
+    restart: unless-stopped
+    # Names first from the house's router when ENDORA_LAN_DNS names it (owner.mk), so a laptop's
+    # name (the Mac's brain, ADR 0130) follows it when its address changes; then the public one.
+    dns:
+      - "${ENDORA_LAN_DNS:-1.1.1.1}"
+      - 1.1.1.1
+    ports:
+      - "8787:8787"
+      # The team listener (ENDORA_TEAM_ADDR, plain HTTP), published on the house's network for
+      # the Pi's runner and sandboxes (ADR 0110): the model relays, the contracts and the team
+      # gateway to HQ. Safe to publish because everything on it needs a token (a running
+      # turn's, or the runner's, which HQ checks).
+      - "8788:8788"
+    volumes:
+      # Everything stateful lives here: the SQLite database (every setting, API key and
+      # sign-in secret) and the TLS cert/key. By default a Docker named volume, which sits
+      # inside Docker's own data root where a backup tool cannot easily reach it. Set
+      # ENDORA_DATA_DIR in owner.mk to an absolute host path to keep it somewhere that can
+      # be backed up instead — and run `make migrate-data` once first, or the node starts
+      # on an empty folder (`make deploy` refuses that). See docs/hosting.md.
+      - ${ENDORA_DATA_DIR:-endora-data}:/data
+      # Where the brain's pages were (ADR 0101). Kept mounted for one release so the node can
+      # empty it, as the owner chose when the chat was retired (ADR 0136); removed after.
+      - ${ENDORA_BRAIN_DIR:-endora-brain}:/brain
+      # Permission-controlled host agent; read-only mount does not grant write APIs.
+      # The agent authenticates requests and executes only its private fixed catalog.
+      - /run/endora-jobs:/run/endora-jobs:ro
+      # The token Endora HQ makes for itself, which the node signs with (ADR 0102).
+      # Read-only here; only HQ writes it.
+      - endora-hq-token:/hq-token:ro
+      - endora-sound-token:/sound-token:ro
+      # The deploy key the node pushes the wing's approved branches with (ADR 0115): a host
+      # folder holding one file, `key` (an ed25519 private key, mode 0600, added to the fork on
+      # GitHub as a deploy key with write access). Set ENDORA_GIT_PUSH_KEY in owner.mk to that
+      # folder; unset, an empty volume is mounted, the node cannot push, and the owner's desk
+      # offers the branch's bundle to download instead. Read-only: the node never writes it.
+      - ${ENDORA_GIT_PUSH_KEY:-endora-no-git-key}:/git-push-key:ro
+      # The bench's credential (ADR 0123): a host folder holding one file, `token` (32+
+      # characters, mode 0600), that opens the team listener's model relay alone, for measuring
+      # an external agent harness. Set ENDORA_BENCH_TOKEN in owner.mk to that folder; unset, an
+      # empty volume is mounted and there is no bench. Deleting the file turns it off at once.
+      - ${ENDORA_BENCH_TOKEN:-endora-no-bench}:/bench-token:ro
+    networks:
+      default: {}
+      # Also on the team's fenced network (ADR 0102), where a worker reaches the model relay
+      # here, opened only by its turn's token: plain HTTP on ENDORA_TEAM_ADDR, also published
+      # on 8788 for the Pi (ADR 0110).
+      team:
+        aliases: [node]
+    # The image already defaults ENDORA_ADDR=0.0.0.0:8787 and
+    # ENDORA_DB=/data/endora.db. Point the butler/proposer at an Ollama running
+    # on the host (host.docker.internal → the host gateway). Without a reachable
+    # model the butler simply falls back to its scripted brain, so this is safe
+    # to leave in even where no model is running.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # Overridable so `make bundled` can point this at the sibling runtime below without
+      # editing the file. The default is an Ollama on the host, which is what a
+      # bring-your-own setup looks like.
+      ENDORA_MODEL_URL: "${ENDORA_MODEL_URL:-http://host.docker.internal:11434/v1}"
+      # Endora HQ (ADR 0102), when its `hq` profile runs: COMPOSE_PROFILES=hq and
+      # ENDORA_HQ_URL=http://hq:8790 in owner.mk. Empty: no HQ.
+      ENDORA_HQ_URL: "${ENDORA_HQ_URL-}"
+      ENDORA_HQ_TOKEN_FILE: /hq-token/token
+      # The lab's ansible-nas (ADR 0112): the owner's public fork on GitHub, as owner/name, and
+      # its branch (unset: the fork's own default branch, asked of GitHub once, ADR 0115), in
+      # owner.mk. The node reads only its role names and its docs (docs/, website/docs/, role
+      # READMEs) for the team's homelab_map and ansible_nas_doc, never an inventory or
+      # group_vars; the engineering wing (ADR 0115) also keeps a bare mirror of it under /data
+      # for the team's branches. Empty: not configured, and who manages a container is unknown.
+      ENDORA_ANSIBLE_NAS_REPO: "${ENDORA_ANSIBLE_NAS_REPO-}"
+      ENDORA_ANSIBLE_NAS_REF: "${ENDORA_ANSIBLE_NAS_REF-}"
+      # Where the deploy key is inside the container (the mount above); absent, no push.
+      ENDORA_GIT_PUSH_KEY_FILE: /git-push-key/key
+      # The bench's token (the mount above; absent, no bench) and what it may spend a day, in
+      # cents (two dollars unless ENDORA_BENCH_CAP_CENTS says otherwise in owner.mk).
+      ENDORA_BENCH_TOKEN_FILE: /bench-token/token
+      ENDORA_BENCH_CAP_CENTS: "${ENDORA_BENCH_CAP_CENTS:-200}"
+      # Containers the owner has retired but kept, with a note the team's map shows beside
+      # each: name=note pairs, ";" between them (e.g. owntone=retired, kept for its settings).
+      ENDORA_LAB_RETIRED: "${ENDORA_LAB_RETIRED-}"
+      # The owner's own values (name, city, anyone they live with), comma separated, from the
+      # git-ignored owner.mk: the privacy scan reads them before HQ's branches are pushed to the
+      # public fork (ADR 0115, amended 2026-10-31). Empty: shapes and the secret tripwire only.
+      # Must be SET, empty or not: Compose cannot read the variable's previous name, so a host
+      # that still sets only that name would otherwise start with no personal values and say
+      # nothing. Unset stops Compose here, loudly; `make deploy` and the endora role always set it.
+      ENDORA_OWNER_VALUES: "${ENDORA_OWNER_VALUES?ENDORA_OWNER_VALUES is not set. Set it (empty is allowed: the privacy scan then reads shapes and the secret tripwire only) or deploy with make deploy. A variable under the name this one replaced is not read by Compose: rename it}"
+      # endora-sound (ADR 0104), when its `sound` profile runs. Empty: no sound hub.
+      ENDORA_SOUND_URL: "${ENDORA_SOUND_URL-}"
+      ENDORA_SOUND_TOKEN_FILE: /sound-token/token
+      # A capable instruction model — strong at following directions and emitting
+      # clean JSON, which the butler relies on (skill selection, no fabrication,
+      # relaying results). Used for the drafting endpoint and as the single-model
+      # butler when the mixture below is not set.
+      ENDORA_MODEL: "${ENDORA_MODEL:-qwen2.5:7b}"
+      # The butler brain (ADR 0055). The default is the single ENDORA_MODEL above:
+      # the mixture (a tool-tuned router + a generalist synthesizer) out-routed a
+      # single model in one early eval, but ADR 0055 rejected it after live use —
+      # two models thrash through one queue on the same GPU — and the 2026-08-05
+      # bake-off settled on the single 7b. Set BOTH to run the mixture anyway;
+      # both must be pulled on the Ollama host. Blank or unset means single-model.
+      ENDORA_ROUTER_MODEL: "${ENDORA_ROUTER_MODEL-}"
+      ENDORA_SYNTH_MODEL: "${ENDORA_SYNTH_MODEL-}"
+      # Optional private egress: route *external* skill traffic (weather, news,
+      # search, web fetch) through a proxy of your choice, WITHOUT binding Endora's
+      # network to another container (no `network_mode: service:...`; that tight
+      # coupling means a proxy/VPN blip takes the app down). Accepts http(s):// or
+      # socks5://. The local model call is never proxied.
+      #   Use a proxy dedicated to this — NOT a shared P2P/torrent VPN path. A small
+      #   HTTP/SOCKS proxy container, Tor (socks5://tor:9050), or a separate egress
+      #   VPN are all fine.
+      # ENDORA_EGRESS_PROXY: "socks5://my-egress-proxy:1080"
+      # Self-signed HTTPS so the console is a secure context — required for the
+      # browser microphone/voice on a LAN address with no domain or proxy. The
+      # cert persists in /data (accept the browser warning once). Set
+      # ENDORA_TLS_SAN to this host's LAN IP/hostname for a cleaner cert — do that
+      # in docker-compose.override.yml (kept local, so no private IP is in git).
+      ENDORA_TLS: "1"
+      # The team listener, in plain HTTP, for the team's workers: HQ's model relays (ADR 0102,
+      # phase 4), the team's contracts (ADR 0106) and the team gateway to HQ (ADR 0110), served
+      # nowhere else. Published on 8788 (above) for the Pi; everything on it needs a token.
+      ENDORA_TEAM_ADDR: "0.0.0.0:8788"
+      # Your time zone, by name (e.g. America/New_York), so a pattern at 07:30 is your 07:30
+      # and the brief stays at its hour when the clocks change. Without one, the fixed offset
+      # below (minutes from UTC) is used, which is an hour out for half the year wherever the
+      # clocks change.
+      ENDORA_TIME_ZONE: "${ENDORA_TIME_ZONE-}"
+      ENDORA_UTC_OFFSET_MINUTES: "${ENDORA_UTC_OFFSET_MINUTES:-0}"
+
+  # An optional bundled model runtime, so `docker compose --profile bundled up` gives a
+  # working butler with nothing to install first. OFF unless the profile is named.
+  #
+  # This does NOT make Endora a model runtime (ADR 0055). Endora's code is unchanged: it
+  # talks to an OpenAI-compatible URL and knows nothing about what serves it. That the URL
+  # happens to belong to a sibling in the same compose file is a packaging decision, and
+  # deleting this service leaves Endora working exactly as before against your own endpoint.
+  #
+  # It also puts the hardware detection where the hardware is. Endora's container has no GPU
+  # access and cannot see a card even when one is present; this one is granted it, so it can
+  # look and choose. See scripts/pick-a-model.sh for the ladder and why it is not simply
+  # "the biggest that fits".
+  runtime:
+    profiles: ["bundled"]
+    labels: *released-by-endora
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    container_name: endora-runtime
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/pick-a-model.sh"]
+    volumes:
+      - ./scripts/pick-a-model.sh:/opt/pick-a-model.sh:ro
+      # Models are large and downloaded once. A named volume keeps them across restarts so
+      # a container rebuild is not a fresh multi-gigabyte fetch.
+      - endora-models:/root/.cache/llama.cpp
+    # Requested, not required: without a GPU the compose file still starts and the script
+    # falls back to a model that runs on a CPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+networks:
+  # The fence around the team's workers (ADR 0102, phase 4). Internal: a worker container on
+  # it reaches the node and HQ, which join it too, and nothing else (no internet, no LAN, not
+  # the NAS itself). Named outright, because the runner starts workers on it by that name.
+  team:
+    name: endora_team
+    internal: true
+    driver_opts:
+      # Without this, the bridge's own address on the host is a gateway a worker can reach,
+      # and with it whatever the NAS serves on all addresses. Isolated: no address on the host
+      # at all (Docker 28 and later).
+      com.docker.network.bridge.gateway_mode_ipv4: isolated
+  # The AirPlay 2 door's own address on the house's LAN (ADR 0128): a macvlan network on the
+  # NAS's LAN interface, made only when the airplay2 profile runs. The values are the owner's,
+  # in owner.mk (docs/homelab.md); these defaults are the documentation range and an interface
+  # that does not exist, so a run without them fails loudly instead of joining a LAN. The NAS
+  # cannot reach an address on this network (macvlan keeps the parent and its children apart),
+  # which nothing here needs. Docker allows one macvlan network per LAN subnet, so when another
+  # container already has one (a Pi-hole on its own address, say), SOUND_AIRPLAY2_NETWORK names
+  # it and the door joins it instead: the values below are then that network's, not used.
+  airplay2-lan:
+    name: "${SOUND_AIRPLAY2_NETWORK:-endora_airplay2-lan}"
+    external: ${SOUND_AIRPLAY2_SHARED:-false}
+    driver: macvlan
+    driver_opts:
+      parent: "${SOUND_AIRPLAY2_PARENT:-set-in-owner.mk}"
+    ipam:
+      config:
+        - subnet: "${SOUND_AIRPLAY2_SUBNET:-192.0.2.0/24}"
+          gateway: "${SOUND_AIRPLAY2_GATEWAY:-192.0.2.1}"
+          # Docker hands out only the door's one address, never one the router's DHCP owns.
+          ip_range: "${SOUND_AIRPLAY2_IP:-192.0.2.10}/32"
+
+volumes:
+  endora-data:
+  endora-brain:
+  endora-hq-data:
+  # Holds one file: the token HQ makes for itself and the node signs with.
+  endora-hq-token:
+  # Holds one file: the token HQ makes for the runner, which signs with it.
+  endora-hq-runner-token:
+  # What the sound hub keeps: its patchbay (sources, speakers, wires, setups).
+  endora-sound-data:
+  # Holds one file: the token the sound hub makes for itself and the node signs with.
+  endora-sound-token:
+  # The pipes between the sound hub and its senders.
+  endora-sound-pipes:
+  # The senders' own state: each OwnTone instance's database and cache.
+  endora-senders-data:
+  # Holds one file: the password the senders make for their API, which only the hub reads.
+  endora-sound-secret:
+  # The Spotify receiver's own login.
+  endora-spotify-login:
+  # Empty on purpose: what /git-push-key is when no deploy key is configured (ADR 0115).
+  endora-no-git-key:
+  # Empty on purpose: what /bench-token is when no bench is configured (ADR 0123).
+  endora-no-bench:
+  endora-models:

@@ -1,0 +1,172 @@
+//! The CEO and the chain of command (ADR 0111): a member's question goes up the chain, never
+//! to the board's desk; whoever is asked answers in the thread, which wakes the asker; only the
+//! CEO's decision, checked by the reviewer, reaches the board; the CEO wakes only for that
+//! and its own work; and the pool is shared among the paid alone.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use serde_json::json;
+
+use super::engine::{Author, Engine, Settings};
+use super::ports::{Clock, NewTask, RunContext};
+use super::protocol::call;
+use crate::domain::{GoalId, MemberId, Priority, Refusal, TaskId};
+use crate::infrastructure::{SimulatedRunner, SqliteTeamStore};
+
+struct Hands(AtomicI64);
+impl Clock for &Hands {
+    fn now(&self) -> i64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// 17 October 2026, at noon UTC.
+const OCT_17: i64 = 1_792_238_400_000;
+
+type Hq<'a> = Engine<SqliteTeamStore, SimulatedRunner, &'a Hands>;
+
+/// A public record, a plan and the team's standards, as HQ embeds them.
+const LIBRARY: &[(&str, &str)] = &[
+    (
+        "docs/adr/0111-the-ceo-and-the-chain-of-command.md",
+        "# 0111 — The CEO",
+    ),
+    ("docs/plans/endora-hq.md", "# Endora HQ: the design"),
+    ("docs/standards.md", "# The team's standards"),
+];
+
+struct Team {
+    lead: MemberId,
+    goal: GoalId,
+}
+
+fn engine(clock: &Hands) -> Hq<'_> {
+    Engine::new(
+        SqliteTeamStore::in_memory().unwrap(),
+        SimulatedRunner::new(4),
+        clock,
+        Settings::default(),
+    )
+    .with_docs(LIBRARY)
+}
+
+/// The CEO (Mara, seated as HQ seats it, on Opus), a lead on Sonnet, a developer as hired (on
+/// Haiku), and a reviewer when `with_reviewer`; a goal.
+fn team(hq: &Hq<'_>, with_reviewer: bool) -> Team {
+    let ceo = hq.hire("Mara", 35, 1, 3).unwrap();
+    hq.set_brain(ceo, "claude-opus-5-5").unwrap();
+    let lead = hq.hire("Ada", 25, 2, 0).unwrap();
+    hq.set_brain(lead, "claude-sonnet-5-5").unwrap();
+    hq.hire("Linus", 40, 2, 4).unwrap();
+    if with_reviewer {
+        hq.hire("Grace", 20, 2, 1).unwrap();
+    }
+    let goal = hq
+        .set_goal("Keep the home lab healthy", "", Author::Owner)
+        .unwrap();
+    Team { lead, goal }
+}
+
+fn task_for(hq: &Hq<'_>, goal: GoalId, to: MemberId, title: &str) -> TaskId {
+    hq.add_task(
+        Author::Owner,
+        NewTask {
+            goal,
+            project: None,
+            parent: None,
+            title: title.to_owned(),
+            description: String::new(),
+            assignee: Some(to),
+            priority: Priority::Normal,
+            waits_on: Vec::new(),
+        },
+    )
+    .unwrap()
+}
+
+/// The newest turn of `member`'s, once the tick has started what is queued.
+fn turn(hq: &Hq<'_>, member: MemberId) -> RunContext {
+    hq.tick().unwrap();
+    hq.runner()
+        .started()
+        .into_iter()
+        .rfind(|c| c.member == member)
+        .expect("a turn of the member's")
+}
+
+fn use_tool(
+    hq: &Hq<'_>,
+    context: &RunContext,
+    tool: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let (run, member) = hq.turn_of(&context.token).unwrap().expect("a running turn");
+    call(hq, &run, &member, tool, args)
+}
+
+#[test]
+fn every_member_reads_endoras_public_library_and_nothing_else() {
+    let clock = Hands(AtomicI64::new(OCT_17));
+    let hq = engine(&clock);
+    let t = team(&hq, false);
+    let task = task_for(&hq, t.goal, t.lead, "Plan the week");
+    let lead = turn(&hq, t.lead);
+    assert!(
+        lead.told
+            .contains("The team's standards: read_doc docs/standards.md"),
+        "{}",
+        lead.told
+    );
+    let standards = use_tool(
+        &hq,
+        &lead,
+        "read_doc",
+        &json!({ "path": "docs/standards.md" }),
+    )
+    .unwrap();
+    assert!(
+        standards.ends_with("# The team's standards"),
+        "the lead reads the standards: {standards}"
+    );
+    let ceo = lead;
+    let read = use_tool(
+        &hq,
+        &ceo,
+        "read_doc",
+        &json!({ "path": "docs/plans/endora-hq.md" }),
+    )
+    .unwrap();
+    assert!(
+        read.starts_with("docs/plans/endora-hq.md, part 1 of 1."),
+        "{read}"
+    );
+    assert!(read.ends_with("# Endora HQ: the design"));
+    let listed = use_tool(&hq, &ceo, "read_doc", &json!({ "path": "docs/adr" })).unwrap();
+    assert_eq!(
+        listed,
+        "In docs/adr:\ndocs/adr/0111-the-ceo-and-the-chain-of-command.md"
+    );
+    for path in [
+        "docs/adr/../../owner.mk",
+        "../owner.mk",
+        "docs/homelab.md",
+        "/etc/hosts",
+    ] {
+        assert_eq!(
+            use_tool(&hq, &ceo, "read_doc", &json!({ "path": path })).unwrap_err(),
+            Refusal::NotADoc.to_string(),
+            "{path}"
+        );
+    }
+    assert!(
+        use_tool(
+            &hq,
+            &ceo,
+            "read_doc",
+            &json!({ "path": "docs/adr/9999-none.md" })
+        )
+        .unwrap_err()
+        .contains("no such document")
+    );
+    let _ = task;
+}

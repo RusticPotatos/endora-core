@@ -1,0 +1,22 @@
+---
+# The owner's values through the role's two variable names (scripts/test-values-compat.sh runs this
+# with different -e values; the previous name is passed there, never spelled in a tracked file):
+#   ansible-playbook roles/endora/tests/owner_values.yml -e out=DIR [-e ENDORA_OWNER_VALUES=...]
+- name: Endora renders the owner's values
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    docker_home: /tmp/endora-owner-values-test
+  vars_files:
+    - ../defaults/main.yml
+  tasks:
+    - name: Refuses two different lists, says when the previous name is used
+      ansible.builtin.include_tasks: ../tasks/owner_values.yml
+
+    - name: Render
+      ansible.builtin.template:
+        src: ../templates/endora.env.j2
+        dest: "{{ out }}/owner-values.env"
+        mode: "0600"
+      no_log: true

@@ -1,0 +1,34 @@
+{
+  "note": "Where each included compose file came from (ADR 0147). Vendored verbatim, because Compose's remote include is not available everywhere; check-sources.sh proves each file is unchanged, and with --remote that it still matches its source. Each product's version is set once, by its `variable` in bundle.env.example, which must equal `version`: bumping a product is that line, its vendored file and this entry, checked together.",
+  "core": {
+    "path": "core/compose.yaml",
+    "repo": "RusticPotatos/endora-core",
+    "ref": "this repository, the same commit",
+    "image": "ghcr.io/rusticpotatos/endora-node",
+    "version": "ENDORA_CORE_VERSION in .env: the release this checkout is"
+  },
+  "console": {
+    "path": "console/compose.yaml",
+    "repo": "RusticPotatos/endora-console",
+    "ref": "main",
+    "commit": "fd9cf17a588e6226de114852e520a554ad51aa9f",
+    "source": "compose.yaml",
+    "sha256": "459cb4665218d1ddc57b2410d58aedd20dbdea95fdf7c3bbe54ba722db8494cc",
+    "image": "ghcr.io/rusticpotatos/endora-console",
+    "version": "sha-fd9cf17a588e6226de114852e520a554ad51aa9f",
+    "why": "Console has no tagged release yet; its README says to pin a sha- build, and this is the build of the pinned commit.",
+    "variable": "CONSOLE_TAG"
+  },
+  "audio": {
+    "path": "audio/compose.yaml",
+    "repo": "RusticPotatos/endora-audio",
+    "ref": "v1.0.1",
+    "commit": "5a9773659bd325d95220435ae1d1fadb8d8ac858",
+    "source": "compose.yaml",
+    "sha256": "190965eb4d526b97c2bd819d31e2c8e7c8825d063812cf16230a3a1e61f87621",
+    "image": "ghcr.io/rusticpotatos/endora-audio, -senders, -airplay",
+    "version": "1.0.1",
+    "why": "v1.0.1 is Audio's latest published release (7 Nov 2026); its hub image is multi-arch, its senders and airplay images amd64.",
+    "variable": "ENDORA_AUDIO_VERSION"
+  }
+}

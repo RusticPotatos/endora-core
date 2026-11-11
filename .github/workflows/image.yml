@@ -1,0 +1,105 @@
+name: Core image
+
+# Builds Core's image (ghcr.io/rusticpotatos/endora-node, which deploy/compose pins; ADR 0147)
+# and checks that nothing local is in it. Every push to develop or main and every `v*` tag runs
+# that check (as before), and it needs no package access.
+#
+# NOTHING IS PUBLISHED AUTOMATICALLY. Pushing to main, pushing a tag or merging a pull request
+# never writes to the registry, never moves `latest` and never adds a tag. The one publishing
+# job runs only when a person starts this workflow by hand (workflow_dispatch) with `publish`
+# ticked, from main or a `vX.Y.Z` tag, in this repository, and only after the owner has turned
+# release publishing on by setting the repository variable ENDORA_CORE_IMAGE_PUBLISH to `enabled`.
+# docs/releasing-core-image.md has the steps; scripts/test-image-workflow.py tests these
+# conditions on every push.
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the image to ghcr.io (needs the repository variable ENDORA_CORE_IMAGE_PUBLISH=enabled; run from main or a vX.Y.Z tag)"
+        type: boolean
+        default: false
+      tag_latest:
+        description: "Also move the `latest` tag (only from main)"
+        type: boolean
+        default: false
+
+# No job may write to a package unless it says so below.
+permissions:
+  contents: read
+
+concurrency:
+  group: core-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  image:
+    name: build and check
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Nothing local in the build context
+        run: sh scripts/check-image-privacy.sh context .
+      - uses: docker/setup-buildx-action@v3
+      # Built and loaded here, never pushed: an image carrying local files is caught before the
+      # publish job can run (it needs this job).
+      - name: Build for the check
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: endora-node:candidate
+          build-args: ENDORA_BUILD=${{ github.sha }}
+          cache-from: type=gha,scope=core-image-release
+          cache-to: type=gha,scope=core-image-release,mode=max
+      - name: Nothing local in the image
+        run: sh scripts/check-image-privacy.sh image endora-node:candidate
+
+  publish:
+    name: publish · amd64 + arm64
+    needs: image
+    # Every condition must hold. A push, a tag, a pull request and a dispatch without `publish`
+    # all fail the first two.
+    if: >-
+      github.event_name == 'workflow_dispatch' && inputs.publish &&
+      vars.ENDORA_CORE_IMAGE_PUBLISH == 'enabled' &&
+      github.repository == 'RusticPotatos/endora-core' &&
+      (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # `sha-<commit>` always; `X.Y.Z` from a vX.Y.Z tag; `latest` only when asked for, from main.
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/rusticpotatos/endora-node
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && inputs.tag_latest }}
+            type=semver,pattern={{version}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: ENDORA_BUILD=${{ github.sha }}
+          cache-from: type=gha,scope=core-image-release

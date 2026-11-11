@@ -1,0 +1,1691 @@
+//! Capabilities persistence — SQLite adapters for skill config, settings and the
+//! deep-model configuration, over the shared handle.
+
+use endora_kernel::RepositoryError;
+use endora_persistence::{Db, backend, corrupt};
+use rusqlite::{OptionalExtension, params};
+
+use crate::application::{
+    ButlerModelConfig, ButlerModelConfigRepository, CapabilityConfigRepository,
+    CapabilitySettingsRepository, ConfigWrite, DeepModel, DeepModelRepository, McpServer,
+    McpServerRegistry, McpTransport, ModelSlot, Recipe, RecipeRepository, Sampling, Stance,
+    TargetAlias, TargetAliasRepository,
+};
+use crate::domain::{RecipeInput, RecipeInputKind, Transition, Watched};
+
+/// Creates the capabilities config tables if absent (idempotent).
+///
+/// # Errors
+/// [`RepositoryError::Backend`] if the schema cannot be applied.
+/// Applies this context's schema.
+///
+/// **Production does not call this.** The composition root shares one database whose
+/// schema comes from `endora-infrastructure`'s `SCHEMA`, and this exists so the context's
+/// own tests can stand a store up alone. A table added here and not there is created in
+/// every test and in no real database — which is exactly what happened to `config_writes`,
+/// and why the tables below must be kept in step with that `SCHEMA`.
+pub fn migrate(db: &Db) -> Result<(), RepositoryError> {
+    db.lock()?
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS capability_config (
+                id                TEXT PRIMARY KEY,
+                enabled           INTEGER NOT NULL,
+                open_irreversible INTEGER NOT NULL DEFAULT 0,
+                confirm           INTEGER NOT NULL DEFAULT 0
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS capability_settings (
+                capability_id TEXT NOT NULL,
+                key           TEXT NOT NULL,
+                value         TEXT NOT NULL,
+                PRIMARY KEY (capability_id, key)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS autonomy_envelope (
+                id                 INTEGER PRIMARY KEY CHECK (id = 0),
+                auto_external      INTEGER NOT NULL,
+                auto_consequential INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS deep_model (
+                id       INTEGER PRIMARY KEY CHECK (id = 0),
+                url      TEXT NOT NULL,
+                model    TEXT NOT NULL,
+                api_key  TEXT NOT NULL,
+                escalate INTEGER NOT NULL DEFAULT 0
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS model_providers (
+                id      INTEGER PRIMARY KEY AUTOINCREMENT,
+                name    TEXT NOT NULL,
+                url     TEXT NOT NULL,
+                api_key TEXT NOT NULL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS model_entries (
+                id       INTEGER PRIMARY KEY AUTOINCREMENT,
+                job      TEXT NOT NULL,
+                provider INTEGER NOT NULL,
+                model    TEXT NOT NULL,
+                enabled  INTEGER NOT NULL DEFAULT 1,
+                position INTEGER NOT NULL,
+                sampling TEXT NOT NULL DEFAULT '{}',
+                thinks   INTEGER NOT NULL DEFAULT 0
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS model_lists_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS butler_model_config (
+                id            INTEGER PRIMARY KEY CHECK (id = 0),
+                base_url      TEXT NOT NULL,
+                api_key       TEXT NOT NULL,
+                mixture       INTEGER NOT NULL,
+                single_model  TEXT NOT NULL,
+                single_temp   REAL,
+                single_top_p  REAL,
+                single_top_k  INTEGER,
+                single_repeat REAL,
+                router_model  TEXT NOT NULL,
+                router_temp   REAL,
+                router_top_p  REAL,
+                router_top_k  INTEGER,
+                router_repeat REAL,
+                synth_model   TEXT NOT NULL,
+                synth_temp    REAL,
+                synth_top_p   REAL,
+                synth_top_k   INTEGER,
+                synth_repeat  REAL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS target_aliases (
+                server TEXT NOT NULL,
+                said   TEXT NOT NULL,
+                means  TEXT NOT NULL,
+                PRIMARY KEY (server, said)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS config_writes (
+                id      TEXT PRIMARY KEY,
+                at_ms   INTEGER NOT NULL,
+                server  TEXT NOT NULL,
+                target  TEXT NOT NULL,
+                added   TEXT NOT NULL,
+                was     TEXT NOT NULL,
+                undone  INTEGER NOT NULL DEFAULT 0,
+                kind    TEXT NOT NULL DEFAULT 'name'
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                name    TEXT PRIMARY KEY,
+                kind    TEXT NOT NULL,
+                command TEXT NOT NULL DEFAULT '',
+                args    TEXT NOT NULL DEFAULT '',
+                url     TEXT NOT NULL DEFAULT '',
+                enabled INTEGER NOT NULL DEFAULT 1,
+                env     TEXT NOT NULL DEFAULT '',
+                auth    TEXT NOT NULL DEFAULT '',
+                trust_all INTEGER NOT NULL DEFAULT 0,
+                reader_tool TEXT NOT NULL DEFAULT ''
+            ) STRICT;
+            -- Questions the person answered by asking not to be asked again. Answering is the
+            -- dismissal (ADR 0052), and somebody who does not know a real name still needs an answer.
+            CREATE TABLE IF NOT EXISTS repairs_left_alone (
+                server TEXT NOT NULL,
+                thing  TEXT NOT NULL,
+                PRIMARY KEY (server, thing)
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS watched_things (
+                key                TEXT PRIMARY KEY,
+                settled            TEXT NOT NULL,
+                candidate          TEXT NOT NULL,
+                candidate_since_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE IF NOT EXISTS transitions (
+                key      TEXT NOT NULL,
+                was      TEXT NOT NULL,
+                became   TEXT NOT NULL,
+                at_ms    INTEGER NOT NULL,
+                PRIMARY KEY (key, at_ms)
+            ) STRICT;
+            CREATE INDEX IF NOT EXISTS idx_transitions_at ON transitions(at_ms);
+            CREATE TABLE IF NOT EXISTS recipes (
+                id          TEXT PRIMARY KEY,
+                description TEXT NOT NULL,
+                inputs      TEXT NOT NULL,
+                get_url     TEXT NOT NULL,
+                say         TEXT NOT NULL
+            ) STRICT;",
+        )
+        .map_err(backend)?;
+    // Additive migrations for databases created before these columns existed —
+    // the irreversible-opener (ADR 0051) and the ask-first override. Ignore the
+    // error when a column is already present (a fresh DB gets it from the CREATE).
+    let _ = db.lock()?.execute(
+        "ALTER TABLE capability_config ADD COLUMN open_irreversible INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = db.lock()?.execute(
+        "ALTER TABLE capability_config ADD COLUMN confirm INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // One word per tool (ADR 0062). The fold from the old axes errs toward `ask`, the
+    // recoverable direction — a tool that asks when it could act is a tap; one that acts
+    // when it should ask is why the axes existed.
+    let _ = db.lock()?.execute(
+        "ALTER TABLE capability_config ADD COLUMN stance TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // The preferred base rung (a bigger model on a sometimes-away machine); empty = none.
+    let _ = db.lock()?.execute(
+        "ALTER TABLE butler_model_config ADD COLUMN preferred_url TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = db.lock()?.execute(
+        "ALTER TABLE butler_model_config ADD COLUMN preferred_model TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    db.lock()?
+        .execute_batch(
+            "UPDATE capability_config SET stance = CASE \
+                 WHEN stance != '' THEN stance \
+                 WHEN enabled = 0 THEN 'off' \
+                 WHEN confirm = 1 THEN 'ask' \
+                 WHEN open_irreversible = 1 THEN 'ask' \
+                 ELSE '' END;",
+        )
+        .map_err(backend)?;
+    // Per-server credentials: a child-process environment (stdio) and a bearer token
+    // (http). Secrets — stored here, never returned by the API.
+    let _ = db.lock()?.execute(
+        "ALTER TABLE mcp_servers ADD COLUMN env TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = db.lock()?.execute(
+        "ALTER TABLE mcp_servers ADD COLUMN auth TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // Auto-allow a server's tools on connect (default on). Opened tools are still
+    // Block→Confirm, so this never removes the ask-before-each-use safety net.
+    let _ = db.lock()?.execute(
+        "ALTER TABLE mcp_servers ADD COLUMN trust_all INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    // Which tool reads this server's state (ADR 0054). Existing rows read back blank —
+    // nobody has nominated one — and blank means "no read-back for this server", which
+    // is the same honest default a server Endora knows nothing about already gets.
+    let _ = db.lock()?.execute(
+        "ALTER TABLE mcp_servers ADD COLUMN reader_tool TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // Whether a list entry thinks before answering (ADR 0105). Existing entries read back as
+    // not thinking, which is what a local reasoning model wants for a quick tool call.
+    let _ = db.lock()?.execute(
+        "ALTER TABLE model_entries ADD COLUMN thinks INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    Ok(())
+}
+
+/// SQLite-backed store for the four capabilities config repositories over the
+/// shared connection handle.
+pub struct ConfigStore {
+    db: Db,
+}
+
+impl ConfigStore {
+    /// Builds the store over the shared connection handle.
+    #[must_use]
+    pub fn new(db: Db) -> Self {
+        Self { db }
+    }
+}
+
+impl DeepModelRepository for ConfigStore {
+    fn get(&self) -> Result<Option<DeepModel>, RepositoryError> {
+        let found = self
+            .db
+            .lock()?
+            .query_row(
+                "SELECT url, model, api_key, escalate FROM deep_model WHERE id = 0",
+                [],
+                |r| {
+                    Ok(DeepModel {
+                        url: r.get(0)?,
+                        model: r.get(1)?,
+                        api_key: r.get(2)?,
+                        escalate: r.get::<_, i64>(3)? != 0,
+                    })
+                },
+            )
+            .optional()
+            .map_err(backend)?;
+        let Some(mut model) = found else {
+            return Ok(None);
+        };
+        model.api_key = self.db.unseal("deep_model.api_key", &model.api_key)?;
+        Ok(Some(model))
+    }
+
+    fn set(&self, model: &DeepModel) -> Result<(), RepositoryError> {
+        let api_key = self.db.seal(&model.api_key)?;
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO deep_model (id, url, model, api_key, escalate) \
+                 VALUES (0, ?1, ?2, ?3, ?4)",
+                params![model.url, model.model, api_key, model.escalate],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl ButlerModelConfigRepository for ConfigStore {
+    fn get(&self) -> Result<Option<ButlerModelConfig>, RepositoryError> {
+        let found = self
+            .db
+            .lock()?
+            .query_row(
+                "SELECT base_url, api_key, mixture, \
+                 single_model, single_temp, single_top_p, single_top_k, single_repeat, \
+                 router_model, router_temp, router_top_p, router_top_k, router_repeat, \
+                 synth_model, synth_temp, synth_top_p, synth_top_k, synth_repeat, \
+                 preferred_url, preferred_model \
+                 FROM butler_model_config WHERE id = 0",
+                [],
+                |r| {
+                    Ok(ButlerModelConfig {
+                        base_url: r.get(0)?,
+                        api_key: r.get(1)?,
+                        mixture: r.get::<_, i64>(2)? != 0,
+                        single: ModelSlot {
+                            model: r.get(3)?,
+                            sampling: Sampling {
+                                temperature: r.get(4)?,
+                                top_p: r.get(5)?,
+                                top_k: r.get(6)?,
+                                repeat_penalty: r.get(7)?,
+                            },
+                        },
+                        router: ModelSlot {
+                            model: r.get(8)?,
+                            sampling: Sampling {
+                                temperature: r.get(9)?,
+                                top_p: r.get(10)?,
+                                top_k: r.get(11)?,
+                                repeat_penalty: r.get(12)?,
+                            },
+                        },
+                        synth: ModelSlot {
+                            model: r.get(13)?,
+                            sampling: Sampling {
+                                temperature: r.get(14)?,
+                                top_p: r.get(15)?,
+                                top_k: r.get(16)?,
+                                repeat_penalty: r.get(17)?,
+                            },
+                        },
+                        preferred_url: r.get(18)?,
+                        preferred_model: r.get(19)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(backend)?;
+        let Some(mut config) = found else {
+            return Ok(None);
+        };
+        config.api_key = self
+            .db
+            .unseal("butler_model_config.api_key", &config.api_key)?;
+        Ok(Some(config))
+    }
+
+    fn set(&self, c: &ButlerModelConfig) -> Result<(), RepositoryError> {
+        let api_key = self.db.seal(&c.api_key)?;
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO butler_model_config (\
+                 id, base_url, api_key, mixture, \
+                 single_model, single_temp, single_top_p, single_top_k, single_repeat, \
+                 router_model, router_temp, router_top_p, router_top_k, router_repeat, \
+                 synth_model, synth_temp, synth_top_p, synth_top_k, synth_repeat, \
+                 preferred_url, preferred_model) \
+                 VALUES (0, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+                 ?16, ?17, ?18, ?19, ?20)",
+                params![
+                    c.base_url,
+                    api_key,
+                    i64::from(c.mixture),
+                    c.single.model,
+                    c.single.sampling.temperature,
+                    c.single.sampling.top_p,
+                    c.single.sampling.top_k,
+                    c.single.sampling.repeat_penalty,
+                    c.router.model,
+                    c.router.sampling.temperature,
+                    c.router.sampling.top_p,
+                    c.router.sampling.top_k,
+                    c.router.sampling.repeat_penalty,
+                    c.synth.model,
+                    c.synth.sampling.temperature,
+                    c.synth.sampling.top_p,
+                    c.synth.sampling.top_k,
+                    c.synth.sampling.repeat_penalty,
+                    c.preferred_url,
+                    c.preferred_model,
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl CapabilitySettingsRepository for ConfigStore {
+    fn all_settings(&self) -> Result<Vec<(String, String, String)>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT capability_id, key, value FROM capability_settings")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(backend)?;
+        let rows = rows.collect::<Result<Vec<_>, _>>().map_err(backend)?;
+        drop(stmt);
+        drop(conn);
+        // Every value is sealed (ADR 0125): tokens, keys and passwords sit beside harmless
+        // settings in this one table, and sealing by a guess at the key's name is how a new
+        // credential would slip through.
+        rows.into_iter()
+            .map(|(id, key, value)| {
+                let value = self.db.unseal("capability_settings.value", &value)?;
+                Ok((id, key, value))
+            })
+            .collect()
+    }
+
+    fn set_setting(
+        &self,
+        capability_id: &str,
+        key: &str,
+        value: &str,
+    ) -> Result<(), RepositoryError> {
+        let value = self.db.seal(value)?;
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO capability_settings (capability_id, key, value) \
+                 VALUES (?1, ?2, ?3)",
+                params![capability_id, key, value],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn set_settings(
+        &self,
+        capability_id: &str,
+        values: &[(&str, &str)],
+    ) -> Result<(), RepositoryError> {
+        let sealed = values
+            .iter()
+            .map(|(key, value)| Ok((*key, self.db.seal(value)?)))
+            .collect::<Result<Vec<_>, RepositoryError>>()?;
+        let mut conn = self.db.lock()?;
+        let tx = conn.transaction().map_err(backend)?;
+        for (key, value) in sealed {
+            tx.execute(
+                "INSERT OR REPLACE INTO capability_settings (capability_id, key, value) \
+                 VALUES (?1, ?2, ?3)",
+                params![capability_id, key, value],
+            )
+            .map_err(backend)?;
+        }
+        tx.commit().map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl CapabilityConfigRepository for ConfigStore {
+    fn stances(&self) -> Result<Vec<(String, Stance)>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, stance FROM capability_config WHERE stance != ''")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(backend)?;
+        // A word nobody recognises is dropped rather than guessed at: a permission that
+        // deserialises leniently is a permission that widens by typo.
+        Ok(rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?
+            .into_iter()
+            .filter_map(|(id, word)| Stance::from_word(&word).map(|st| (id, st)))
+            .collect())
+    }
+
+    fn set_stance(&self, id: &str, stance: Stance) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "INSERT INTO capability_config (id, enabled, stance) VALUES (?1, 1, ?2) \
+                 ON CONFLICT(id) DO UPDATE SET stance = excluded.stance",
+                params![id, stance.word()],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn clear_stance(&self, id: &str) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE capability_config SET stance = '' WHERE id = ?1",
+                params![id],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl crate::application::ConfigWriteLog for ConfigStore {
+    fn record(&self, write: &ConfigWrite) -> Result<(), RepositoryError> {
+        // `was` is stored as JSON: it is a list, and flattening it to a delimited string
+        // would corrupt any name containing the delimiter — which is exactly the sort of
+        // detail an undo cannot afford to get wrong.
+        let was = serde_json::to_string(&write.was).map_err(|e| corrupt(e.to_string()))?;
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO config_writes \
+                 (id, at_ms, server, target, added, was, undone, kind) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    write.id.to_string(),
+                    write.at_ms,
+                    write.server,
+                    write.target,
+                    write.added,
+                    was,
+                    i64::from(write.undone),
+                    write.kind.as_str(),
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn writes(&self, limit: usize) -> Result<Vec<ConfigWrite>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, at_ms, server, target, added, was, undone, kind \
+                 FROM config_writes ORDER BY at_ms DESC LIMIT ?1",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, i64>(6)?,
+                    r.get::<_, String>(7)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, at_ms, server, target, added, was, undone, kind) = row.map_err(backend)?;
+            out.push(ConfigWrite {
+                id: id.parse().map_err(|_| corrupt("unreadable id"))?,
+                at_ms,
+                server,
+                target,
+                added,
+                was: serde_json::from_str(&was).unwrap_or_default(),
+                undone: undone != 0,
+                kind: crate::domain::WriteKind::read(&kind),
+            });
+        }
+        Ok(out)
+    }
+
+    fn write(&self, id: u128) -> Result<Option<ConfigWrite>, RepositoryError> {
+        Ok(self.writes(usize::MAX)?.into_iter().find(|w| w.id == id))
+    }
+
+    fn mark_undone(&self, id: u128) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE config_writes SET undone = 1 WHERE id = ?1",
+                params![id.to_string()],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl TargetAliasRepository for ConfigStore {
+    fn aliases(&self) -> Result<Vec<TargetAlias>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT server, said, means FROM target_aliases ORDER BY server, said")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (server, said, means) = row.map_err(backend)?;
+            out.push(TargetAlias::new(&server, &said, &means).map_err(corrupt)?);
+        }
+        Ok(out)
+    }
+
+    fn set_alias(&self, alias: &TargetAlias) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO target_aliases (server, said, means) VALUES (?1, ?2, ?3)",
+                params![alias.server, alias.said, alias.means],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn forget_alias(&self, server: &str, said: &str) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "DELETE FROM target_aliases WHERE server = ?1 AND said = ?2",
+                params![server, said],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl crate::application::TransitionLog for ConfigStore {
+    fn watching(&self) -> Result<Vec<Watched>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, settled, candidate, candidate_since_ms FROM watched_things \
+                 ORDER BY key",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Watched {
+                    key: r.get(0)?,
+                    settled: r.get(1)?,
+                    candidate: r.get(2)?,
+                    candidate_since_ms: r.get(3)?,
+                })
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    fn remember(&self, watched: &Watched) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO watched_things \
+                 (key, settled, candidate, candidate_since_ms) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    watched.key,
+                    watched.settled,
+                    watched.candidate,
+                    watched.candidate_since_ms
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn record(&self, transition: &Transition) -> Result<(), RepositoryError> {
+        // `DO NOTHING` on conflict: the same thing cannot change twice in the same
+        // millisecond, so a duplicate is a re-run rather than a second event.
+        self.db
+            .lock()?
+            .execute(
+                "INSERT INTO transitions (key, was, became, at_ms) VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(key, at_ms) DO NOTHING",
+                params![
+                    transition.key,
+                    transition.from,
+                    transition.to,
+                    transition.at_ms
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn since(&self, ms: i64) -> Result<Vec<Transition>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT key, was, became, at_ms FROM transitions WHERE at_ms >= ?1 \
+                 ORDER BY at_ms DESC",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(params![ms], |r| {
+                Ok(Transition {
+                    key: r.get(0)?,
+                    from: r.get(1)?,
+                    to: r.get(2)?,
+                    at_ms: r.get(3)?,
+                })
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    fn forget_before(&self, ms: i64) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute("DELETE FROM transitions WHERE at_ms < ?1", params![ms])
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl ConfigStore {
+    /// Records that the person does not want to be asked about this thing again.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] if the backend fails.
+    pub fn leave_it_alone(&self, server: &str, thing: &str) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "INSERT INTO repairs_left_alone (server, thing) VALUES (?1, ?2) \
+                 ON CONFLICT(server, thing) DO NOTHING",
+                params![server, thing],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Everything the person has asked not to be bothered about, as `(server, thing)`.
+    ///
+    /// # Errors
+    /// [`RepositoryError`] if the backend fails.
+    pub fn left_alone(&self) -> Result<Vec<(String, String)>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT server, thing FROM repairs_left_alone")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+}
+
+/// Reassembles a [`Recipe`] from its stored row, refusing anything that would not
+/// have passed [`Recipe::new`] — the same posture as `parse_id` for a stored id:
+/// corrupted-in-storage is reported, never guessed at.
+fn recipe_from_row(
+    id: &str,
+    description: &str,
+    inputs_json: &str,
+    get: &str,
+    say: &str,
+) -> Result<Recipe, RepositoryError> {
+    let raw: Vec<(String, String)> =
+        serde_json::from_str(inputs_json).map_err(|e| corrupt(e.to_string()))?;
+    let inputs = raw
+        .into_iter()
+        .map(|(name, kind)| {
+            RecipeInputKind::from_name(&kind)
+                .map(|kind| RecipeInput { name, kind })
+                .ok_or_else(|| corrupt(format!("unrecognised recipe input kind '{kind}'")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Recipe::new(id, description, inputs, get, say).map_err(|e| corrupt(e.to_string()))
+}
+
+impl RecipeRepository for ConfigStore {
+    fn save_recipe(&self, recipe: &Recipe) -> Result<(), RepositoryError> {
+        let raw: Vec<(&str, &str)> = recipe
+            .inputs
+            .iter()
+            .map(|i| (i.name.as_str(), i.kind.as_str()))
+            .collect();
+        let inputs_json = serde_json::to_string(&raw).map_err(|e| corrupt(e.to_string()))?;
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO recipes (id, description, inputs, get_url, say) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    recipe.id,
+                    recipe.description,
+                    inputs_json,
+                    recipe.get,
+                    recipe.say
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn recipes(&self) -> Result<Vec<Recipe>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, description, inputs, get_url, say FROM recipes ORDER BY id ASC")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            })
+            .map_err(backend)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(backend)?;
+        rows.into_iter()
+            .map(|(id, description, inputs_json, get, say)| {
+                recipe_from_row(&id, &description, &inputs_json, &get, &say)
+            })
+            .collect()
+    }
+
+    fn recipe(&self, id: &str) -> Result<Option<Recipe>, RepositoryError> {
+        Ok(self.recipes()?.into_iter().find(|r| r.id == id))
+    }
+
+    fn delete_recipe(&self, id: &str) -> Result<(), RepositoryError> {
+        let conn = self.db.lock()?;
+        conn.execute("DELETE FROM recipes WHERE id = ?1", params![id])
+            .map_err(backend)?;
+        // Its stance too (ADR 0062): nothing is left to have an opinion about, and a
+        // stale `auto` row surviving deletion would silently re-arm a same-named
+        // recipe authored later.
+        let capability_id = format!("recipe.{id}");
+        conn.execute(
+            "DELETE FROM capability_config WHERE id = ?1",
+            params![capability_id],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+}
+
+impl McpServerRegistry for ConfigStore {
+    fn list(&self) -> Result<Vec<McpServer>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, kind, command, args, url, enabled, env, auth, trust_all, reader_tool \
+                 FROM mcp_servers ORDER BY name",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?, // name
+                    r.get::<_, String>(1)?, // kind
+                    r.get::<_, String>(2)?, // command
+                    r.get::<_, String>(3)?, // args (JSON array)
+                    r.get::<_, String>(4)?, // url
+                    r.get::<_, i64>(5)? != 0,
+                    r.get::<_, String>(6)?,   // env (JSON object) — secret
+                    r.get::<_, String>(7)?,   // auth (bearer token) — secret
+                    r.get::<_, i64>(8)? != 0, // trust_all
+                    r.get::<_, String>(9)?,   // reader_tool (ADR 0054)
+                ))
+            })
+            .map_err(backend)?;
+        let mut servers = Vec::new();
+        for row in rows {
+            let (
+                name,
+                kind,
+                command,
+                args_json,
+                url,
+                enabled,
+                env_json,
+                auth,
+                trust_all,
+                reader_tool,
+            ) = row.map_err(backend)?;
+            let env_json = self.db.unseal("mcp_servers.env", &env_json)?;
+            let auth = self.db.unseal("mcp_servers.auth", &auth)?;
+            let transport = match kind.as_str() {
+                "http" => McpTransport::Http { url, auth },
+                // Default anything else to stdio — the only other variant we write.
+                _ => {
+                    let args: Vec<String> = if args_json.is_empty() {
+                        Vec::new()
+                    } else {
+                        serde_json::from_str(&args_json).map_err(corrupt)?
+                    };
+                    let env = if env_json.is_empty() {
+                        std::collections::BTreeMap::new()
+                    } else {
+                        serde_json::from_str(&env_json).map_err(corrupt)?
+                    };
+                    McpTransport::Stdio { command, args, env }
+                }
+            };
+            servers.push(McpServer {
+                name,
+                transport,
+                enabled,
+                trust_all,
+                reader_tool,
+            });
+        }
+        Ok(servers)
+    }
+
+    fn register(&self, server: &McpServer) -> Result<(), RepositoryError> {
+        let (kind, command, args_json, url, env_json, auth) = match &server.transport {
+            McpTransport::Stdio { command, args, env } => (
+                "stdio",
+                command.as_str(),
+                serde_json::to_string(args).map_err(backend)?,
+                String::new(),
+                serde_json::to_string(env).map_err(backend)?,
+                String::new(),
+            ),
+            McpTransport::Http { url, auth } => (
+                "http",
+                "",
+                String::new(),
+                url.clone(),
+                String::new(),
+                auth.clone(),
+            ),
+        };
+        let env_json = self.db.seal(&env_json)?;
+        let auth = self.db.seal(&auth)?;
+        self.db
+            .lock()?
+            .execute(
+                "INSERT OR REPLACE INTO mcp_servers \
+                 (name, kind, command, args, url, enabled, env, auth, trust_all, reader_tool) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    server.name,
+                    kind,
+                    command,
+                    args_json,
+                    url,
+                    i64::from(server.enabled),
+                    env_json,
+                    auth,
+                    i64::from(server.trust_all),
+                    server.reader_tool,
+                ],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn set_enabled(&self, name: &str, enabled: bool) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE mcp_servers SET enabled = ?2 WHERE name = ?1",
+                params![name, i64::from(enabled)],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn set_trust_all(&self, name: &str, trust_all: bool) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE mcp_servers SET trust_all = ?2 WHERE name = ?1",
+                params![name, i64::from(trust_all)],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute("DELETE FROM mcp_servers WHERE name = ?1", params![name])
+            .map_err(backend)?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigStore, migrate};
+    use crate::application::Stance;
+    use crate::application::{CapabilityConfigRepository, CapabilitySettingsRepository};
+    use endora_persistence::Db;
+
+    #[test]
+    fn settings_set_together_are_kept_together() {
+        let db = Db::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let store = ConfigStore::new(db);
+        store
+            .set_settings("credits", &[("a", "1"), ("b", "2")])
+            .unwrap();
+        let mut all = store.all_settings().unwrap();
+        all.sort();
+        assert_eq!(
+            all,
+            vec![
+                ("credits".to_owned(), "a".to_owned(), "1".to_owned()),
+                ("credits".to_owned(), "b".to_owned(), "2".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn settings_and_config_round_trip() {
+        let db = Db::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let store = ConfigStore::new(db);
+        store.set_setting("weather", "units", "metric").unwrap();
+        assert_eq!(
+            store.all_settings().unwrap(),
+            vec![(
+                "weather".to_owned(),
+                "units".to_owned(),
+                "metric".to_owned()
+            )]
+        );
+        store.set_stance("news", Stance::Off).unwrap();
+        assert_eq!(
+            store.stances().unwrap(),
+            vec![("news".to_owned(), Stance::Off)]
+        );
+    }
+
+    #[test]
+    fn mcp_servers_round_trip_upsert_toggle_and_remove() {
+        use crate::application::{McpServer, McpServerRegistry, McpTransport};
+
+        let db = Db::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let store = ConfigStore::new(db);
+
+        // Empty to start.
+        assert!(store.list().unwrap().is_empty());
+
+        // Register a stdio server (with args) and an http one.
+        let fs = McpServer::stdio(
+            "filesystem",
+            "npx",
+            ["-y".to_owned(), "server-fs".to_owned()],
+        )
+        .unwrap();
+        let cal = McpServer::http("calendar", "https://cal.example").unwrap();
+        store.register(&fs).unwrap();
+        store.register(&cal).unwrap();
+
+        // Both come back, ordered by name, with transports intact.
+        let listed = store.list().unwrap();
+        assert_eq!(listed, vec![cal.clone(), fs.clone()]);
+        assert!(matches!(
+            &listed[1].transport,
+            McpTransport::Stdio { command, args, .. }
+                if command == "npx" && args == &["-y".to_owned(), "server-fs".to_owned()]
+        ));
+
+        // Upsert by name replaces the transport in place (no duplicate row).
+        let fs2 = McpServer::http("filesystem", "https://fs.example").unwrap();
+        store.register(&fs2).unwrap();
+        let listed = store.list().unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(
+            listed[1].transport,
+            McpTransport::Http {
+                url: "https://fs.example".to_owned(),
+                auth: String::new()
+            }
+        );
+
+        // Toggle enabled without touching the transport. (Disambiguated: both this
+        // registry and CapabilityConfigRepository expose `set_enabled`.)
+        McpServerRegistry::set_enabled(&store, "calendar", false).unwrap();
+        let cal_row = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.name == "calendar")
+            .unwrap();
+        assert!(!cal_row.enabled);
+        assert_eq!(
+            cal_row.transport,
+            McpTransport::Http {
+                url: "https://cal.example".to_owned(),
+                auth: String::new()
+            }
+        );
+
+        // Remove is idempotent.
+        store.remove("calendar").unwrap();
+        store.remove("calendar").unwrap();
+        assert_eq!(
+            store
+                .list()
+                .unwrap()
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["filesystem".to_owned()]
+        );
+    }
+
+    #[test]
+    fn mcp_trust_all_defaults_off_round_trips_and_toggles() {
+        use crate::application::{McpServer, McpServerRegistry, McpTransport};
+
+        let db = Db::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let store = ConfigStore::new(db);
+
+        // A freshly registered server opens NOTHING. It used to open everything, and the
+        // doc claimed opened tools still confirm each use — which stopped being true the
+        // moment the person widened the envelope. Live, to "Good morning": `HassBroadcast`
+        // played audio through the house. Nobody had chosen to open it (ADR 0054).
+        let ha = McpServer::http("home-assistant", "https://ha.local/mcp_server/sse").unwrap();
+        assert!(
+            !ha.trust_all,
+            "adding a server must not open every tool it happens to expose"
+        );
+        store.register(&ha).unwrap();
+        assert!(
+            !store.list().unwrap()[0].trust_all,
+            "and it stays closed once stored"
+        );
+
+        // Turning it ON is a decision, and it persists — leaving the transport untouched.
+        McpServerRegistry::set_trust_all(&store, "home-assistant", true).unwrap();
+        let row = store.list().unwrap().into_iter().next().unwrap();
+        assert!(row.trust_all);
+        assert_eq!(
+            row.transport,
+            McpTransport::Http {
+                url: "https://ha.local/mcp_server/sse".to_owned(),
+                auth: String::new(),
+            }
+        );
+
+        // And back off.
+        McpServerRegistry::set_trust_all(&store, "home-assistant", false).unwrap();
+        assert!(!store.list().unwrap()[0].trust_all);
+    }
+
+    #[test]
+    fn the_migration_folds_the_old_axes_into_a_stance() {
+        // An install that lived through the eight-axis era (ADR 0062). The fold errs
+        // toward `ask`, the recoverable direction: a tool that asks when it could act is
+        // a tap; one that acts when it should ask is why the axes existed.
+        let db = Db::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        let handle = db.clone();
+        let store = ConfigStore::new(db);
+        {
+            let conn = handle.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO capability_config (id, enabled, open_irreversible, confirm) VALUES \
+                     ('was_disabled', 0, 0, 0), \
+                     ('asked_first', 1, 0, 1), \
+                     ('opened_band', 1, 1, 0), \
+                     ('plain_default', 1, 0, 0);",
+            )
+            .unwrap();
+        }
+        // The fold runs on open; run its statement directly against this connection.
+        {
+            let conn = handle.lock().unwrap();
+            conn.execute_batch(
+                "UPDATE capability_config SET stance = CASE \
+                     WHEN stance != '' THEN stance \
+                     WHEN enabled = 0 THEN 'off' \
+                     WHEN confirm = 1 THEN 'ask' \
+                     WHEN open_irreversible = 1 THEN 'ask' \
+                     ELSE '' END;",
+            )
+            .unwrap();
+        }
+        let mut got = store.stances().unwrap();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("asked_first".to_owned(), Stance::Ask),
+                ("opened_band".to_owned(), Stance::Ask),
+                ("was_disabled".to_owned(), Stance::Off),
+            ],
+            "a row with no axis set stays at its band's default (no stance)"
+        );
+    }
+
+    /// A unique file path under the system temp directory, so a store can be closed and
+    /// reopened the way a restart would.
+    fn temp_db_path(name: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("endora-{name}-{unique}.db"))
+    }
+
+    fn store_at(path: &std::path::Path) -> ConfigStore {
+        let db = Db::open(path.to_str().unwrap()).unwrap();
+        migrate(&db).unwrap();
+        ConfigStore::new(db)
+    }
+
+    #[test]
+    fn a_change_and_its_undo_survive_a_restart() {
+        // The whole point of ADR 0054. ADR 0054 captured the prior value and dropped it
+        // on the floor, so the undo existed for the length of one function call.
+        use crate::application::{ConfigWrite, ConfigWriteLog};
+        let path = temp_db_path("restart");
+        let write = ConfigWrite {
+            id: 42,
+            at_ms: 1_700_000_000_000,
+            server: "home-assistant".to_owned(),
+            target: "light.kitchen_table".to_owned(),
+            added: "table".to_owned(),
+            was: vec!["kitchen table light".to_owned()],
+            undone: false,
+            kind: crate::domain::WriteKind::Name,
+        };
+        store_at(&path).record(&write).unwrap();
+        // A second store over the same file, the way it would be after a restart.
+        let found = store_at(&path)
+            .write(42)
+            .unwrap()
+            .expect("the change was not kept");
+        assert_eq!(found, write, "the record came back different");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn undoing_marks_the_change_and_never_deletes_it() {
+        // What Endora changed about someone's house is not something it should be able to
+        // make disappear.
+        use crate::application::{ConfigWrite, ConfigWriteLog};
+        let path = temp_db_path("undo");
+        let store = store_at(&path);
+        store
+            .record(&ConfigWrite {
+                id: 7,
+                at_ms: 1,
+                server: "home-assistant".to_owned(),
+                target: "light.x".to_owned(),
+                added: "lamp".to_owned(),
+                was: Vec::new(),
+                undone: false,
+                kind: crate::domain::WriteKind::Name,
+            })
+            .unwrap();
+        store.mark_undone(7).unwrap();
+        let found = store.write(7).unwrap().expect("the row was deleted");
+        assert!(found.undone, "the change was not marked");
+        assert_eq!(store.writes(10).unwrap().len(), 1, "history lost a row");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_name_containing_a_comma_comes_back_whole() {
+        // `was` is a list, and flattening it to a delimited string would corrupt any name
+        // containing the delimiter — exactly what an undo cannot afford to get wrong.
+        use crate::application::{ConfigWrite, ConfigWriteLog};
+        let path = temp_db_path("commas");
+        let store = store_at(&path);
+        let awkward = vec!["lamp, tall".to_owned(), "reading \"light\"".to_owned()];
+        store
+            .record(&ConfigWrite {
+                id: 9,
+                at_ms: 1,
+                server: "s".to_owned(),
+                target: "light.x".to_owned(),
+                added: "new".to_owned(),
+                was: awkward.clone(),
+                undone: false,
+                kind: crate::domain::WriteKind::Name,
+            })
+            .unwrap();
+        assert_eq!(store.write(9).unwrap().unwrap().was, awkward);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_collection_is_never_undone_as_if_it_were_a_name() {
+        // The hazard the stored kind exists for. A collection is created with no prior
+        // value, which reads exactly like adding a name — so undoing it as one would
+        // replay an empty list and strip every name off whatever it points at.
+        use crate::application::{ConfigWrite, ConfigWriteLog};
+        use crate::domain::WriteKind;
+        let path = temp_db_path("kinds");
+        let store = store_at(&path);
+        let collection = ConfigWrite {
+            id: 11,
+            at_ms: 1,
+            server: "home-assistant".to_owned(),
+            target: "01JABCDEF".to_owned(),
+            added: "All Lights".to_owned(),
+            was: vec!["light.kitchen_table".to_owned(), "light.garage".to_owned()],
+            undone: false,
+            kind: WriteKind::Collection,
+        };
+        store.record(&collection).unwrap();
+        let back = store.write(11).unwrap().expect("the change was not kept");
+        assert_eq!(
+            back.kind,
+            WriteKind::Collection,
+            "came back as the wrong sort"
+        );
+        assert!(
+            !back.is_removal(),
+            "a collection is not a name being taken away"
+        );
+        assert!(
+            back.describe().contains("stands for"),
+            "{}",
+            back.describe()
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod not_answering_tests {
+    #[test]
+    fn only_words_that_can_mean_nothing_else_count_as_trouble() {
+        // Services differ on the word and there is no protocol question that settles it,
+        // so this is a heuristic — one that can only ever produce a question, never an
+        // action. A real reading, however unusual, must never be mistaken for absence.
+        for absent in ["unavailable", "offline", "UNAVAILABLE", " disconnected "] {
+            assert!(crate::domain::not_answering(absent), "{absent:?}");
+        }
+        for present in ["on", "off", "72", "idle", "0", "closed", "unlocked"] {
+            assert!(!crate::domain::not_answering(present), "{present:?}");
+        }
+        // From the first live reading, which flagged 28 things against 7 real ones. Every
+        // false positive was a scene, whose state is when it was last activated —
+        // `unknown` means "not since the restart", the healthiest answer available.
+        for healthy in ["unknown", "none", "null", "error", "", "  "] {
+            assert!(
+                !crate::domain::not_answering(healthy),
+                "a word that also means 'hasn't happened yet' is not trouble: {healthy:?}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod recipe_tests {
+    use super::*;
+
+    fn store() -> ConfigStore {
+        let db = endora_persistence::Db::open_in_memory().unwrap();
+        migrate(&db).unwrap();
+        ConfigStore::new(db)
+    }
+
+    fn air_quality() -> Recipe {
+        Recipe::new(
+            "air_quality",
+            "Today's air quality where you are.",
+            vec![
+                RecipeInput { name: "lat".to_owned(), kind: RecipeInputKind::Number },
+                RecipeInput { name: "lon".to_owned(), kind: RecipeInputKind::Number },
+            ],
+            "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={lon}&current=us_aqi",
+            "The air quality index is {current.us_aqi} right now.",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_recipe_round_trips_through_storage_exactly() {
+        let store = store();
+        let recipe = air_quality();
+        store.save_recipe(&recipe).unwrap();
+        let back = store.recipe("air_quality").unwrap().expect("saved");
+        assert_eq!(
+            back, recipe,
+            "the stored recipe must be byte-for-byte the one saved"
+        );
+        assert_eq!(store.recipes().unwrap(), vec![recipe]);
+    }
+
+    #[test]
+    fn saving_the_same_id_again_replaces_it() {
+        let store = store();
+        store.save_recipe(&air_quality()).unwrap();
+        let edited = Recipe::new(
+            "air_quality",
+            "Edited description.",
+            vec![RecipeInput {
+                name: "lat".to_owned(),
+                kind: RecipeInputKind::Number,
+            }],
+            "https://x.test/?latitude={lat}",
+            "{x}",
+        )
+        .unwrap();
+        store.save_recipe(&edited).unwrap();
+        assert_eq!(store.recipes().unwrap(), vec![edited]);
+    }
+
+    #[test]
+    fn an_unknown_id_is_none_not_an_error() {
+        let store = store();
+        assert_eq!(store.recipe("nope").unwrap(), None);
+    }
+
+    #[test]
+    fn deleting_removes_the_recipe_and_its_stance() {
+        let store = store();
+        store.save_recipe(&air_quality()).unwrap();
+        CapabilityConfigRepository::set_stance(&store, "recipe.air_quality", Stance::Auto).unwrap();
+        assert_eq!(
+            CapabilityConfigRepository::stances(&store).unwrap(),
+            vec![("recipe.air_quality".to_owned(), Stance::Auto)]
+        );
+
+        store.delete_recipe("air_quality").unwrap();
+
+        assert_eq!(store.recipes().unwrap(), Vec::new());
+        assert!(
+            CapabilityConfigRepository::stances(&store)
+                .unwrap()
+                .is_empty(),
+            "a deleted recipe must not leave a stance behind for a future namesake to inherit"
+        );
+    }
+
+    #[test]
+    fn two_recipes_come_back_sorted_by_id() {
+        let store = store();
+        let b = Recipe::new("zzz_last", "d", vec![], "https://x.test/", "s").unwrap();
+        store.save_recipe(&b).unwrap();
+        store.save_recipe(&air_quality()).unwrap();
+        let saved = store.recipes().unwrap();
+        let ids: Vec<&str> = saved.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["air_quality", "zzz_last"]);
+    }
+}
+
+impl crate::model_lists::ModelListRepository for ConfigStore {
+    fn providers(&self) -> Result<Vec<crate::model_lists::Provider>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, name, url, api_key FROM model_providers ORDER BY id")
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(crate::model_lists::Provider {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    url: r.get(2)?,
+                    api_key: r.get(3)?,
+                })
+            })
+            .map_err(backend)?;
+        let providers: Vec<crate::model_lists::Provider> =
+            rows.collect::<Result<_, _>>().map_err(backend)?;
+        providers
+            .into_iter()
+            .map(|mut p| {
+                p.api_key = self.db.unseal("model_providers.api_key", &p.api_key)?;
+                Ok(p)
+            })
+            .collect()
+    }
+
+    fn add_provider(&self, name: &str, url: &str, api_key: &str) -> Result<i64, RepositoryError> {
+        let api_key = self.db.seal(api_key)?;
+        let conn = self.db.lock()?;
+        conn.execute(
+            "INSERT INTO model_providers (name, url, api_key) VALUES (?1, ?2, ?3)",
+            params![name, url, api_key],
+        )
+        .map_err(backend)?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn update_provider(
+        &self,
+        id: i64,
+        name: &str,
+        url: &str,
+        api_key: Option<&str>,
+    ) -> Result<(), RepositoryError> {
+        let api_key = api_key.map(|key| self.db.seal(key)).transpose()?;
+        let conn = self.db.lock()?;
+        match api_key {
+            Some(key) => conn.execute(
+                "UPDATE model_providers SET name = ?2, url = ?3, api_key = ?4 WHERE id = ?1",
+                params![id, name, url, key],
+            ),
+            // A key belongs to the endpoint it was given for: moved to another, it is dropped
+            // rather than sent there.
+            None => conn.execute(
+                "UPDATE model_providers SET name = ?2, url = ?3, api_key = CASE \
+                 WHEN rtrim(url, '/') = rtrim(?3, '/') THEN api_key ELSE '' END WHERE id = ?1",
+                params![id, name, url],
+            ),
+        }
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    fn remove_provider(&self, id: i64) -> Result<(), RepositoryError> {
+        let conn = self.db.lock()?;
+        conn.execute("DELETE FROM model_entries WHERE provider = ?1", [id])
+            .map_err(backend)?;
+        conn.execute("DELETE FROM model_providers WHERE id = ?1", [id])
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn entries(
+        &self,
+        job: crate::model_lists::Job,
+    ) -> Result<Vec<crate::model_lists::Entry>, RepositoryError> {
+        let conn = self.db.lock()?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, provider, model, enabled, sampling, thinks FROM model_entries \
+                 WHERE job = ?1 ORDER BY position, id",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([job.name()], |r| {
+                Ok(crate::model_lists::Entry {
+                    id: r.get(0)?,
+                    job,
+                    provider: r.get(1)?,
+                    model: r.get(2)?,
+                    enabled: r.get::<_, i64>(3)? != 0,
+                    sampling: crate::model_lists::sampling_from_text(&r.get::<_, String>(4)?),
+                    thinks: r.get::<_, i64>(5)? != 0,
+                })
+            })
+            .map_err(backend)?;
+        rows.collect::<Result<_, _>>().map_err(backend)
+    }
+
+    fn add_entry(
+        &self,
+        job: crate::model_lists::Job,
+        provider: i64,
+        model: &str,
+    ) -> Result<i64, RepositoryError> {
+        let conn = self.db.lock()?;
+        let next: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(position), -1) + 1 FROM model_entries WHERE job = ?1",
+                [job.name()],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        conn.execute(
+            "INSERT INTO model_entries (job, provider, model, enabled, position) \
+             VALUES (?1, ?2, ?3, 1, ?4)",
+            params![job.name(), provider, model, next],
+        )
+        .map_err(backend)?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    fn set_sampling(
+        &self,
+        id: i64,
+        sampling: &crate::application::Sampling,
+    ) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE model_entries SET sampling = ?2 WHERE id = ?1",
+                params![id, crate::model_lists::sampling_to_text(sampling)],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn enable_entry(&self, id: i64, enabled: bool) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE model_entries SET enabled = ?2 WHERE id = ?1",
+                params![id, enabled],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn set_thinks(&self, id: i64, thinks: bool) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute(
+                "UPDATE model_entries SET thinks = ?2 WHERE id = ?1",
+                params![id, thinks],
+            )
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn move_entry(&self, id: i64, up: bool) -> Result<(), RepositoryError> {
+        let job: Option<String> = self
+            .db
+            .lock()?
+            .query_row("SELECT job FROM model_entries WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(backend)?;
+        let Some(job) = job.as_deref().and_then(crate::model_lists::Job::from_name) else {
+            return Ok(());
+        };
+        // Renumber the list in its current order with this entry moved, so positions stay a
+        // simple 0..n whatever came before.
+        let mut order: Vec<i64> = self.entries(job)?.iter().map(|e| e.id).collect();
+        let Some(at) = order.iter().position(|e| *e == id) else {
+            return Ok(());
+        };
+        let to = if up {
+            at.checked_sub(1)
+        } else {
+            Some(at + 1).filter(|t| *t < order.len())
+        };
+        let Some(to) = to else {
+            return Ok(());
+        };
+        order.swap(at, to);
+        let mut conn = self.db.lock()?;
+        let tx = conn.transaction().map_err(backend)?;
+        for (position, entry) in order.iter().enumerate() {
+            tx.execute(
+                "UPDATE model_entries SET position = ?2 WHERE id = ?1",
+                params![entry, i64::try_from(position).unwrap_or(i64::MAX)],
+            )
+            .map_err(backend)?;
+        }
+        tx.commit().map_err(backend)?;
+        Ok(())
+    }
+
+    fn remove_entry(&self, id: i64) -> Result<(), RepositoryError> {
+        self.db
+            .lock()?
+            .execute("DELETE FROM model_entries WHERE id = ?1", [id])
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    fn move_over_once(
+        &self,
+        everyday: Option<&crate::application::ButlerModelConfig>,
+        deep: Option<&crate::application::DeepModel>,
+    ) -> Result<bool, RepositoryError> {
+        let done: Option<String> = self
+            .db
+            .lock()?
+            .query_row(
+                "SELECT value FROM model_lists_meta WHERE key = 'moved_over'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        if done.is_some() {
+            return Ok(false);
+        }
+        let mut known: Vec<(String, String, i64)> = Vec::new();
+        for m in crate::model_lists::moved_over(everyday, deep) {
+            let provider = match known
+                .iter()
+                .find(|(u, k, _)| *u == m.url && *k == m.api_key)
+            {
+                Some((_, _, id)) => *id,
+                None => {
+                    let name = crate::model_lists::name_for(&m.url);
+                    let id = self.add_provider(&name, &m.url, &m.api_key)?;
+                    known.push((m.url.clone(), m.api_key.clone(), id));
+                    id
+                }
+            };
+            let entry = self.add_entry(m.job, provider, &m.model)?;
+            self.set_sampling(entry, &m.sampling)?;
+        }
+        self.db
+            .lock()?
+            .execute(
+                "INSERT INTO model_lists_meta (key, value) VALUES ('moved_over', 'yes')",
+                [],
+            )
+            .map_err(backend)?;
+        Ok(true)
+    }
+}

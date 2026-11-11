@@ -1,0 +1,215 @@
+use super::*;
+
+/// Serves the web console's HTML shell (embedded in the binary; see ADR 0050).
+/// The styles and script are separate files (`/styles.css`, `/app.js`) so the
+/// console is organized by responsibility, not one giant file — still embedded,
+/// still no build step.
+pub(super) async fn index() -> impl axum::response::IntoResponse {
+    // Cache-bust the assets per build: the shell is always revalidated (no-cache),
+    // and it points at `/app.js?v=<build>` / `/styles.css?v=<build>` so a deploy
+    // serves fresh script/styles even to a browser that heuristically cached the
+    // old ones (the assets themselves are then immutable per build, below).
+    let v = endora_application::build_id();
+    let html = include_str!("../web/index.html")
+        .replace("/app.js", &format!("/app.js?v={v}"))
+        .replace("/styles.css", &format!("/styles.css?v={v}"));
+    (
+        [(axum::http::header::CACHE_CONTROL, "no-cache")],
+        Html(html),
+    )
+}
+
+/// The console's stylesheet (embedded). Immutable per build — the shell versions
+/// the URL, so a new build fetches a new URL rather than a stale cached one.
+pub(super) async fn console_css() -> impl axum::response::IntoResponse {
+    (
+        [
+            (axum::http::header::CONTENT_TYPE, "text/css; charset=utf-8"),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        include_str!("../web/styles.css"),
+    )
+}
+
+/// The console's script, in the order it is joined. The parts share one global scope exactly
+/// as the single file did (they are concatenated, not loaded as modules), so each is a slice of
+/// the old `app.js`, cut at a top-level boundary. `scripts/check-console.mjs` joins the same
+/// files in the same order.
+const CONSOLE_SCRIPT_PARTS: [&str; 18] = [
+    include_str!("../web/js/00-state.js"),
+    include_str!("../web/js/10-core.js"),
+    include_str!("../web/js/20-common.js"),
+    include_str!("../web/js/30-settings.js"),
+    include_str!("../web/js/40-skills.js"),
+    include_str!("../web/js/45-lab.js"),
+    include_str!("../web/js/47-hq.js"),
+    include_str!("../web/js/47b-hq-replay.js"),
+    include_str!("../web/js/47c-hq-world.js"),
+    include_str!("../web/js/47d-hq-holodeck.js"),
+    include_str!("../web/js/47e-hq-chess.js"),
+    include_str!("../web/js/47g-hq-live.js"),
+    include_str!("../web/js/47h-hq-agents.js"),
+    include_str!("../web/js/49-sound.js"),
+    include_str!("../web/js/49b-sound-live.js"),
+    include_str!("../web/js/50-views.js"),
+    include_str!("../web/js/70-dispatch.js"),
+    include_str!("../web/js/80-boot.js"),
+];
+
+static CONSOLE_SCRIPT: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| CONSOLE_SCRIPT_PARTS.concat());
+
+/// The console's script (embedded). Immutable per build (see [`console_css`]).
+pub(super) async fn console_js() -> impl axum::response::IntoResponse {
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/javascript; charset=utf-8",
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                "public, max-age=31536000, immutable",
+            ),
+        ],
+        CONSOLE_SCRIPT.as_str(),
+    )
+}
+
+/// That the node is up, and which build it runs. Since the chat was retired (ADR 0136) there
+/// is no turn to be busy with and no butler model to name.
+pub(super) async fn health() -> Json<serde_json::Value> {
+    Json(json!({
+        "status": "ok",
+        "service": endora_application::platform_identity(),
+        "version": endora_application::version(),
+        "build": endora_application::build_id(),
+        // The Console contract's version (ADR 0145).
+        "api": super::console::CONTRACT_VERSION,
+    }))
+}
+
+#[derive(Deserialize)]
+pub(super) struct AuditQuery {
+    limit: Option<usize>,
+    /// The activity feed only: skip this many of the newest, to page on.
+    offset: Option<usize>,
+}
+
+#[derive(Serialize)]
+pub(super) struct AuditResponse {
+    id: String,
+    at_ms: i64,
+    summary: String,
+}
+
+impl From<&AuditRecord> for AuditResponse {
+    fn from(r: &AuditRecord) -> Self {
+        Self {
+            id: r.id().value().to_string(),
+            at_ms: r.at().unix_millis(),
+            summary: r.summary().to_owned(),
+        }
+    }
+}
+
+pub(super) async fn audit(
+    State(state): State<AppState>,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<Vec<AuditResponse>>, ApiError> {
+    let limit = query.limit.unwrap_or(50);
+    let audit = state.audit.clone();
+    let records = blocking(move || usecases::recent_audit(audit.as_ref(), limit)).await?;
+    Ok(Json(records.iter().map(AuditResponse::from).collect()))
+}
+
+#[derive(Serialize)]
+pub(super) struct ActivityResponse {
+    at_ms: i64,
+    kind: String,
+    summary: String,
+}
+
+impl From<&ActivityItem> for ActivityResponse {
+    fn from(item: &ActivityItem) -> Self {
+        Self {
+            at_ms: item.at().unix_millis(),
+            kind: item.kind().name().to_owned(),
+            summary: item.summary().to_owned(),
+        }
+    }
+}
+
+/// The activity feed: a merged, newest-first timeline of what has happened.
+pub(super) async fn activity(
+    State(state): State<AppState>,
+    Query(query): Query<AuditQuery>,
+) -> Result<Json<Vec<ActivityResponse>>, ApiError> {
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+    let audit = state.audit.clone();
+    let events = state.events.clone();
+    let items =
+        blocking(move || usecases::activity_page(audit.as_ref(), events.as_ref(), limit, offset))
+            .await?;
+    Ok(Json(items.iter().map(ActivityResponse::from).collect()))
+}
+
+/// A server-sent event stream that emits a `changed` event whenever a write
+/// succeeds. Clients re-read `/v1/activity` (and other state) on each event —
+/// the stream carries a nudge, never the data itself.
+pub(super) async fn activity_stream(
+    State(state): State<AppState>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.changes.subscribe();
+    let stream = unfold(rx, |mut rx| async move {
+        // A closed channel ends the stream; a lag still means "something
+        // changed", so both a value and a lag emit one `changed` event.
+        match rx.recv().await {
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some((Ok(Event::default().event("changed").data("changed")), rx))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Records one line to Endora's action log (best-effort — transparency, not
+/// the critical path, so a failure never breaks the turn).
+pub(super) fn record_event(
+    events: &endora_platform::EventStore,
+    clock: &SystemClock,
+    summary: &str,
+) {
+    use endora_application::{Clock, EventLog};
+    let _ = events.record(clock.now(), summary);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CONSOLE_SCRIPT_PARTS;
+
+    // A console part left out of the node's list is served to nobody, and the console check,
+    // which joins the folder, never notices: the Holodeck card shipped that way and was not on
+    // the screen. Every script in the folder is in the list, and nothing else is.
+    #[test]
+    fn every_console_script_in_the_folder_is_served() {
+        let folder = concat!(env!("CARGO_MANIFEST_DIR"), "/src/web/js");
+        let mut names: Vec<String> = std::fs::read_dir(folder)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".js"))
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), CONSOLE_SCRIPT_PARTS.len(), "{names:?}");
+        for (name, part) in names.iter().zip(CONSOLE_SCRIPT_PARTS) {
+            let file = std::fs::read_to_string(format!("{folder}/{name}")).unwrap();
+            assert_eq!(&file, part, "{name} is not served in its place");
+        }
+    }
+}

@@ -1,0 +1,520 @@
+//! What the engine needs from the world: a store, runners, and a clock.
+
+use core::fmt;
+use std::time::Duration;
+
+use crate::domain::{Criterion, Label, Ref};
+use crate::domain::{Evidence, ProjectId, ProjectStatus};
+use crate::domain::{Exit, Goal, Liveness, Project};
+use crate::domain::{
+    GoalId, GoalStatus, Member, MemberId, Micros, Millis, Priority, Receipt, RunId, RunStatus,
+    Task, TaskId, TaskStatus, WakeId, WakeReason,
+};
+
+/// A store that failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreError(pub String);
+
+impl fmt::Display for StoreError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "the team's store failed: {}", self.0)
+    }
+}
+
+impl std::error::Error for StoreError {}
+
+/// A store result.
+pub type Stored<T> = Result<T, StoreError>;
+
+/// A task to create.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewTask {
+    /// The goal it is for.
+    pub goal: GoalId,
+    /// The project of that goal it goes in, if any; a sub-task goes in its parent's.
+    pub project: Option<ProjectId>,
+    /// The task it is part of, if any.
+    pub parent: Option<TaskId>,
+    /// What it is.
+    pub title: String,
+    /// What is wanted.
+    pub description: String,
+    /// The member it is handed to, if any.
+    pub assignee: Option<MemberId>,
+    /// How soon it matters.
+    pub priority: Priority,
+    /// The tasks it waits on.
+    pub waits_on: Vec<TaskId>,
+}
+
+/// A routine to create (ADR 0107).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewRoutine {
+    /// The title each of its tasks gets.
+    pub title: String,
+    /// What each of its tasks asks for.
+    pub description: String,
+    /// The goal its tasks serve.
+    pub goal: GoalId,
+    /// The project of that goal its tasks go in, if any.
+    pub project: Option<ProjectId>,
+    /// The member its tasks are handed to.
+    pub assignee: MemberId,
+    /// How often it fires.
+    pub every_ms: Millis,
+    /// Whether it takes the home lab's alarms.
+    pub on_lab_trouble: bool,
+}
+
+/// A project to create (ADR 0113).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewProject {
+    /// The goal it serves.
+    pub goal: GoalId,
+    /// What it is.
+    pub title: String,
+    /// Why it is worth doing.
+    pub reason: String,
+    /// Who leads it.
+    pub lead: MemberId,
+    /// Where it starts.
+    pub status: ProjectStatus,
+    /// Its cap, if the owner set one.
+    pub cap: Option<Micros>,
+    /// A cap asked for, waiting on the owner's desk.
+    pub asked_cap: Option<Micros>,
+    /// Who made it.
+    pub created_by: String,
+    /// The member who proposed it, if any.
+    pub proposer: Option<MemberId>,
+    /// The task the proposal was made in, if any.
+    pub proposed_in: Option<TaskId>,
+    /// What the proposal pointed at.
+    pub evidence: Vec<Evidence>,
+}
+
+/// One post in a task's thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Post {
+    /// Who wrote it: `owner`, `endora`, or a member's name.
+    pub author: String,
+    /// What it says.
+    pub text: String,
+    /// When.
+    pub at: Millis,
+    /// Whether a member wrote it stating nothing from the record, in a turn that took no
+    /// reading (ADR 0114): shown as unsupported to the tester and the lead.
+    pub unsupported: bool,
+}
+
+/// Evidence cited for one criterion of a task, at one stage of its checking (ADR 0114).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cited {
+    /// The task.
+    pub task: TaskId,
+    /// The turn that cited it.
+    pub run: RunId,
+    /// The member whose turn it was.
+    pub member: MemberId,
+    /// `submitted` (the member's), `tested` (the tester's pass), `accepted` (the lead's), or
+    /// `closed` (a routine's check closed by its member).
+    pub stage: String,
+    /// Which criterion, from 1; 0 for work with none.
+    pub criterion: usize,
+    /// What it cites.
+    pub refs: Vec<Ref>,
+    /// When.
+    pub at: Millis,
+}
+
+/// One action in a scenario, as its log keeps it (the Holodeck plan's phase 5): the accepted
+/// ones, replayed in order from the seed, are the world's state; the refused ones are kept as
+/// what was tried. The log is append-only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioAction {
+    /// Its place in the log (ignored when added).
+    pub id: i64,
+    /// The scenario's task.
+    pub task: TaskId,
+    /// The turn that acted.
+    pub run: RunId,
+    /// The member whose turn it was.
+    pub member: MemberId,
+    /// The action, as the scenario keeps it (`inspect`, `replace_part bulb`).
+    pub action: String,
+    /// Whether the world accepted it.
+    pub ok: bool,
+    /// What the world said: what was seen, or why it was refused.
+    pub said: String,
+    /// When.
+    pub at: Millis,
+}
+
+/// One wake, as its receipt keeps it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wake {
+    /// Its id.
+    pub id: WakeId,
+    /// Whose turn it asks for.
+    pub member: MemberId,
+    /// What it is about, if a task.
+    pub task: Option<TaskId>,
+    /// Why.
+    pub reason: WakeReason,
+    /// What became of it.
+    pub receipt: Receipt,
+    /// The turn it started or joined, if any.
+    pub run: Option<RunId>,
+    /// When it was raised.
+    pub at: Millis,
+    /// Whether the owner's own request raised it (ADR 0113, amended): their task, reply,
+    /// answer or "Run now". The turn it starts is then the pool's, not the member's share's.
+    pub by_owner: bool,
+}
+
+/// One turn, as stored.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    /// Its id.
+    pub id: RunId,
+    /// Whose turn.
+    pub member: MemberId,
+    /// The task, if it is about one.
+    pub task: Option<TaskId>,
+    /// The wake that started it.
+    pub wake: WakeId,
+    /// Where it is.
+    pub status: RunStatus,
+    /// How many times it has started.
+    pub attempts: u8,
+    /// When it was queued.
+    pub queued_at: Millis,
+    /// When it last started, if it has.
+    pub started_at: Option<Millis>,
+    /// When it may be tried again, while it waits to.
+    pub retry_at: Option<Millis>,
+    /// When it ended, if it has.
+    pub ended_at: Option<Millis>,
+    /// What it has reserved from the budget for its current attempt.
+    pub reserved: Micros,
+    /// How many times the platform interrupted its turn (HQ or the runner restarted under it,
+    /// or its container vanished): the first is tried again without counting against its
+    /// retries ([`crate::domain::runs::MOST_QUIET`]).
+    pub interrupted: u8,
+    /// What it has reported spending, across attempts.
+    pub spent: Micros,
+    /// What the member was told at the start of its latest attempt.
+    pub told: String,
+    /// Why it ended, in a few words.
+    pub end_reason: String,
+    /// Whether it changed something through HQ: moved a task, made one, changed a project
+    /// (ADR 0114; before it, also whether it posted).
+    pub moved_forward: bool,
+    /// Whether it posted in a thread.
+    pub posted: bool,
+    /// Whether it left its task blocked or put a blocker to someone (a question, an approval).
+    pub blocked: bool,
+    /// What it came to, once it ended (ADR 0114); `None` before, and for turns before labels.
+    pub label: Option<Label>,
+    /// The fresh input tokens its model calls sent, as the relay reported them.
+    pub input_tokens: i64,
+    /// The input tokens they read from the prompt cache.
+    pub cache_read_tokens: i64,
+    /// The input tokens they wrote to the prompt cache.
+    pub cache_write_tokens: i64,
+    /// The output tokens its model calls produced, as the relay reported them.
+    pub output_tokens: i64,
+    /// Whether it exists because the owner asked (ADR 0113, amended): what it spends is
+    /// counted against the pool's day only, never the member's share.
+    pub asked_by_owner: bool,
+    /// The brain its latest attempt runs or ran on (ADR 0131), decided when it started; `None`
+    /// before it has, and for turns before turns had a kind, which ran on their member's
+    /// brain.
+    pub brain: Option<crate::domain::Brain>,
+}
+
+/// One item on the owner's desk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeskItem {
+    /// Its id.
+    pub id: crate::domain::DeskId,
+    /// What kind of decision it is: `stuck`, `ready_to_merge`, …
+    pub kind: String,
+    /// The task it is about, if any.
+    pub task: Option<TaskId>,
+    /// The goal it is about, if any.
+    pub goal: Option<GoalId>,
+    /// The project it is about, if any (ADR 0113).
+    pub project: Option<ProjectId>,
+    /// The member it is from, if any: who asked, for a question.
+    pub member: Option<MemberId>,
+    /// What the owner is shown.
+    pub text: String,
+    /// `waiting`, or how the owner decided.
+    pub status: String,
+    /// When it landed.
+    pub at: Millis,
+}
+
+/// HQ's own store (spec section 14). Every change the engine makes goes through it, and the
+/// engine is its only writer, one change at a time.
+pub trait TeamStore:
+    super::receipt_ports::ReceiptStore
+    + super::wing_ports::WingStore
+    + super::schedule_ports::ScheduleStore
+    + super::desk_ports::DeskStore
+    + super::event_ports::EventStore
+    + super::world_ports::WorldStore
+    + super::guard_ports::GuardStore
+    + super::map_ports::MapStore
+    + super::history_ports::HistoryStore
+    + super::run_ports::RunStore
+    + super::office_ports::OfficeStore
+{
+    /// Adds a member.
+    fn add_member(&self, name: &str, share_percent: u8, slots: u8, look: u8) -> Stored<MemberId>;
+    /// Every member, in the order they joined.
+    fn members(&self) -> Stored<Vec<Member>>;
+    /// Pauses or resumes a member.
+    fn set_paused(&self, member: MemberId, paused: bool) -> Stored<()>;
+    /// Puts a member on furlough from `at` (ADR 0118). Nothing else about it changes: members
+    /// are never deleted.
+    fn furlough_member(&self, member: MemberId, at: Millis) -> Stored<()>;
+    /// Sets a member's model (ADR 0142): every turn of its runs on it.
+    fn set_brain(&self, member: MemberId, brain: crate::domain::Brain) -> Stored<()>;
+    /// What runs a member's turns, as the owner set it (ADR 0117): the worker for a member
+    /// never set, or one the store does not know.
+    fn runtime_of(&self, member: MemberId) -> Stored<crate::domain::Runtime>;
+    /// Sets what runs a member's turns.
+    fn set_runtime(&self, member: MemberId, runtime: crate::domain::Runtime) -> Stored<()>;
+    /// Renames a member.
+    fn rename_member(&self, member: MemberId, name: &str) -> Stored<()>;
+
+    /// Adds a goal.
+    fn add_goal(
+        &self,
+        title: &str,
+        reason: &str,
+        status: GoalStatus,
+        parent: Option<GoalId>,
+    ) -> Stored<GoalId>;
+    /// Atomically create a goal with its application-selected source identity.
+    /// # Errors
+    /// A store failure or invalid source run.
+    fn add_goal_from(
+        &self,
+        title: &str,
+        reason: &str,
+        status: GoalStatus,
+        parent: Option<GoalId>,
+        origin: crate::domain::history::InputOrigin,
+    ) -> Stored<GoalId>;
+    /// A goal.
+    fn goal(&self, id: GoalId) -> Stored<Option<Goal>>;
+    /// Every goal, oldest first.
+    fn goals(&self) -> Stored<Vec<Goal>>;
+    /// Sets a goal's status.
+    fn set_goal_status(&self, id: GoalId, status: GoalStatus) -> Stored<()>;
+    /// A goal's notes from the owner: empty when there are none.
+    fn goal_note(&self, id: GoalId) -> Stored<String>;
+    /// Sets a goal's notes from the owner; empty clears them.
+    fn set_goal_note(&self, id: GoalId, note: &str) -> Stored<()>;
+
+    /// Adds a task, at `depth` hands from its goal.
+    fn add_task(&self, task: &NewTask, depth: u8) -> Stored<TaskId>;
+    /// Atomically create task body and empty criteria with reliable source identity.
+    /// # Errors
+    /// A store failure or invalid source run.
+    fn add_task_from(
+        &self,
+        task: &NewTask,
+        depth: u8,
+        origin: crate::domain::history::InputOrigin,
+    ) -> Stored<TaskId>;
+    /// A task.
+    fn task(&self, id: TaskId) -> Stored<Option<Task>>;
+    /// Every task, oldest first.
+    fn tasks(&self) -> Stored<Vec<Task>>;
+    /// Takes a task for `member`, in one step that succeeds for exactly one member: `Ok(None)`
+    /// if it is now theirs, `Ok(Some(other))` if another member has it.
+    fn claim(&self, task: TaskId, member: MemberId) -> Stored<Option<MemberId>>;
+    /// Lets a task go: it has no owner.
+    fn release(&self, task: TaskId) -> Stored<()>;
+    /// Sets a task's status.
+    fn set_task_status(&self, task: TaskId, status: TaskStatus) -> Stored<()>;
+    /// Puts a task in a project, or in none.
+    fn set_task_project(&self, task: TaskId, project: Option<ProjectId>) -> Stored<()>;
+    /// Records whether a task has had its one recovery nudge.
+    fn set_nudged(&self, task: TaskId, nudged: bool) -> Stored<()>;
+    /// Records whether the task's waiter has been woken now its waits are over.
+    fn set_woken_after_waits(&self, task: TaskId, woken: bool) -> Stored<()>;
+    /// Whether the task's waiter has been woken now its waits are over.
+    fn woken_after_waits(&self, task: TaskId) -> Stored<bool>;
+    /// Records the gate's latest result for a task.
+    fn set_gate(&self, task: TaskId, passed: bool) -> Stored<()>;
+    /// The gate's latest result for a task, if it has run.
+    fn gate(&self, task: TaskId) -> Stored<Option<bool>>;
+
+    /// Adds a post to a task's thread.
+    fn post(&self, task: TaskId, author: &str, text: &str, at: Millis) -> Stored<()> {
+        self.post_marked(task, author, text, at, &[], false)
+    }
+    /// Adds a post to a task's thread with the evidence it cites, and whether it is
+    /// unsupported (ADR 0114).
+    fn post_marked(
+        &self,
+        task: TaskId,
+        author: &str,
+        text: &str,
+        at: Millis,
+        evidence: &[Ref],
+        unsupported: bool,
+    ) -> Stored<()>;
+    /// Atomically append a post and the authenticated source, without inferring it from author.
+    /// # Errors
+    /// A store failure or invalid source run.
+    fn post_from(
+        &self,
+        task: TaskId,
+        post: &Post,
+        evidence: &[Ref],
+        origin: crate::domain::history::InputOrigin,
+    ) -> Stored<()>;
+    /// Sets what done means for a task.
+    fn set_criteria(&self, task: TaskId, criteria: &[Criterion]) -> Stored<()>;
+    /// Change only the criteria's provenance; task-body provenance is independent.
+    /// # Errors
+    /// A store failure or invalid source run.
+    fn set_criteria_from(
+        &self,
+        task: TaskId,
+        criteria: &[Criterion],
+        origin: crate::domain::history::InputOrigin,
+    ) -> Stored<()>;
+    /// Hands a task to a member, or to nobody.
+    fn set_assignee(&self, task: TaskId, member: Option<MemberId>) -> Stored<()>;
+    /// A task's thread, oldest first.
+    fn thread(&self, task: TaskId) -> Stored<Vec<Post>>;
+    /// How many posts each task's thread holds, for every task with one, in one read.
+    fn post_counts(&self) -> Stored<std::collections::HashMap<TaskId, usize>>;
+
+    /// Records a wake with its receipt.
+    fn add_wake(
+        &self,
+        member: MemberId,
+        task: Option<TaskId>,
+        reason: WakeReason,
+        receipt: Receipt,
+        run: Option<RunId>,
+        at: Millis,
+    ) -> Stored<WakeId>;
+    /// Updates a wake's receipt.
+    fn set_wake(&self, id: WakeId, receipt: Receipt, run: Option<RunId>) -> Stored<()>;
+    /// Marks a wake as raised by the owner's own request.
+    fn set_wake_by_owner(&self, id: WakeId) -> Stored<()>;
+    /// The wakes held for a task, oldest first.
+    fn held_wakes(&self, task: TaskId) -> Stored<Vec<Wake>>;
+    /// One wake by its stable ID, without reading retained wake history.
+    /// # Errors
+    /// A store failure or corrupt matching record.
+    fn wake(&self, id: WakeId) -> Stored<Option<Wake>>;
+    /// Every wake, oldest first.
+    fn wakes(&self) -> Stored<Vec<Wake>>;
+
+    /// Adds a project.
+    fn add_project(&self, project: &NewProject, at: Millis) -> Stored<ProjectId>;
+    /// Every project, oldest first.
+    fn projects(&self) -> Stored<Vec<Project>>;
+    /// Saves a project's changes: its lead, status, pause, cap and asked cap, and when.
+    fn save_project(&self, project: &Project) -> Stored<()>;
+
+    /// Whether the kill switch is on.
+    fn stopped(&self) -> Stored<bool>;
+    /// Pulls or releases the kill switch.
+    fn set_stopped(&self, stopped: bool) -> Stored<()>;
+    /// One of HQ's own settings, by its key: the house log, and what was done once.
+    fn setting(&self, key: &str) -> Stored<Option<String>>;
+    /// Sets one of HQ's own settings.
+    fn set_setting(&self, key: &str, value: &str) -> Stored<()>;
+
+    // ---- roles as an enforced RACI (ADR 0120) ------------------------------------------
+
+    /// Every task marked as a lead's report: the task, its lead, and its kind.
+    fn report_tasks(&self) -> Stored<Vec<(TaskId, MemberId, String)>>;
+}
+
+/// A post in a task's thread with what it cited, as Replay reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadPost {
+    /// The task whose thread it is in.
+    pub task: TaskId,
+    /// The post.
+    pub post: Post,
+    /// What it cited (ADR 0114).
+    pub evidence: Vec<Ref>,
+}
+
+/// One row of the ledger, as Replay reads it back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LedgerRow {
+    /// The turn it is for.
+    pub run: RunId,
+    /// `reserve`, `use`, `charge` or `release`.
+    pub kind: String,
+    /// How much.
+    pub amount: Micros,
+    /// When.
+    pub at: Millis,
+}
+
+/// What a member's turn is started with: the run, the member, the task and what it is told.
+/// A real runner also gets the protocol endpoint and a token for this run only (phase 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunContext {
+    /// The turn.
+    pub run: RunId,
+    /// Whose.
+    pub member: MemberId,
+    /// The task, if any.
+    pub task: Option<TaskId>,
+    /// What the member is told: its role, the task and its chain of why, what is new, the
+    /// tasks it waits on.
+    pub told: String,
+    /// The run's own token for the team protocol, which ends with the run.
+    pub token: String,
+}
+
+/// Why a turn could not be started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartError(pub String);
+
+/// A runner that takes members' turns, each in a fresh container (spec section 6).
+pub trait WorkerAdapter {
+    /// Starts a turn.
+    ///
+    /// # Errors
+    /// [`StartError`] if it could not start.
+    fn start(&self, run: &RunContext) -> Result<(), StartError>;
+    /// Whether the turn is still alive, ended, or gone.
+    fn status(&self, run: RunId) -> Liveness;
+    /// Why a turn that finished badly did, in the runner's words, when it said.
+    fn why_ended(&self, _run: RunId) -> Option<String> {
+        None
+    }
+    /// How a turn that finished badly ended, when the runner said: the exit code of its worker,
+    /// or that its container was gone before the runner saw it end. What tells the platform's
+    /// interruption of a turn from its worker's failure.
+    fn exit_of(&self, _run: RunId) -> Exit {
+        Exit::Unsaid
+    }
+    /// Asks the turn to stop, then ends it after the grace period.
+    fn stop(&self, run: RunId, grace: Duration);
+    /// How many turns it can run at once.
+    fn capacity(&self) -> usize;
+}
+
+/// The time now.
+pub trait Clock {
+    /// Milliseconds since the Unix epoch.
+    fn now(&self) -> Millis;
+}

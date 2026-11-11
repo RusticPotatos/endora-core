@@ -1,0 +1,17 @@
+[package]
+name = "endora-application"
+description = "Endora application layer: the activity feed, the owner's export and delete, and the ports infrastructure implements for them."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+endora-kernel = { path = "../../shared/kernel" }
+endora-platform = { path = "../../domains/platform" }
+endora-bridge = { path = "../../domains/capabilities" }
+
+[lints]
+workspace = true

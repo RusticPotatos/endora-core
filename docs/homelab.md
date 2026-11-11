@@ -1,0 +1,431 @@
+# Home-lab dashboard
+
+For explicitly confirmed controls and durable jobs, see
+[the handheld console](terminal-console.md). This observer remains read-only.
+
+The dashboard is read-only and independent of AI models. The terminal uses
+`GET /v1/homelab?page=1` with its Endora bearer session. The response contains an
+observation timestamp and three service summaries. States are `unconfigured`,
+`healthy`, `degraded`, `unavailable`, or `stale`. Items are paged in groups of 20;
+up to 100 items per source are cached. Queue totals can exceed that cache.
+
+## Private server setup
+
+Run as the same OS user and with the same `ENDORA_DB` as the node:
+
+```sh
+endora-node homelab-setup
+```
+
+Enter origins interactively. API keys are masked. Blank preserves the current
+setting; `-` disables a source and clears its key. Settings remain in the node's
+private SQLite database, sealed under the node's secrets key (below); run setup with
+the same `ENDORA_SECRETS_KEY_FILE` as the node, if you set one. No keys are accepted
+through command arguments.
+
+## Secrets at rest (ADR 0125)
+
+Every credential the node stores (provider API keys, MCP bearer tokens and environments,
+the Home Assistant token and every other capability setting, the authenticator secret and
+the bootstrap token) is sealed in the database with a data key, and that key is wrapped by
+the **secrets key**: `secrets.key` beside the database (`/data/secrets.key` in the
+container), or wherever `ENDORA_SECRETS_KEY_FILE` names. The node makes it, owner-only, on
+its first start; on that start it also seals what an older node stored in plaintext and
+says `secrets: sealed N stored credential(s) at rest`. Sign-in sessions are kept only as a
+digest; a console session ends after thirty days, or after seven unused.
+
+**Back it up apart from the database.** Either one alone opens nothing; the two together
+open everything. So:
+
+1. Keep a copy in your password manager, as text:
+
+   ```sh
+   docker compose exec node base64 /data/secrets.key
+   ```
+
+2. Exclude `secrets.key` from the house's backup of the data folder (the nightly
+   `backups/daily-*.db` copies are beside it and stay included), the way the Ansible
+   vault password is kept out of the checkout's backup.
+3. On a restore, put it back beside the database before the node starts (as `0600`):
+   `base64 -d > secrets.key` from the copy.
+
+A node whose database holds sealed secrets and whose key file is missing will not start,
+and says so: restore the file. If no copy survives, `endora-node secrets forget
+--i-have-lost-the-key` empties every sealed credential and the password so the node can
+start with a new key; sign in again with the bootstrap token from the log and enter every
+key and password again. `endora-node secrets rekey` seals everything again under a new
+data key (the key file stays the same).
+
+This protects copies of the database: backups, snapshots, a disk that leaves the house. It
+does not protect a running host — anything with root on the NAS, which includes any
+container holding the Docker socket, can read the key and the database together.
+
+Sonarr and Radarr use `/api/v3/queue`; give their origin without a path or query.
+Their keys permit broader operations, but this adapter only sends fixed GETs.
+TLS uses the existing HTTP library's verified trust roots; do not disable TLS.
+HTTP is possible on a trusted private network, but does not encrypt keys.
+
+## Endora's secrets, and OpenBao (ADR 0144)
+
+Endora keeps and owns its secrets: every key, token and password you give it is sealed in its
+database under `secrets.key` (above), and nothing else is needed to open them. **OpenBao is not
+part of Endora.** If you run it, it is your own home service, from ansible-nas's `openbao` role
+and documented there; Endora neither reaches nor unlocks it, and has no Vault screen.
+
+Upgrading a node that was given the vault (ADR 0127):
+
+1. **Delete the leftover settings**: `ENDORA_VAULT_URL`, `ENDORA_VAULT_NETWORK` and
+   `ENDORA_PASSKEY_RP_ID` from `owner.mk`, or `endora_vault_url`, `endora_vault_network` and
+   `endora_passkey_rp_id` from your ansible-nas variables. They are ignored either way.
+2. **Deploy as usual.** The node leaves the vault's network and starts with its own store. The
+   old `endora_vault` network, if any is left, can go: `docker network rm endora_vault`.
+3. **Nothing in OpenBao changes**, and the node's database keeps its two vault tables
+   (`vault_passkeys`, `vault_state`), unread, so rolling back to the previous release finds
+   them as they were.
+
+A node whose own keys were moved into OpenBao (Settings › Vault › Endora's own keys, a one-way
+switch nobody on the house's node used) refuses to start, naming OpenBao, and changes nothing:
+roll back to the previous release to reach those credentials.
+
+## The AirPlay 2 door (ADR 0128)
+
+"Endora Mixer" as an **AirPlay 2** receiver, so an Apple TV casting into it holds its picture
+back to match the sound (lip-sync). It runs in its own container, `endora-airplay2`, on a LAN
+address of its own (a macvlan network), because its clock (nqptp) needs UDP 319/320, which the
+senders' clock already holds on the NAS. Without it, the classic door in the senders' container
+works as before, about two seconds behind the picture.
+
+### What you need, once
+
+1. **The NAS's LAN interface.** On the NAS: `ip -br link` lists the interfaces; the one that is
+   `UP` and carries the NAS's LAN address (check with `ip -br addr`) is the parent, often
+   `eth0`, `enp3s0` or `eno1`. Not `docker0`, a `br-…` or a `veth…`. If the NAS's address is on
+   a bridge it made itself (say `br0`), use the bridge.
+2. **The LAN** as CIDR (`ip -br addr` shows it, for example `/24` after the address) and its
+   **gateway** (`ip route show default`, after `via`).
+3. **A free address outside the router's DHCP pool.** In UniFi: *Settings › Networks › (your
+   LAN) › DHCP*, note the range; pick an address on the LAN outside it that nothing uses
+   (`ping` it first, from another machine). After the first start, UniFi lists a new client
+   with the door's MAC (default `aa:bb:cc:dd:ee:20`, a locally administered one): give it a
+   **fixed IP** of the same address and a name, so DHCP never hands it out. Docker hands out
+   only that one address.
+
+### Turning it on
+
+In `owner.mk`, with your values (never in git):
+
+```make
+SOUND_AIRPLAY2 = 1
+SOUND_AIRPLAY2_PARENT = eth0
+SOUND_AIRPLAY2_SUBNET = <your LAN, e.g. a /24>
+SOUND_AIRPLAY2_GATEWAY = <your router>
+SOUND_AIRPLAY2_IP = <the free address>
+# Optional:
+# SOUND_AIRPLAY2_MAC = aa:bb:cc:dd:ee:20
+# SOUND_AIRPLAY2_HOSTNAME = endora-mixer
+# SOUND_AIRPLAY2_LATENCY = 0.5
+# SOUND_AIRPLAY2_NETWORK = <an existing macvlan network on the LAN>
+```
+
+Docker allows one macvlan network per LAN subnet. If another container already has one (a
+Pi-hole on its own address, say), `make deploy` fails with "failed to allocate gateway …
+Address already in use": run `docker network ls --filter driver=macvlan` on the NAS and set
+`SOUND_AIRPLAY2_NETWORK` to that network's name, and the door joins it with its own address.
+
+Then `make deploy`. It adds the `airplay2` profile, builds the door's image on the Mac for the
+NAS, and the senders' container stops running the classic door (it restarts once, which
+interrupts any HomePod playing for a few seconds). `make deploy` refuses to start if one of the
+four network values is missing. With the `endora.homelab` collection instead: in the `endora`
+role, `endora_sound: true`, `endora_sound_airplay2: true` and the four
+`endora_sound_airplay2_*` values (its README).
+
+Check it: `docker logs endora-airplay2` says `1 AirPlay 2 receiver`, and on an iPhone or the
+Apple TV, "Endora Mixer" is in the AirPlay list. `ping` to the door's address works **from
+another machine but not from the NAS**: a macvlan address cannot be reached from its own
+host, which nothing needs (the door and the hub share only the pipe).
+
+### Tuning lip-sync
+
+`SOUND_AIRPLAY2_LATENCY` (seconds, 0 to 2, default 0.5) is how early the door hands its sound
+to the hub, to make up for the mix and the speaker after it. Play a video with speech from the
+Apple TV into the door, listen on the speaker you watch with, and:
+
+- sound **late** (lips move first): raise it by 0.1;
+- sound **early**: lower it by 0.1;
+
+then `make deploy` again (only the door restarts). If `docker logs endora-airplay2` warns that
+the offset is "too short" or "out of range", the Apple TV's stream does not arrive far enough
+ahead for that much: lower it. Upstream recommends staying within about 0.25 s; past that, it is
+worth listening for. A phone on the live stream can be lined up this way; the HomePods, through
+the senders' own AirPlay buffer, are seconds further behind and are for music.
+
+### If it is not found, or will not play
+
+- **Not in the AirPlay list**: the router or a Wi-Fi bridge may not pass mDNS from a second MAC
+  on the NAS's port. In UniFi, check the client appears; turn on *Multicast DNS* for the
+  network if devices are on another VLAN. Some switches and powerline or Wi-Fi bridges allow one
+  MAC per port: then use ipvlan instead (in `docker-compose.yml`'s `airplay2-lan` network,
+  `driver: ipvlan` and `ipvlan_mode: l2` under `driver_opts`), which shares the NAS's MAC.
+- **Found but silent**: `docker logs endora-airplay2`; the hub must be running (`sound`
+  profile), since the door's pipe has no reader without it.
+- **Back to classic**: `SOUND_AIRPLAY2 = 0` (or remove the line) and `make deploy`; then
+  `docker rm -f endora-airplay2`, since a profile that is off is not stopped by Compose.
+
+## The wing's deploy key (ADR 0115)
+
+The engineering wing's branches reach your ansible-nas fork only when you approve a push on the
+HQ screen, and then the node pushes them with a **deploy key** that can write to that one
+repository. Without one, the desk offers each accepted branch's bundle to download instead, and
+nothing is lost. To set it up:
+
+1. On the Mac, make a key for this alone, with no passphrase (the node runs unattended):
+
+   ```sh
+   ssh-keygen -t ed25519 -f ./endora-git-push -C "endora-hq deploy key" -N ""
+   ```
+
+2. On GitHub, open the fork → Settings → Deploy keys → Add deploy key: paste
+   `endora-git-push.pub`, tick **Allow write access**, and name it for Endora. A deploy key
+   belongs to one repository, which is the point: it cannot reach anything else of yours.
+3. Protect the branches the team must never move: Settings → Branches → add a rule for `main`
+   and for `develop` (at least "Require a pull request before merging"). Endora's push code
+   refuses anything but `hq/*` already; the rule makes GitHub refuse it too.
+4. Put the private key on the NAS in a folder of its own, as one file called `key`, readable by
+   the node alone (for example `/srv/endora/git-push-key/key`, mode `0600`), and in `owner.mk`:
+
+   ```make
+   ENDORA_GIT_PUSH_KEY = /srv/endora/git-push-key
+   ```
+
+   `make deploy` mounts the folder read-only at `/git-push-key`; the node reads
+   `ENDORA_GIT_PUSH_KEY_FILE=/git-push-key/key`. Delete the local copy of the private key once
+   it is there.
+5. The push trusts GitHub's published SSH host keys (baked into the node, from
+   `https://api.github.com/meta`) and nothing else. If GitHub ever rotates them, the push says
+   so and refuses; update the keys in `domains/capabilities/src/repo.rs`.
+
+Then, when a card says "Push hq/… to your fork", Approve pushes that branch; you merge it on
+GitHub when you are ready. HQ never opens a pull request and never merges.
+
+## The bench's credential (ADR 0123): removed
+
+The node no longer has a bench: its credential, its day's cap and `GET /team-relay/bench` were
+removed on 2 November 2026 (4 calls ever, all on 18 October). A bench token the node was given
+now opens nothing. To finish the removal, delete the token file on the NAS and the
+`ENDORA_BENCH_TOKEN` and `ENDORA_BENCH_CAP_CENTS` lines from `owner.mk`; the compose mount, the
+role's variables and the `bench` image target are left for that change.
+
+## The Mac's brain (ADR 0130)
+
+A team member can work with your Mac (ADR 0131): a strong coding model running in `llama-server`
+on the laptop you use all day. Every member works with it by default; the team's decisions are
+Claude's, not the Mac's. Work that needs it (code and branch work, the engineering wing lead's
+planning, a tester's work) waits for the Mac and never falls back to another model, while
+reading and status work use it when it is free and the NAS's model when it is not. So the
+Mac stays yours: the model is loaded only while the Mac is **plugged in** and **Mac busy** is
+off, and a turn runs on it only after you have been **idle** (ten minutes unless you change it),
+one at a time. On battery, or with Mac busy on, the model is unloaded and its memory (about
+15 GB) comes back. Mac busy is a switch on the Mac's card in the console's Settings, AI, so you
+can flip it from your phone.
+
+A small helper on the Mac, run by launchd every 30 seconds, reads the power source and your idle
+time, tells the node, and loads or unloads the model. It touches no other process.
+
+### Setting it up, once
+
+1. **On the Mac:** `brew install llama.cpp`, and put the model file (a `.gguf`) somewhere on it.
+2. **In `owner.mk` on the Mac** (git-ignored; these are your own values, never committed):
+
+   ```make
+   ENDORA_MAC_NODE_URL    = https://172.31.99.10:8787
+   ENDORA_MAC_MODEL       = /path/to/model.gguf
+   ENDORA_MAC_TOKEN_FILE  = $(HOME)/.config/endora/mac-token
+   ENDORA_MAC_KEY_FILE    = $(HOME)/.config/endora/mac-key
+   # Optional:
+   # ENDORA_MAC_LLAMA_ARGS  = -ngl 99 -c 32768
+   # ENDORA_MAC_PORT        = 8080
+   # ENDORA_MAC_NODE_CACERT = /path/to/node-certificate.pem   (if the node's certificate is self-signed)
+   ```
+
+   The node's address is the one you reach the console at. `ENDORA_MAC_KEY_FILE` is the key the
+   model's server will ask its clients for; the install makes it if it is not there.
+3. **In the console** (Settings › AI, *The Mac's brain*): *Make a token for the helper*, and
+   save the token it shows (once) in the file `ENDORA_MAC_TOKEN_FILE` names:
+
+   ```sh
+   mkdir -p ~/.config/endora && chmod 700 ~/.config/endora
+   pbpaste > ~/.config/endora/mac-token && chmod 600 ~/.config/endora/mac-token
+   ```
+
+4. **On the Mac:** `make mac-brain-install`. It copies the helper and its settings under
+   `~/Library/Application Support/Endora/mac-brain/` and loads the agent
+   `org.example.mac-brain` (no sudo). Its log is `~/Library/Logs/endora-mac-brain.log`.
+   `make mac-brain-uninstall` removes the agent and unloads the model.
+5. **In the console again:** enter the model's address as the node reaches the Mac,
+   `http://<the Mac's address>:8080/v1`, the key (`cat` the key file), and a model name
+   (anything: `llama-server` serves the one model it has), and save. The node refuses an address
+   that is not on your own network. Better than a fixed address: the Mac's name as the router
+   gives it out (`http://<name>.home:8080/v1`, `dig <name>.home @<router>` shows it), which
+   follows the Mac when its address changes. The node asks the router for names when
+   `ENDORA_LAN_DNS = <the router's address>` is in `owner.mk` (it cannot ask a Pi-hole on its
+   own macvlan address: the NAS cannot reach those), and accepts a name only while everything it
+   resolves to is on your own network.
+6. **The firewall prompt.** The first time `llama-server` listens on the network, macOS asks
+   whether to allow incoming connections for it: allow it. If you answered no, or it never asked,
+   open *System Settings › Network › Firewall › Options* and allow `llama-server`.
+7. A member works with the **Mac** unless you choose the house's model instead (roster, tap the
+   member, *Work*), or when hiring (*works with*).
+
+The Mac's card in Settings, AI says *Free: the team may use it* when all of it holds, and
+otherwise why: *Not heard from lately* (the helper is not running, or the node cannot be
+reached), *Mac busy is on*, *On battery*, *the model is loading*, or *You are using it*. A turn
+waiting for the Mac says so in its replay and on the roster. Without the helper the Mac is "not
+heard from" and nothing runs on it.
+
+To check by hand, on the Mac: `sh ~/Library/Application\ Support/Endora/mac-brain/endora-mac-brain.sh`
+runs one pass. `make mac-brain-test` tests the helper against stubs, on any machine.
+
+## A drain before every restart (ADR 0134)
+
+A deploy, and the NAS's own security reboot, restart HQ and the team's runner under turns that
+are running, and a turn on the Mac takes ten to fifteen minutes. So a restart is announced first:
+HQ starts no new turn (what is queued waits, and the roster says "waiting for a restart"), every
+answer a running member gets says a restart is coming, and a member can end its turn with a
+handover note and keep its task. The restart waits until no turn is running, or for a cap (five
+minutes), and then goes ahead. A turn still running at the cap is cut and tried again, as any
+interrupted turn is.
+
+### What `make deploy` and `make deploy-pi` do
+
+Before they restart anything they run `scripts/hq-drain.sh drain`, which is, through the same
+Docker context the deploy uses:
+
+```sh
+docker --context nas exec endora-hq endora-hq drain --cap 300 --wait
+```
+
+It prints what it did (how many turns are running, and when none is, "the restart can go ahead").
+After the deploy they run `scripts/hq-drain.sh resume`
+(`docker --context nas exec endora-hq endora-hq resume`). HQ also lifts the drain itself when it
+starts again, and a drain nobody ended lifts itself after 30 minutes, so none can stall the team.
+
+- `make deploy NO_DRAIN=1` (or `make deploy-pi NO_DRAIN=1`) skips it, for a deploy that cannot
+  wait.
+- `make deploy DRAIN_CAP=120` waits two minutes at most instead of five (never more than 30).
+- With `ENDORA_BUILD_CONTEXT` set, the image is built first and the drain comes just before the
+  restart. Without it, building and restarting are one command, so the drain comes before the
+  build.
+- It never stops a deploy: HQ not running there is said and skipped, and so is an HQ that
+  predates the command (the first deploy that brings it drains nothing).
+- `deploy-pi` restarts the runner and not HQ. The runner takes its turns from HQ, so draining HQ
+  keeps new turns from starting under it, and the deploy lifts the drain by name afterwards.
+
+You can run it by hand: `docker --context nas exec endora-hq endora-hq drain --wait`, then
+`... endora-hq resume`. `GET /v1/team/drain` on HQ (signed with its token, from inside the
+network) says whether one lasts, since when, how many turns are running, and what the last drain
+came to (`clean` and `cut`).
+
+### What you see
+
+Nothing, when the drain cut nothing: one line in the Activity ("The restart came: 2 turns ended
+before it, none cut"). When a restart did cut a turn, one item in the Desk's "While you were
+away" digest: "A restart cut 1 turn: ...", naming it. Nothing waits on you either way.
+
+### The NAS's reboot (optional)
+
+The `endora` role in the `endora.homelab` collection can install a systemd unit that runs the
+same drain as the NAS shuts down, so the 04:00 security reboot does not cut a turn. It is off by
+default, because it adds a wait, up to the cap, to every shutdown. It works whether the role runs
+Endora or `make deploy` does: the role brings its own copy of the drain script. In your
+ansible-nas variables:
+
+```yaml
+endora_drain_on_shutdown: true
+# endora_drain_cap_seconds: 300   # the most a shutdown waits for the turns under way
+```
+
+The unit (`/etc/systemd/system/endora-drain.service`) is a oneshot that does nothing when it
+starts and stays active, ordered after `docker.service`. Systemd stops units in the reverse of
+their start order, so at shutdown it is stopped, and its `ExecStop` runs the drain, while Docker
+and HQ's container are still up; its timeout is the cap plus a minute, because systemd's default
+of 90 seconds would cut a five-minute wait. Setting the variable back to false disables the unit
+and takes its file away without stopping it (stopping it would drain HQ). Check it on the NAS
+with `systemctl status endora-drain` and, after a reboot, `journalctl -b -1 -u endora-drain`.
+
+## The house watch (ADR 0148)
+
+A small machine outside the NAS (a Raspberry Pi 2 is enough) checks the NAS and its services once
+a minute and tells your phone when one has been down for 10 minutes, and when it is back. It is
+also the house's second Pi-hole. The role is `endora_watch`; its README has the details.
+
+### Setting it up, once
+
+1. **The SD card.** Raspberry Pi Imager: Raspberry Pi OS Lite, hostname `core-watch`, user
+   `endora`, SSH with your Mac's public key only. Plug it into the LAN by ethernet.
+2. **A fixed address.** In the router, give it a fixed IP (DHCP reservation).
+3. **The alert topic.** Make a long random name and keep it in the Keychain, never in a file:
+
+   ```sh
+   security add-generic-password -s endora-core-alert-topic -a endora -w "$(openssl rand -hex 16)"
+   ```
+
+   Install the ntfy app on your phone and subscribe to that topic on ntfy.sh
+   (`security find-generic-password -s endora-core-alert-topic -w` shows it).
+4. **The inventory.** In `deploy/ansible`, copy `inventory.watch.example.yml` to
+   `inventory.watch.local.yml` (git-ignored) and fill in the addresses and checks.
+5. **Run it**, dry first:
+
+   ```sh
+   ansible-playbook -i inventory.watch.local.yml watch.yml --check --diff --ask-become-pass
+   ansible-playbook -i inventory.watch.local.yml watch.yml --diff --ask-become-pass
+   ```
+
+   "House watch started" arrives on your phone within a minute.
+6. **The second DNS server.** In the router's DHCP settings, add the Pi's address as DNS server
+   2, after the NAS's Pi-hole.
+
+## Docker boundary
+
+For the supplied Compose deployment, enable the optional `homelab` profile after
+building the new node image:
+
+```sh
+docker compose --profile homelab up -d docker-observer
+docker compose exec node endora-node homelab-setup
+```
+
+Use your configured private Docker context if deploying remotely. The observer
+shares the node's network namespace and binds only loopback; Docker's origin is
+`http://127.0.0.1:9876`. The socket mount is **not** a read-only API restriction:
+the Python proxy's exact method/route allowlist is the boundary. The observer has
+privileged host socket access but is not exposed on a published port. Use the
+profile when recreating the node so its observer is recreated with that namespace.
+
+On the Docker host, start the supplied proxy as a trusted account with socket
+access, preferably through a host service supervisor:
+
+```sh
+python3 scripts/homelab-docker-proxy.py
+```
+
+It binds only loopback on port 9876 and accepts exactly `GET /version`,
+`GET /containers/json?all=true` (each container's name, state, status, creation time and
+image id, which tell Watchtower's updates from restarts; no label or anything else), and
+`GET /containers/<name>/json` for a name
+matching `[A-Za-z0-9][A-Za-z0-9_.-]{0,127}` (the team's lab map, ADR 0112: only
+the id, name, image, state, restart policy, network mode and the compose
+service, project and `depends_on` labels are passed on; never the environment,
+mounts or binds). Other routes, queries and write methods are refused.
+Configure Docker's dashboard origin as `http://127.0.0.1:9876` when the node
+runs on that host. For a remote host, forward that loopback endpoint through a
+private SSH tunnel. Do not publish the proxy or raw daemon port to the internet.
+If Endora is containerized, loopback is inside its container: arrange a private
+tunnel accessible there, rather than assuming the host endpoint is reachable.
+
+The proxy's socket access is powerful even though its HTTP interface is narrow.
+Never give the Pi socket access or mount the socket into the terminal client.
+
+Each source has a five-second budget. Polling starts every 30 seconds, with missed
+ticks skipped and refreshes serialized. Failures yield safe categories rather than upstream text.
+Snapshots older than 60 seconds are marked stale. No environment variables,
+mounts, filesystem paths, or raw service errors appear in dashboard responses.
