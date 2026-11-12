@@ -7,6 +7,24 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (image licensing)
+
+- **Core's image carries its licence texts.** `/usr/share/doc/endora-core` holds `LICENSE`, `NOTICE`,
+  `THIRD-PARTY-NOTICES.md` and `licenses/` (the texts of the 152 Rust crates built into the
+  programs, with an index), gathered at build time by `scripts/collect-crate-licences.sh`. The
+  notices are regenerated from an image by `scripts/gen-third-party-notices.sh` and read the same
+  from an amd64 and an arm64 build (the dynamic loader is named by role); the Docker-free
+  `scripts/test-gen-third-party-notices.sh` proves it and `scripts/gate.sh` requires it. Nothing is
+  published by this change.
+
+### Changed (image licensing)
+
+- **The Dockerfile pins `rust:1.87-bookworm` and `debian:bookworm-slim` by digest** (the
+  multi-platform index digests, linux/amd64 and linux/arm64 listed), the tag kept beside it.
+- **The interim image pin is disclosed** ([docs/install.md](docs/install.md) and the bundle's
+  `.env.example` files): it is the build made before Core had its own release, not a build of this
+  repository, and it still serves the retired HQ artwork that this repository does not contain.
+
 ### Removed
 
 - **The cartoon office, its studio and all of their third-party art.** The console no longer
@@ -44,9 +62,8 @@ tagged release.
 ### Added
 
 - **`THIRD-PARTY-NOTICES.md`.** The Rust crates and the 495 Debian packages of Core's image, their
-  licences, which parts are copyleft and where their source is, with a written source offer. Copying
-  it into the image is a Dockerfile change left open (see its "Open points"). Nothing is published
-  by this change.
+  licences, which parts are copyleft and where their source is, with a written source offer. The
+  image now carries it (see "Added (image licensing)" above). Nothing is published by this change.
 - **Every Core store has a nightly copy proven by restore** (milestone f;
   [ADR 0098](docs/adr/0098-it-can-be-rebuilt.md), amended 2026-11-09). HQ's `hq.db` (goals,
   tasks, desk) now gets what the node's `endora.db` always had: a 01:30 copy in its own

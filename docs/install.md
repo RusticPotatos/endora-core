@@ -52,7 +52,7 @@ commit you have tested, then `cd deploy/compose`. That one step fixes the compos
 `SOURCES.json` pins for Console and Audio, and the `ENDORA_CORE_VERSION` that `bundle.env.example`
 names. That is the published build of the commit Core's tree was taken from
 ([core-origin.md](core-origin.md)), not a build of this exact checkout, which has changed since;
-for an exact match build the image yourself (see Prerequisites). Keep that checkout (or note its commit) so a
+for an exact match build the image yourself (see Prerequisites). The pinned image is the build made before Core had its own release, not a build of this repository, and it still serves the retired HQ artwork (MIT and CC0 as credited, notices included) that this repository does not contain; Core's own first release replaces the pin. Keep that checkout (or note its commit) so a
 reinstall or rollback starts from the same files. To move later, check out the newer tag or commit
 and read the diff of `bundle.env.example` before you copy it over `.env`.
 
