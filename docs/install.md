@@ -242,22 +242,36 @@ docker compose cp node:/data/secrets.key ./secrets.key     # store it apart from
 docker compose exec node endora-node verify-backup /data/endora-backup.db    # restores the copy into a scratch file; exit 0 = it restores
 ```
 
-The cold copy below names the default volumes (`endora-core-data` and the rest). It only reads
-them (`:ro`), so it cannot change an install, but if your install uses other volume names
-(`second.env.example`, or `*_VOLUME` in your `.env`) put those names in the loop: `docker volume ls`
-shows them.
-
-**Everything, cold** (the simplest whole-system copy): stop, copy each volume, start.
+**Everything, cold** (the simplest whole-system copy): stop, copy each volume, start. Run it in the
+install's own folder. It finds the volumes by that install's Compose project, so it can only ever
+copy this install's own, whatever they are named (`second.env.example`, or `*_VOLUME` in your
+`.env`); it checks that each one already exists before it stops anything, so it never creates a
+volume (`docker run -v` would, even with `:ro`); and the tarball takes the volume's Compose name
+(`endora-core-data.tgz`, `endora-core-hq-data.tgz`), which is what the restore check below reads.
 
 ```sh
+KEYS="endora-core-data endora-core-hq-data" sh -eu <<'EOF'
+PROJECT=$(docker compose config | sed -n 's/^name: //p')
+: "${PROJECT:?run this in the folder of the install}"
+vol() { docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT" --filter "label=com.docker.compose.volume=$1"; }
+for k in $KEYS; do
+  v=$(vol "$k")
+  docker volume inspect "$v" >/dev/null 2>&1 || { echo "no such volume: $k (project $PROJECT)" >&2; exit 1; }
+done
 docker compose stop
-for v in endora-core-data endora-core-hq-data endora-audio-data; do
+for k in $KEYS; do
+  v=$(vol "$k")
   # The container runs as root; the tarball is handed back to you, not left root-owned.
   docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$v":/v:ro -v "$PWD":/b alpine:3.21 \
-    sh -c 'tar czf "/b/$1.tgz" -C /v . && chown "$OWNER" "/b/$1.tgz"' sh "$v"
+    sh -c 'tar czf "/b/$1.tgz" -C /v . && chown "$OWNER" "/b/$1.tgz"' sh "$k"
 done
 docker compose start
+EOF
 ```
+
+**Bundle only:** in the bundle's `deploy/compose` folder, Audio's settings are a third volume to
+copy: set `KEYS="endora-core-data endora-core-hq-data endora-audio-data"` on the first line. Core
+alone has no Audio volume, so leave it out there.
 
 **Restore: prove a backup first, in a project of its own.** Run this from `deploy/compose/core`,
 with the cold copy's `endora-core-data.tgz` and `endora-core-hq-data.tgz` in the folder you run it
@@ -410,15 +424,24 @@ EOF
 
 That removes the install's containers, its networks and its named volumes, including the
 fixed-name `endora-*` ones. Compose reads the volume names from the `.env` in that folder, so
-keep the `.env` until this has run. Check that nothing is left:
+keep the `.env` until this has run. Then check that nothing is left. Set `REMOVE_PROJECT` to
+the project you just removed (repeat for each install). The check lists only objects Compose
+labelled with that project, including its own `<project>_endora-no-git-key`; another Endora
+install on the same host carries its own project label and is never listed:
 
 ```sh
-docker ps -a --filter name=endora
-docker network ls --filter name=endora
-docker volume ls --filter name=endora
+REMOVE_PROJECT= sh -eu <<'EOF'
+: "${REMOVE_PROJECT:?set REMOVE_PROJECT to the project name you removed}"
+f="label=com.docker.compose.project=$REMOVE_PROJECT"
+docker ps -a -q --filter "$f"
+docker network ls -q --filter "$f"
+docker volume ls -q --filter "$f"
+EOF
 ```
 
-All three should list nothing. Then remove the files you made:
+Printing nothing means none of that project's containers, networks or volumes is left. Anything
+printed is an ID still to remove (`docker inspect <id>` shows what it is). Then remove the files
+you made:
 
 ```sh
 rm -f ./*.tgz ./endora-backup.db ./secrets.key   # the backup copies in the folder you ran the backup from

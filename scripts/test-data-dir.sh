@@ -182,6 +182,20 @@ same=0
 for f in endora.db tls-cert.pem sub/file.txt; do cmp -s "$VOL/$f" "$DIR/$f" || same=1; done
 expect "  every file, including nested ones, is identical" "$same"
 expect "  the source volume is untouched" "$([ "$(cat "$VOL/endora.db")" = 'SQLite format 3 pretend database' ]; echo $?)"
+# The way-back hint must never be a bare `docker volume rm` that runs as copied: it names the
+# volume this migrated from as the value to set, and the block refuses when it is unset or empty.
+expect "  the hint has no unguarded 'docker volume rm <name>'" "$(printf '%s' "$OUT" | grep -Eq '^ *docker volume rm [^"]'; [ $? -ne 0 ]; echo $?)"
+expect "  the hint names the volume it copied from" "$(printf '%s' "$OUT" | grep -q 'set OLD_VOLUME to endora_endora-data'; echo $?)"
+HINT_BLOCK=$(printf '%s\n' "$OUT" | sed -n "/^OLD_VOLUME= sh -eu <<'EOF'/,/^EOF\$/p")
+mkdir -p "$WORK/hintbin"
+printf '#!/usr/bin/env sh\necho "RAN docker $*" >>"%s/hint-ran"\n' "$WORK" >"$WORK/hintbin/docker"
+chmod +x "$WORK/hintbin/docker"
+rm -f "$WORK/hint-ran"
+PATH="$WORK/hintbin:$PATH" sh -c "$HINT_BLOCK" >/dev/null 2>&1
+expect "  the printed block, run as printed, refuses and removes nothing" "$([ $? -ne 0 ] && [ ! -e "$WORK/hint-ran" ]; echo $?)"
+rm -f "$WORK/hint-ran"
+PATH="$WORK/hintbin:$PATH" sh -c "$(printf '%s\n' "$HINT_BLOCK" | sed '1s/^OLD_VOLUME= /OLD_VOLUME=somevol /')" >/dev/null 2>&1
+expect "  with OLD_VOLUME set it removes exactly that volume" "$(grep -qx 'RAN docker volume rm somevol' "$WORK/hint-ran" 2>/dev/null; echo $?)"
 
 fresh
 printf 'precious' >"$DIR/already-here"

@@ -107,15 +107,21 @@ cmp /tmp/source.sums /tmp/copy.sums || { echo "THE COPY DOES NOT MATCH THE ORIGI
 echo "Copied and verified: $(wc -l </tmp/copy.sums | tr -d ' ') files, every checksum identical."
 INSIDE
 
-  cat <<EOF
+  cat <<HINT
 
 Done. Your data is now in $DIR as well as in the volume.
 Next:
   1. make deploy          (ENDORA_DATA_DIR is set, so the node now uses that folder)
   2. confirm the console still has your settings and sign-in
-  3. keep the volume $VOLUME until you are sure; remove it only then:
-       docker volume rm $VOLUME
+  3. keep the volume until you are sure. Removing it deletes that data for good, so this has
+     no default: set OLD_VOLUME to $VOLUME (the volume this just copied from) and run it
+     only then. Unset or empty, it refuses and removes nothing (docs/hosting.md has the same block):
+
+OLD_VOLUME= sh -eu <<'EOF'
+: "\${OLD_VOLUME:?set OLD_VOLUME to the exact old data volume (docker volume ls)}"
+docker volume rm "\$OLD_VOLUME"
 EOF
+HINT
 }
 
 case "${1:-}" in
