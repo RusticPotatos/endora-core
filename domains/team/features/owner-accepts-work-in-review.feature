@@ -41,7 +41,7 @@ Feature: The owner accepts work that nobody reviews
     And the feed says "Settle the VPN restart" is done, verified
     And the owner's desk holds nothing about "Settle the VPN restart"
 
-  Scenario: A second accept of the same card is refused and changes nothing
+  Scenario: At the engine a second accept of the same card is refused and changes nothing
     Given the loop "solo arm" has the item "Settle the VPN restart": "Is the 2-hourly restart still needed?"
     And a tick passes
     When Sol takes "Settle the VPN restart" and reads gluetun's logs: "gluetun: healthy"

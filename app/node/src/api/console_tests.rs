@@ -267,6 +267,10 @@ struct Hq {
     /// The next POST changes the item and then answers 502, as if the answer were lost.
     lose_next: bool,
     events: Vec<i64>,
+    /// desk id → (the status of the task its card is about, when its closure was written).
+    tasks: HashMap<i64, (String, Option<i64>)>,
+    /// Posts to a task's thread (a send-back's note, an acceptance's words).
+    posts: usize,
 }
 
 type Shared = Arc<Mutex<Hq>>;
@@ -309,6 +313,9 @@ async fn fake_decide(
         );
     }
     let choice = body["decision"].as_str().unwrap_or_default().to_owned();
+    if hq.tasks.contains_key(&id) {
+        return decide_work_in_review(&mut hq, id, &choice);
+    }
     let Some((kind, status)) = hq.desk.get(&id).cloned() else {
         return (
             StatusCode::NOT_FOUND,
@@ -332,6 +339,42 @@ async fn fake_decide(
     if std::mem::take(&mut hq.lose_next) {
         return (StatusCode::BAD_GATEWAY, Json(json!({"error": "lost"})));
     }
+    (StatusCode::OK, Json(json!({"decided": true})))
+}
+
+/// The card of work in review, as HQ's engine answers it (ADR 0149): `accept` and `send_back` move
+/// the task only from `in_review`; any other state is a `400` that says why, and nothing changes.
+fn decide_work_in_review(hq: &mut Hq, id: i64, choice: &str) -> (StatusCode, Json<Value>) {
+    let (_, status) = hq.desk[&id].clone();
+    if status != "waiting" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "this task is over"})),
+        );
+    }
+    let task = hq.tasks[&id].0.clone();
+    let to = match choice {
+        "accept" => "done",
+        "send_back" => "doing",
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "no such decision for this item"})),
+            );
+        }
+    };
+    if task != "in_review" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("a task does not go from {task} to {to}")})),
+        );
+    }
+    hq.tasks
+        .insert(id, (to.to_owned(), (to == "done").then(now_ms)));
+    hq.desk
+        .insert(id, ("ready_to_read".to_owned(), choice.to_owned()));
+    hq.posts += 1;
+    hq.applied += 1;
     (StatusCode::OK, Json(json!({"decided": true})))
 }
 
@@ -471,6 +514,105 @@ async fn the_same_answer_twice_changes_nothing_and_a_different_one_is_refused() 
     assert_eq!(other.status(), StatusCode::CONFLICT);
     assert_eq!(json_body(other).await["decision"]["choice"], "approve");
     assert_eq!(hq.lock().unwrap().applied, 1, "applied once");
+}
+
+/// A desk with the card of a task in `status` (ADR 0149), on a fake HQ that answers it as HQ's
+/// engine does.
+fn a_card_of_work(card: i64, status: &str) -> Shared {
+    let hq = a_desk(&[(card, "ready_to_read", "waiting")]);
+    hq.lock()
+        .unwrap()
+        .tasks
+        .insert(card, (status.to_owned(), None));
+    hq
+}
+
+/// ADR 0149, the route Console and the owner's browser use: a second `accept` of a card already
+/// accepted is **not** refused. Core answers `200` with the first decision and `duplicate: true`,
+/// changes nothing, and never asks HQ again, whether the repeat carries the same request id, a
+/// new one, or none. (HQ's own `/v1/desk/{id}` is the layer that answers `409`.)
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_accept_with_a_new_request_id_answers_the_first_decision_and_changes_nothing() {
+    let hq = a_card_of_work(21, "in_review");
+    let router = app(node_with_hq(hq.clone()).await);
+    let answer = |body: &'static str| router.clone().oneshot(post("/v1/decisions/21", body));
+    let first = answer(r#"{"choice":"accept","request":"k-1"}"#)
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    let first = json_body(first).await;
+    assert_eq!(first["duplicate"], false);
+    assert_eq!(
+        first["decision"]["stages"]["verified"]["ok"], true,
+        "{first}"
+    );
+    let closed = hq.lock().unwrap().tasks[&21].clone();
+    assert_eq!(closed.0, "done");
+    assert!(closed.1.is_some());
+    for body in [
+        r#"{"choice":"accept","request":"k-2"}"#, // a new request id
+        r#"{"choice":"accept","request":"k-1"}"#, // a replay of the first
+        r#"{"choice":"accept"}"#,                 // none
+    ] {
+        let again = answer(body).await.unwrap();
+        assert_eq!(again.status(), StatusCode::OK, "{body}");
+        let again = json_body(again).await;
+        assert_eq!(again["duplicate"], true, "{body}");
+        assert_eq!(again["decision"]["choice"], "accept", "{body}");
+        assert_eq!(
+            again["decision"]["request"], first["decision"]["request"],
+            "the first decision, not a new one: {body}"
+        );
+        assert_eq!(
+            again["decision"]["stages"], first["decision"]["stages"],
+            "{body}"
+        );
+    }
+    let now = hq.lock().unwrap();
+    assert_eq!(now.tasks[&21], closed, "still done, closure time unchanged");
+    assert_eq!((now.applied, now.posts), (1, 1), "applied once, one post");
+    drop(now);
+    // A different choice for the same card is the refusal: 409 with what is recorded.
+    let other = answer(r#"{"choice":"send_back"}"#).await.unwrap();
+    assert_eq!(other.status(), StatusCode::CONFLICT);
+    assert_eq!(json_body(other).await["decision"]["choice"], "accept");
+}
+
+/// ADR 0149: a card whose task is no longer in review (another card of a done task) is refused
+/// `400` with HQ's own reason, and an unknown choice `400` too; nothing is recorded or changed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stale_card_and_an_unknown_choice_are_refused_with_the_reason_and_change_nothing() {
+    let hq = a_card_of_work(22, "done");
+    let router = app(node_with_hq(hq.clone()).await);
+    for (choice, said) in [
+        (
+            "accept",
+            "accept is not a choice this item allows (a task does not go from done to done)",
+        ),
+        (
+            "send_back",
+            "send_back is not a choice this item allows (a task does not go from done to doing)",
+        ),
+        (
+            "bogus",
+            "bogus is not a choice this item allows (no such decision for this item)",
+        ),
+    ] {
+        let res = router
+            .clone()
+            .oneshot(post(
+                "/v1/decisions/22",
+                &json!({ "choice": choice }).to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{choice}");
+        assert_eq!(json_body(res).await["error"], said);
+    }
+    let now = hq.lock().unwrap();
+    assert_eq!(now.tasks[&22], ("done".to_owned(), None));
+    assert_eq!((now.applied, now.posts), (0, 0));
+    assert_eq!(now.desk[&22].1, "waiting", "the card is still waiting");
 }
 
 #[tokio::test(flavor = "multi_thread")]

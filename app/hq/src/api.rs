@@ -4072,10 +4072,12 @@ mod tests {
         (task, card)
     }
 
-    /// ADR 0149: accept on the existing route closes work in review as `accepted_by_owner`; a
-    /// repeat is refused with the card already decided, and nothing changes.
+    /// ADR 0149: accept on HQ's own desk route closes work in review as `accepted_by_owner`; a
+    /// repeat at HQ is refused `409` with the card already decided, and nothing changes. (Core's
+    /// `/v1/decisions/{id}`, the route the owner uses, answers a repeat `200` with the first
+    /// decision and `duplicate: true` before HQ is asked: `console_tests.rs`.)
     #[tokio::test]
-    async fn the_owner_accepts_work_in_review_and_a_second_accept_is_refused() {
+    async fn the_owner_accepts_work_in_review_and_hq_itself_refuses_a_second_accept() {
         use endora_team::application::guard_ports::GuardStore;
         use endora_team::domain::TaskStatus;
         let st = state(false);
