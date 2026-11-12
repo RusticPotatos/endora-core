@@ -568,10 +568,11 @@ async fn a_second_accept_with_a_new_request_id_answers_the_first_decision_and_ch
             "{body}"
         );
     }
-    let now = hq.lock().unwrap();
-    assert_eq!(now.tasks[&21], closed, "still done, closure time unchanged");
-    assert_eq!((now.applied, now.posts), (1, 1), "applied once, one post");
-    drop(now);
+    {
+        let now = hq.lock().unwrap();
+        assert_eq!(now.tasks[&21], closed, "still done, closure time unchanged");
+        assert_eq!((now.applied, now.posts), (1, 1), "applied once, one post");
+    }
     // A different choice for the same card is the refusal: 409 with what is recorded.
     let other = answer(r#"{"choice":"send_back"}"#).await.unwrap();
     assert_eq!(other.status(), StatusCode::CONFLICT);
