@@ -924,8 +924,10 @@ scripts/code-size.sh
 scripts/data-dir.sh
 scripts/demo.sh
 scripts/experiment.py
+scripts/collect-crate-licences.sh
 scripts/fresh-sources.sh
 scripts/gate.sh
+scripts/gen-third-party-notices.sh
 scripts/harness-probes/PROTOCOL.md
 scripts/harness-probes/SCHEMA.md
 scripts/harness-probes/accounting.py
@@ -979,6 +981,7 @@ scripts/test-data-dir.sh
 scripts/test-deploy-recipes.sh
 scripts/test-homelab-proxy.py
 scripts/test-hq-drain.sh
+scripts/test-gen-third-party-notices.sh
 scripts/test-image-privacy.sh
 scripts/test-image-workflow.py
 scripts/test-mac-brain.sh

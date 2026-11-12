@@ -12,4 +12,5 @@ personal-values-guard|personal-values guard tests passed|sh scripts/test-persona
 owner-values-checker|owner-values checker tests passed|sh scripts/test-owner-values.sh
 values-compat|personal-values compatibility tests passed|sh scripts/test-values-compat.sh
 image-privacy|image-privacy tests passed|sh scripts/test-image-privacy.sh
+gen-third-party-notices|gen-third-party-notices tests passed|sh scripts/test-gen-third-party-notices.sh
 owner-value-exceptions|owner-value exceptions tests passed|sh scripts/test-owner-value-exceptions.sh

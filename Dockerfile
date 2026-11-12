@@ -8,11 +8,19 @@
 # Pinned to the workspace MSRV; the builder image includes a C toolchain, which
 # the bundled SQLite build requires.
 #
+# Base images are pinned by the digest of the multi-platform index (linux/amd64 and linux/arm64
+# both listed), so a build today and in a year start from the same layers: the tag says which
+# release, the digest says which bytes. To update: `docker buildx imagetools inspect <image>:<tag>`
+# for the new index digest, replace the digest in every FROM of that image, rebuild, and regenerate
+# THIRD-PARTY-NOTICES.md (docs/releasing-core-image.md). Dependabot is not configured for the
+# docker ecosystem here (.github/dependabot.yml: cargo and github-actions only), so this is manual;
+# if the docker ecosystem is added, Dependabot reads `tag@digest` and proposes both together.
+#
 # The builder runs on the machine that BUILDS ($BUILDPLATFORM) and compiles for the one
 # that RUNS ($TARGETPLATFORM): on a laptop deploying to a NAS of another architecture it
 # cross-compiles natively instead of emulating, so the NAS never compiles at all. A build
 # for the same architecture is an ordinary build.
-FROM --platform=$BUILDPLATFORM rust:1.87-bookworm AS builder
+FROM --platform=$BUILDPLATFORM rust:1.87-bookworm@sha256:251cec8da4689d180f124ef00024c2f83f79d9bf984e43c180a598119e326b84 AS builder
 ARG TARGETARCH
 # rust-toolchain.toml asks for "stable", which made every build download a whole toolchain
 # (minutes, and a failed build whenever that download timed out) and compile the release
@@ -74,6 +82,13 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp "target/$triple/release/endora-worker" /endora-worker \
     && cp "target/$triple/release/endora-runner" /endora-runner \
     && cp "target/$triple/release/endora-sound-hub" /endora-sound-hub
+
+# The licence texts of the Rust crates built into the programs, for the image's documents
+# folder below (the crates' MIT, BSD, ISC and Apache licences ask that their text travel with a
+# binary). Read from the registry sources the build above fetched: no network, no tool.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    sh scripts/collect-crate-licences.sh "$(cat /target-triple)" /out/licenses
 
 # endora-sound's AirPlay senders (ADR 0104): stock OwnTone, built from its release, plus the
 # airptpd clock it ships the source of but no image builds, which four instances must share.
@@ -167,7 +182,7 @@ ENTRYPOINT ["/usr/local/bin/sound-airplay2"]
 # endora-sound (ADR 0104): the sound hub, in an image of its own, because it needs ffmpeg and
 # the node does not. Built with `--target sound`. It sits before the node's stage on purpose:
 # a plain build still makes the node, the last stage.
-FROM debian:bookworm-slim AS sound
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS sound
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
     && rm -rf /var/lib/apt/lists/*
@@ -181,7 +196,7 @@ EXPOSE 8791
 ENTRYPOINT ["endora-sound-hub"]
 
 # The lab's checks, built once for the worksite and the bench (ADR 0115, 0123).
-FROM debian:bookworm-slim AS lab-checks
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS lab-checks
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv \
     && rm -rf /var/lib/apt/lists/*
@@ -222,7 +237,7 @@ RUN /opt/venv/bin/ansible-galaxy collection build --output-path /tmp/endora-buil
     && chmod -R a+rX /opt/venv
 
 # Claude Code, one pinned release, for the worksite and the bench (ADR 0117, 0123).
-FROM debian:bookworm-slim AS claude-code
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS claude-code
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
@@ -256,7 +271,7 @@ RUN set -eu; \
 # node's team gateway and nothing else, so everything a turn may need is in this image; the
 # egress proxy is designed and deferred. The same image runs the wing's check jobs (ADR 0115,
 # ENDORA_CHECK=1): no model, a job token, the lab's own checks on a submitted branch.
-FROM debian:bookworm-slim AS worksite
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS worksite
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl dnsutils git iputils-ping jq less procps python3 python3-venv \
@@ -361,7 +376,7 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sleep", "infinity"]
 
 # --- runtime stage ---------------------------------------------------------
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 # ca-certificates lets an optional HTTPS model endpoint be reached; SQLite is
 # statically linked. nodejs+npm (for `npx …` servers) and python3 (for python
 # servers) are the two runtimes the vast majority of stdio MCP servers need
@@ -388,6 +403,11 @@ COPY --from=builder /endora-hq /usr/local/bin/endora-hq
 COPY --from=builder /endora-worker /usr/local/bin/endora-worker
 COPY --from=builder /endora-runner /usr/local/bin/endora-runner
 COPY scripts/homelab-docker-proxy.py /usr/local/lib/endora/homelab-docker-proxy.py
+# Licensing: Endora's LICENSE and NOTICE, the third-party notices (generated from this image by
+# scripts/gen-third-party-notices.sh) and the licence texts of the crates, in /usr/share/doc/endora-core,
+# the Debian place for a package's documents. The programs use glibc (LGPL-2.1+) as a shared library at run time.
+COPY LICENSE NOTICE THIRD-PARTY-NOTICES.md /usr/share/doc/endora-core/
+COPY --from=builder /out/licenses/ /usr/share/doc/endora-core/licenses/
 
 # Listen on all interfaces (so the mapped port is reachable) and keep the
 # local-first database on a volume so it survives container restarts.
