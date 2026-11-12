@@ -28,10 +28,12 @@ product's own compose file unchanged, pinned to a released version.
 - **For Audio's speakers:** a host on the same LAN as the AirPlay speakers and phones (its
   senders and Spotify receiver use the host's network for mDNS; Docker Desktop's "host" is a VM,
   so discovery does not work there). Do not run it beside a stock OwnTone.
-- **Core's image.** Core's image is `ghcr.io/rusticpotatos/endora-node`. Nothing publishes it
-  automatically: a person starts a release by hand, once the owner has enabled it
-  (`.github/workflows/image.yml`, [releasing-core-image.md](releasing-core-image.md)). Until a
-  release has gone through it, build it yourself from a checkout: `docker build -t ghcr.io/rusticpotatos/endora-node:local .` and
+- **Core's image.** Core's image is `ghcr.io/rusticpotatos/endora-node`. The compose files pin
+  the published `v0.1.0` image (12 Nov 2026, built from this repository), so you need not build
+  anything. Nothing publishes it automatically: a person starts each release by hand, once the
+  owner has enabled it (`.github/workflows/image.yml`,
+  [releasing-core-image.md](releasing-core-image.md)). Build it yourself from a checkout only
+  when you want a change no release carries yet: `docker build -t ghcr.io/rusticpotatos/endora-node:local .` and
   set `ENDORA_CORE_VERSION=local`.
 
 ## First start: the full system
@@ -379,12 +381,20 @@ docker compose pull && docker compose up -d --wait
 now `<project>_team`. Once, run `docker compose down` (without `-v`: the volumes, and so the data,
 stay) and then `docker compose up -d --wait`.
 
+**Finding a newer release.** Core's releases are this repository's tags (`git tag --list 'v*'`
+after a `git fetch --tags`, or its Releases page on GitHub) and the tags of the registry package
+`ghcr.io/rusticpotatos/endora-node`.
+
 **Rollback** is the same with the previous version. **Version rollback is unproven:** the
 repository has one tagged release (`v0.1.0`), and no previous pin that was published as the earlier
 one of two releases, so no rollback from one documented pin to another has been run. Restoring a backup
 into the running version is proven (above); changing `ENDORA_CORE_VERSION` to an older image
 and restoring the matching backup is not, and its acceptance test waits for a genuine second
-release. Core's database migrations run forward on
+release. The restore blocks above use `docker compose stop` and
+`docker compose start`, which restart the containers that already exist and do not change the
+image, so when moving back to an older version the older image must be brought up first with
+`docker compose up -d --wait`, and the restore applied after it (**untested**, like the rest of
+version rollback). Core's database migrations run forward on
 start, so an older Core may not open a database a newer one has migrated: roll Core back
 together with the backup taken before the upgrade. Console holds no data and works with any
 Core of the same contract major (it refuses another, saying so). Audio's state file is pinned
@@ -409,7 +419,8 @@ and restore") and keep them somewhere other than this host.
 
 Run this in each install's folder, the bundle's `deploy/compose`, Core alone's
 `deploy/compose/core` and each second install's own folder, one after the other. First look at
-what the folder would remove (it changes nothing), and note the project name:
+what the folder would remove (it changes nothing), and note the project name. The preview
+removes nothing: its "Removed" lines are what the real command would do:
 
 ```sh
 cd endora-core/deploy/compose             # or deploy/compose/core, or a second install's folder

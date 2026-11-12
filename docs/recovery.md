@@ -111,8 +111,10 @@ A backup nobody has restored is a hope, so every nightly copy of both stores is 
 scratch file and checked before it is kept (above). You can run the same proof on any copy,
 inside the container so it sees the right database, without starting a server. It needs an image
 that has the subcommand: the pinned build (`ENDORA_CORE_VERSION` in `deploy/compose/core/core.env.example`)
-has it, the older `sha-2817ecac1aff` build and `latest` do not (there the binary ignores the word
-and starts a second server, which fails with `Address already in use`):
+has it; the older `sha-2817ecac1aff` build does not (there the binary ignores the word
+and starts a second server, which fails with `Address already in use`). Do not rely on `latest`
+for a pin: it moves only when someone asks for it (it points at the pinned image today, but
+that is not a promise):
 
 ```sh
 docker compose exec node endora-node verify-backup /data/backups/daily-YYYY-MM-DD.db

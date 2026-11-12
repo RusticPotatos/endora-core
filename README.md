@@ -118,7 +118,8 @@ ARGS="health"`).
 
 A working personal project, developed against a home server. It runs HQ, the home lab's
 pages, the house's tools behind their stances, and the egress guard described above. Interfaces still
-change and there's no tagged release yet — build one complete slice at a time.
+change; there is one tagged release, `v0.1.0` (12 Nov 2026, image
+`ghcr.io/rusticpotatos/endora-node:0.1.0`) — build one complete slice at a time.
 
 ## Contributing & license
 

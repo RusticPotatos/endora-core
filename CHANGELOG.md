@@ -11,9 +11,18 @@ tagged release.
 
 - **Core's first image is published** (`v0.1.0`, 12 Nov 2026, commit `f62d1fe0ee5d`, index digest
   `sha256:001c9bb48dd0...`, linux/amd64 and linux/arm64). The bundle's three `.env.example` files pin
-  `sha-f62d1fe0ee5dbd1e4c3c25f9052a7aaadd8caeae`, and the interim-pin disclosure is gone: the image is
-  built from this repository. How it was published, and the one-time package access it needed, is
+  `sha-f62d1fe0ee5dbd1e4c3c25f9052a7aaadd8caeae`. This replaced the interim pin (in force from
+  12 Nov 03:00 to 09:20 UTC, see "Changed (image licensing)" below), so the image is now built
+  from this repository. How it was published, and the one-time package access it needed, is
   in [docs/releasing-core-image.md](docs/releasing-core-image.md).
+
+### Changed (documentation)
+
+- **Docs corrected after the first release.** `docs/install.md`, `docs/recovery.md`,
+  `docs/releasing-core-image.md`, the `.env.example` comments and the README no longer say that
+  no release exists, that `latest` lacks `verify-backup`, or that the first publish is still to
+  come; the removal preview's "Removed" lines are explained, and the upgrade section says how to
+  find a newer release and that rolling back by image is untested.
 
 ### Fixed (image publishing)
 
@@ -35,10 +44,11 @@ tagged release.
 
 - **The Dockerfile pins `rust:1.87-bookworm` and `debian:bookworm-slim` by digest** (the
   multi-platform index digests, linux/amd64 and linux/arm64 listed), the tag kept beside it.
-- **The interim image pin is disclosed** ([docs/install.md](docs/install.md) and the bundle's
-  `.env.example` files): it is the build made before Core had its own release, not a build of this
-  repository, and it still serves the retired HQ artwork that this repository does not contain.
-  (Replaced by the first-release pin below.)
+- **The interim image pin was disclosed** ([docs/install.md](docs/install.md) and the bundle's
+  `.env.example` files) while it was in force (12 Nov 03:00 to 09:20 UTC): it was the build made
+  before Core had its own release, not a build of this repository, and it still served the retired
+  HQ artwork that this repository does not contain. Replaced by the first-release pin (see
+  "Released" above); the pin now is built from this repository.
 
 ### Removed
 
