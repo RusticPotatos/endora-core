@@ -50,9 +50,19 @@ The bundle is part of the repository, so the checkout is what you pin: after `gi
 `git checkout` with a release tag that contains `deploy/compose` (`git tag --list 'v*'`) or with a
 commit you have tested, then `cd deploy/compose`. That one step fixes the compose files, the
 `SOURCES.json` pins for Console and Audio, and the `ENDORA_CORE_VERSION` that `bundle.env.example`
-names, which is the Core build of the same checkout. Keep that checkout (or note its commit) so a
+names. That is the published build of the commit Core's tree was taken from
+([core-origin.md](core-origin.md)), not a build of this exact checkout, which has changed since;
+for an exact match build the image yourself (see Prerequisites). Keep that checkout (or note its commit) so a
 reinstall or rollback starts from the same files. To move later, check out the newer tag or commit
 and read the diff of `bundle.env.example` before you copy it over `.env`.
+
+To check that the image you pulled is the pinned one, compare its manifest digest with the one
+in the comment above `ENDORA_CORE_VERSION` in `bundle.env.example` (or `core/core.env.example`):
+
+```sh
+docker compose pull
+docker compose config --images | grep '/endora-node:' | sort -u | xargs docker image inspect --format '{{index .RepoDigests 0}}'
+```
 
 **The first `up` downloads images.** Core, Console and Audio come from GHCR (`ghcr.io/rusticpotatos/`).
 The Spotify receiver does not: `audio-spotify` is the third-party `giof71/librespot` image,
@@ -82,7 +92,8 @@ needs another (it is Core's screens).
 ## First start: Core alone
 
 ```sh
-cd Endora/deploy/compose/core
+git clone https://github.com/RusticPotatos/endora-core && cd endora-core    # skip if you already have the clone
+cd deploy/compose/core
 cp core.env.example .env          # ENDORA_CORE_VERSION is set to a published build
 docker compose up -d --wait
 docker compose exec node endora-core setup        # or the scripted form with -T, above
@@ -228,7 +239,13 @@ Console keeps no data. Back up Core, not Console.
 docker compose exec node endora-node backup /data/endora-backup.db
 docker compose cp node:/data/endora-backup.db ./endora-backup.db
 docker compose cp node:/data/secrets.key ./secrets.key     # store it apart from the backups
+docker compose exec node endora-node verify-backup /data/endora-backup.db    # restores the copy into a scratch file; exit 0 = it restores
 ```
+
+The cold copy below names the default volumes (`endora-core-data` and the rest). It only reads
+them (`:ro`), so it cannot change an install, but if your install uses other volume names
+(`second.env.example`, or `*_VOLUME` in your `.env`) put those names in the loop: `docker volume ls`
+shows them.
 
 **Everything, cold** (the simplest whole-system copy): stop, copy each volume, start.
 
@@ -242,18 +259,85 @@ done
 docker compose start
 ```
 
-**Restore** into the same volume names, with the stack stopped, then start it:
+**Restore: prove a backup first, in a project of its own.** Run this from `deploy/compose/core`,
+with the cold copy's `endora-core-data.tgz` and `endora-core-hq-data.tgz` in the folder you run it
+from. It starts a second Core under its own project name, with its own volumes and a loopback-only
+port (18787; change `ENDORA_CORE_PORT` below if it is taken), and never reads your `.env`, so it
+cannot touch the install you are checking. `CHECK` has no default: with it empty the block
+refuses, a name that does not start `core-restore-check` is refused (so it can never be an
+install's project), and a volume that already exists is never reused.
 
 ```sh
-docker compose stop
-docker run --rm -v endora-core-data:/v -v "$PWD":/b alpine:3.21 sh -c 'rm -rf /v/* && tar xzf /b/endora-core-data.tgz -C /v'
-# the same for endora-core-hq-data and endora-audio-data
-docker compose start
+CHECK=core-restore-check sh -eu <<'EOF'
+: "${CHECK:?set CHECK to a project name of its own, starting core-restore-check}"
+case "$CHECK" in core-restore-check*) ;; *) echo "refusing: CHECK must start core-restore-check" >&2; exit 1 ;; esac
+for v in data hq-data hq-token hq-runner-token; do
+  if docker volume inspect "$CHECK-$v" >/dev/null 2>&1; then
+    echo "refusing: volume $CHECK-$v already exists; choose another CHECK" >&2; exit 1
+  fi
+done
+export COMPOSE_PROJECT_NAME="$CHECK" ENDORA_CORE_BIND=127.0.0.1 ENDORA_CORE_PORT=18787 \
+  ENDORA_CORE_DATA_VOLUME="$CHECK-data" ENDORA_CORE_HQ_DATA_VOLUME="$CHECK-hq-data" \
+  ENDORA_CORE_HQ_TOKEN_VOLUME="$CHECK-hq-token" ENDORA_CORE_HQ_RUNNER_TOKEN_VOLUME="$CHECK-hq-runner-token"
+# The version comes from core.env.example (use your .env instead if you changed it); every
+# name and the port above override whatever either file says.
+docker compose --env-file core.env.example -p "$CHECK" create
+for v in data hq-data; do
+  docker run --rm -v "$CHECK-$v":/v -v "$PWD":/b:ro alpine:3.21 sh -c "tar xzf /b/endora-core-$v.tgz -C /v"
+done
+docker compose --env-file core.env.example -p "$CHECK" up -d --wait
+curl -ksS https://127.0.0.1:18787/health
+EOF
 ```
 
-Restoring the online copy instead: stop the stack, put the copy in `endora-core-data` as
-`endora.db` (remove any `endora.db-wal` and `endora.db-shm` beside it) with the matching
-`secrets.key`, then start.
+Sign in at `https://127.0.0.1:18787` with your usual password and authenticator code and look at
+your records: that is the proof the copy restores. Then remove the check. It removes only the
+volumes labelled with its own project and never uses `down -v`:
+
+```sh
+CHECK=core-restore-check sh -eu <<'EOF'
+: "${CHECK:?set CHECK to the project name you checked with}"
+case "$CHECK" in core-restore-check*) ;; *) echo "refusing: CHECK must start core-restore-check" >&2; exit 1 ;; esac
+docker compose --env-file core.env.example -p "$CHECK" down --remove-orphans
+# only volumes Compose labelled with this project, and CHECK cannot be an install's project
+docker volume ls -q --filter "label=com.docker.compose.project=$CHECK" | xargs -r docker volume rm
+EOF
+```
+
+**Restore over a live install: this overwrites its data.** Only after the check above, and only
+for a volume you name yourself: there is no default. List the install's volumes with
+`docker volume ls`, and set `RESTORE_VOLUME` to the one to overwrite and `RESTORE_TGZ` to the
+copy to put in it. Run it in the install's own folder. Unset or empty, either variable makes the
+block refuse before it stops or changes anything. Repeat it for each volume you restore
+(`endora-core-hq-data` too).
+
+```sh
+RESTORE_VOLUME= RESTORE_TGZ= sh -eu <<'EOF'
+: "${RESTORE_VOLUME:?set RESTORE_VOLUME to the exact volume to overwrite (docker volume ls)}"
+: "${RESTORE_TGZ:?set RESTORE_TGZ to the .tgz to restore into it}"
+docker compose stop
+docker run --rm -v "$RESTORE_VOLUME":/v -v "$PWD":/b:ro alpine:3.21 \
+  sh -c 'rm -rf /v/* && tar xzf "/b/$1" -C /v' sh "$RESTORE_TGZ"
+docker compose start
+EOF
+```
+
+Restoring the online copy instead overwrites in the same way: with the stack stopped, put the copy in the
+data volume you name as `endora.db` (remove any `endora.db-wal` and `endora.db-shm` beside it)
+with the matching `secrets.key`, then start. As a block, run in the install's own folder
+(`RESTORE_COPY` is the copy's `.db` file, `RESTORE_KEY` its `secrets.key`):
+
+```sh
+RESTORE_VOLUME= RESTORE_COPY= RESTORE_KEY= sh -eu <<'EOF'
+: "${RESTORE_VOLUME:?set RESTORE_VOLUME to the exact data volume to overwrite (docker volume ls)}"
+: "${RESTORE_COPY:?set RESTORE_COPY to the online copy (.db) to restore}"
+: "${RESTORE_KEY:?set RESTORE_KEY to the matching secrets.key}"
+docker compose stop
+docker run --rm -v "$RESTORE_VOLUME":/v -v "$PWD":/b:ro alpine:3.21 \
+  sh -c 'rm -f /v/endora.db /v/endora.db-wal /v/endora.db-shm && cp "/b/$1" /v/endora.db && cp "/b/$2" /v/secrets.key && chmod 600 /v/secrets.key' sh "$RESTORE_COPY" "$RESTORE_KEY"
+docker compose start
+EOF
+```
 
 ## Upgrade and rollback
 
@@ -274,7 +358,12 @@ docker compose pull && docker compose up -d --wait
 now `<project>_team`. Once, run `docker compose down` (without `-v`: the volumes, and so the data,
 stay) and then `docker compose up -d --wait`.
 
-**Rollback** is the same with the previous version. Core's database migrations run forward on
+**Rollback** is the same with the previous version. **Version rollback is unproven:** the
+repository has no tagged release, and no previous pin that was published as the earlier one of
+two releases, so no rollback from one documented pin to another has been run. Restoring a backup
+into the running version is proven (above); changing `ENDORA_CORE_VERSION` to an older image
+and restoring the matching backup is not, and its acceptance test waits for a genuine second
+release. Core's database migrations run forward on
 start, so an older Core may not open a database a newer one has migrated: roll Core back
 together with the backup taken before the upgrade. Console holds no data and works with any
 Core of the same contract major (it refuses another, saying so). Audio's state file is pinned
@@ -297,12 +386,26 @@ data") hold Core's database, `secrets.key`, HQ's work and Audio's settings. Once
 nothing can bring them back. If you may want the data later, take the backups first (see "Backup
 and restore") and keep them somewhere other than this host.
 
-Run this in each install's folder, the bundle's `deploy/compose` and each second install's own
-folder, one after the other:
+Run this in each install's folder, the bundle's `deploy/compose`, Core alone's
+`deploy/compose/core` and each second install's own folder, one after the other. First look at
+what the folder would remove (it changes nothing), and note the project name:
 
 ```sh
-cd Endora/deploy/compose                  # then the same in each second install's folder
-docker compose down -v --remove-orphans
+cd endora-core/deploy/compose             # or deploy/compose/core, or a second install's folder
+docker compose config | sed -n 's/^name: //p'
+docker compose --dry-run down -v --remove-orphans
+```
+
+Then remove it. `REMOVE_PROJECT` has no default: set it to the project name printed above. Unset
+or empty, or different from this folder's own project, the block refuses and removes nothing.
+
+```sh
+REMOVE_PROJECT= sh -eu <<'EOF'
+: "${REMOVE_PROJECT:?set REMOVE_PROJECT to this folder's project name (docker compose config)}"
+[ "$(docker compose config | sed -n 's/^name: //p')" = "$REMOVE_PROJECT" ] \
+  || { echo "refusing: this folder's project is not $REMOVE_PROJECT" >&2; exit 1; }
+docker compose -p "$REMOVE_PROJECT" down -v --remove-orphans
+EOF
 ```
 
 That removes the install's containers, its networks and its named volumes, including the
@@ -319,7 +422,7 @@ All three should list nothing. Then remove the files you made:
 
 ```sh
 rm -f ./*.tgz ./endora-backup.db ./secrets.key   # the backup copies in the folder you ran the backup from
-cd ../../.. && rm -rf Endora                      # the clone; for a second install, its own folder
+cd ../../.. && rm -rf endora-core                 # the clone (from deploy/compose/core, `cd ../../../..`); for a second install, its own folder
 ```
 
 If you stored backup copies of `endora-backup.db` or `secrets.key` or the `.tgz` files

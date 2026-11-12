@@ -98,9 +98,19 @@ make deploy            # now starts on the folder
 Do the migration *before* deploying. If `ENDORA_DATA_DIR` is set but empty, the node would
 start on nothing: a brand-new node with a new token and none of your settings, which looks
 exactly like data loss. `make deploy` refuses that case and tells you to migrate. The old
-volume is left in place as the way back; remove it (`docker volume rm endora_endora-data`)
-only once you have checked the node is right. Do not unset `ENDORA_DATA_DIR` afterwards —
-the node would go back to that now-stale volume.
+volume is left in place as the way back; remove it only once you have checked the node is
+right. **Removing it deletes that data for good**, so the block below has no default: set
+`OLD_VOLUME` to the exact volume `make migrate-data` named (`docker volume ls`; a default
+install's is `endora_endora-data`). Unset or empty, it refuses and removes nothing.
+
+```bash
+OLD_VOLUME= sh -eu <<'EOF'
+: "${OLD_VOLUME:?set OLD_VOLUME to the exact old data volume (docker volume ls)}"
+docker volume rm "$OLD_VOLUME"
+EOF
+```
+
+Do not unset `ENDORA_DATA_DIR` afterwards — the node would go back to that now-stale volume.
 
 The folder must be on a **local disk** of that machine, not an NFS or SMB share: SQLite's file
 locking is not reliable over a network filesystem. It is created root-owned, since the
