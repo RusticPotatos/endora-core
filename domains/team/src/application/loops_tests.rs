@@ -686,6 +686,84 @@ fn the_member_one_rank_up_passes_work_in_review() {
     );
 }
 
+/// Base behaviour, pinned as found (ADR 0149, consequences): HQ has no mechanism that settles a
+/// task's other open desk cards when the task closes. Only a stuck card clears itself when its
+/// work moves (`guards_tick`), and `put_away` settles cards when a goal is retired or a project
+/// closed. So a closing by review (`met_criteria`) leaves a waiting "ready to read" card about
+/// the task waiting. If a settling mechanism is ever added, this test changes with it.
+///
+/// Given Bo's item in review with a "ready to read" card waiting about it,
+/// when Rae approves it and it closes as met_criteria,
+/// then the card is still waiting.
+#[test]
+fn closing_by_review_leaves_a_waiting_ready_to_read_card_as_it_found_it() {
+    let clock = Hands(AtomicI64::new(NOON));
+    let hq = hq(&clock);
+    let f = five(&hq);
+    let fix = item(&hq, &f, "Fix the lint", Priority::Normal);
+    let bo = turn_of(&hq, f.bo);
+    use_tool(&hq, &bo, "claim", &serde_json::json!({ "task": fix.0 })).unwrap();
+    use_tool(
+        &hq,
+        &bo,
+        "set_status",
+        &serde_json::json!({ "task": fix.0, "status": "in_review", "reason": "The lint passes.",
+                             "evidence": [format!("task {}", fix.0)] }),
+    )
+    .unwrap();
+    hq.runner().finish(bo.run, true);
+    hq.record_gate(fix, true, "").unwrap();
+    let stale = hq
+        .store()
+        .add_desk(
+            "ready_to_read",
+            Some(fix),
+            None,
+            None,
+            "Ready to read: Fix the lint",
+            NOON,
+        )
+        .unwrap();
+    hq.tell_mac(true, "ready");
+    let rae = turn_of(&hq, f.rae);
+    let mine = hq
+        .record_receipt(
+            &rae.token,
+            &super::engine::Called {
+                tool: "homelab_status".to_owned(),
+                args: String::new(),
+                excerpt: "lint: clean".to_owned(),
+                ok: true,
+                act: false,
+                confidential: false,
+            },
+        )
+        .unwrap();
+    use_tool(
+        &hq,
+        &rae,
+        "review",
+        &serde_json::json!({ "task": fix.0, "verdict": "approve", "notes": "The lint is clean.",
+                             "evidence": [format!("r{mine}")] }),
+    )
+    .unwrap();
+    assert_eq!(
+        hq.store().task(fix).unwrap().unwrap().status,
+        TaskStatus::Done
+    );
+    let card = hq
+        .store()
+        .desk()
+        .unwrap()
+        .into_iter()
+        .find(|d| d.id == stale)
+        .unwrap();
+    assert_eq!(
+        card.status, "waiting",
+        "nothing settles it when the task closes"
+    );
+}
+
 /// Work that changed nothing has no branch, so there is nothing for the gate to run on: its
 /// pass closes it. Live, #855 found roles/ already clean; Rae submitted it with no branch, Ada
 /// passed it, and it waited in review for a gate that could never run.
