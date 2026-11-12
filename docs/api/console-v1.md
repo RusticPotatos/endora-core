@@ -87,12 +87,33 @@ The record:
 - **verified**: Core read the desk back afterwards and found the item recorded with that choice
   (and, for a push or an approval, that what ran succeeded). `ok: false` says what did not match.
 
+Choices the item allows, by kind, include (ADR 0149) on a `ready_to_read` card of work in
+review: `accept`, `send_back`, `read` and `not_now`. `words` is the optional note.
+
+- `accept` closes the task `done` with closure `why: "accepted_by_owner"` (`by: "owner"`, `at`),
+  apart from `met_criteria` and `completed_unverified`, which is never an acceptance.
+- `send_back` returns the task to `doing`, posts `words` to its thread and wakes its holder.
+- Refusals, `400` with `{"error"}` and nothing recorded, the card still waiting: the task is no
+  longer `in_review` (`a task does not go from doing to done`, or `... to doing` for
+  `send_back`); the task is gated and its gate has not passed (`the gate has not passed`).
+  A card already decided is `409` (`this task is over`).
+
 Idempotent: the same choice again (a double press, a retry after a dropped connection) changes
 nothing and answers the stored record with `"duplicate": true`. A different choice for an item
 already answered, here or in another client, is `409` with what is recorded. A choice the item
 does not allow is refused by HQ (`400`), and nothing is recorded. If HQ cannot be reached the
 record stays at **requested** and the answer is `502`; sending the same answer again finishes
 it, and never applies it twice.
+
+## Projects and how their work is accepted
+
+`POST /v1/hq/projects` makes a project: `{"goal", "title", "lead", "reason"?, "cap"?, "solo"?,
+"acceptance"?}`. Added in v1 (ADR 0149): `acceptance` is `owner` (the default, and what a project
+made before it reads as) or `unverified`; any other value is `400` and makes nothing. With a
+`solo` member, `owner` leaves each item the member sets ready `in_review` on the owner's desk;
+`unverified` has HQ close it itself as `completed_unverified`, "Done, not verified", which is
+never shown or counted as accepted. The task's `closure.why` can now be `accepted_by_owner`, and
+Live Work's `state` can be `accepted`; a client that does not know them shows the reason's name.
 
 ## Events
 

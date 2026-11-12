@@ -334,6 +334,7 @@ of an existing record and take the next number.
 | [0146](0146-console-forwards-cores-session.md) | Console forwards Core's session; no shared sign-in crate (AU1) | — |
 | [0147](0147-full-system-bundle.md) | Core's standalone configuration and the full-system bundle | — |
 | [0148](0148-the-house-watch.md) | The house watch: a machine outside the NAS that watches it, and a second Pi-hole | - |
+| [0149](0149-owner-acceptance-of-in-review-work.md) | The owner accepts work that nobody reviews: `accept` and `send_back` on the card, an `acceptance` policy | - |
 
 The forty-nine decisions these consolidate are in [archive/](archive/) — kept in full,
 because the reasoning that produced a rule is the reason it survives an argument later.

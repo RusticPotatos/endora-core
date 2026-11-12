@@ -7,6 +7,27 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))
+
+- **A task is done because its criteria were met and the owner accepted it, not because nobody
+  could review it.** The `ready_to_read` card of work in review gains `accept` (closes it `done`
+  as the new closure `accepted_by_owner`, refused for a stale card or an unpassed gate) and
+  `send_back` (back to `doing`, the owner's note posted, the worker woken), through the existing
+  `POST /v1/decisions/{id}`. No new route, desk kind or approval subsystem.
+- **A per-project `acceptance` policy**, set next to `solo` on `POST /v1/hq/projects`: `owner` (the
+  default) or `unverified` (the explicit opt-out that keeps HQ closing a solo item as
+  `completed_unverified`, never shown as accepted).
+- The web console shows both choices and says "Done · Accepted by the owner" apart from "Completed ·
+  Not verified"; Live Work has an `accepted` state.
+
+### Changed (behaviour)
+
+- **A loop worked alone no longer closes its items by itself unless asked to.** The default policy
+  is `owner`: a solo item set ready waits in review on the owner's desk. Existing solo loops read as
+  `owner`; create one with `"acceptance": "unverified"` to keep the old behaviour. Stranded-work
+  cleanup never closes a task, and a waiting card is not put up twice. Existing closures,
+  including `completed_unverified`, are unchanged.
+
 ### Released
 
 - **Core's first image is published** (`v0.1.0`, 12 Nov 2026, commit `f62d1fe0ee5d`, index digest

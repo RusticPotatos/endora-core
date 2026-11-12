@@ -2,6 +2,11 @@
 
 ## Status
 
+Amended by [0149](0149-owner-acceptance-of-in-review-work.md), 2026-11-12: a loop worked alone no
+longer closes its own items by default. Under the default policy `owner`, setting an item ready
+puts it on the owner's desk to accept or send back; `done_alone` (amended 2026-11-01) applies
+only under the explicit opt-out `acceptance: unverified`. `reviewer_among` is unchanged.
+
 Accepted, 2026-10-27, by the owner. AI-assisted (Claude). Supersedes
 [0110](0110-the-teams-rings.md), [0111](0111-the-ceo-and-the-chain-of-command.md),
 [0120](0120-roles-as-an-enforced-raci.md),

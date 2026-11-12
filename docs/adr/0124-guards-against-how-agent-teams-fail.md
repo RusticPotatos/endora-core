@@ -4,6 +4,10 @@
 
 Amended by [0142](0142-one-team-of-loops.md), 2026-10-27: one team of loops.
 
+Amended by [0149](0149-owner-acceptance-of-in-review-work.md), 2026-11-12: `completed_unverified`
+is now an explicit, owner-chosen opt-out (`acceptance: unverified`) and never an acceptance; the
+owner's acceptance is its own closure reason, `accepted_by_owner`, kept in its own sibling table.
+
 Accepted, 2026-10-19 (proposed 2026-10-18). Prepared with AI assistance (Claude). Amends
 [0114](0114-evidence-acceptance-criteria-and-the-tester.md) (a tester's pass is bound to the
 criteria it judged; evidence already enough is submitted, not polished; re-checking it is talk
