@@ -50,6 +50,11 @@ a package. Preparation never does either.
 registry is overwritten by a new push of the same tag, so check what is there before you publish
 a version or move `latest`, and publish a release from a tag so the version is `X.Y.Z`.
 
+The first publish (12 Nov 2026, tag `v0.1.0`) also moved `latest`, because `docker/metadata-action`
+adds `latest` by itself on a semver tag unless its `flavor` says `latest=false`; `latest` now points
+at `0.1.0`. The workflow sets `flavor: latest=false`, so from that fix on `latest` moves only when
+someone ticks *Move latest* from `main`.
+
 ## Turning it back off
 
 Delete the variable (or set it to anything but `enabled`). The next run cannot publish.

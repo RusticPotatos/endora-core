@@ -94,6 +94,8 @@ jobs:
             type=sha,format=long
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' && inputs.tag_latest }}
             type=semver,pattern={{version}}
+          flavor: |
+            latest=false
       - uses: docker/build-push-action@v6
         with:
           context: .

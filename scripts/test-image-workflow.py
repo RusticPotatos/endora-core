@@ -262,6 +262,10 @@ for name, c in [
 print("== which tags a publish gives")
 meta = [s for s in steps_of(publisher) if str(s.get("uses", "")).startswith("docker/metadata-action")][0]
 tag_lines = [l.strip() for l in meta["with"]["tags"].splitlines() if l.strip()]
+# metadata-action's `flavor` input; `latest` defaults to `auto`, which adds `latest` on a semver tag
+# ref whatever the `tags` rules say (https://github.com/docker/metadata-action#latest-tag).
+flavor = dict(l.strip().split("=", 1) for l in str(meta["with"].get("flavor", "")).splitlines() if "=" in l)
+latest_mode = flavor.get("latest", "auto").strip().lower()
 
 
 def tags_for(c):
@@ -280,6 +284,8 @@ def tags_for(c):
         elif kind == "type=semver":
             if c["github.ref"].startswith("refs/tags/v"):
                 out.append("X.Y.Z")
+                if latest_mode in ("auto", "true") and "latest" not in out:
+                    out.append("latest")        # the action's own addition, not a `tags` rule
     return out
 
 
@@ -289,6 +295,10 @@ expect("from main with `tag_latest`: sha-<commit> and latest",
        tags_for(ctx("workflow_dispatch", "refs/heads/main", var="enabled", publish=True, latest=True)) == ["sha-<commit>", "latest"])
 expect("from a version tag, even with `tag_latest`: sha-<commit> and X.Y.Z, never latest",
        tags_for(ctx("workflow_dispatch", "refs/tags/v1.2.3", var="enabled", publish=True, latest=True)) == ["sha-<commit>", "X.Y.Z"])
+expect("from a version tag without `tag_latest`: sha-<commit> and X.Y.Z, never latest",
+       tags_for(ctx("workflow_dispatch", "refs/tags/v1.2.3", var="enabled", publish=True, latest=False)) == ["sha-<commit>", "X.Y.Z"])
+expect("the metadata step sets `flavor` `latest=false`, so the action adds no `latest` of its own",
+       latest_mode == "false")
 expect("no tag is written outright except through the metadata step",
        not re.search(r"endora-node:(latest|[0-9])", WORKFLOW.read_text())
        and all("steps.meta.outputs.tags" in str(s["with"]["tags"]) for s in pushes(publisher)))
