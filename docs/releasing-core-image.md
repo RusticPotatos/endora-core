@@ -7,6 +7,24 @@ on every push to `develop` or `main` and every `v*` tag, and stops there: no log
 tag, `latest` untouched. Pushing to `main`, pushing a tag and merging a pull request never write
 a package. This keeps the first public push from touching any image already in the registry.
 
+## Before the owner turns publication on
+
+**Nothing publishes until then.** The repository variable `ENDORA_CORE_IMAGE_PUBLISH` is the owner's
+switch; setting it, and starting the workflow by hand afterwards, are the only steps that can write
+a package. Preparation never does either.
+
+| # | Must be true | State |
+|---|---|---|
+| 1 | The owner sets `ENDORA_CORE_IMAGE_PUBLISH` to `enabled` (below, step 1) | **open: the owner's** |
+| 2 | A person (the owner, or someone the owner names) starts *Core image* by hand with **Publish** ticked from `main` or a `vX.Y.Z` tag (below, step 2); no agent, push, tag or schedule does | **open: at the time** |
+| 3 | Third-party notices cover what the image ships: [THIRD-PARTY-NOTICES.md](../THIRD-PARTY-NOTICES.md) | done; **regenerate it for the release being published** (its section 5 says how) |
+| 3b | The image carries `LICENSE`, `NOTICE` and the notices (one `COPY` in the Dockerfile's last stage; it needs the owner's value-exception manifest regenerated, as the notices' "Open points" say) | **open** |
+| 4 | The source offer for the GPL and LGPL parts is stated (section 4 of the notices): which components, their licences, where the source is, a written offer through this repository's issues | done as facts; **the wording is the owner's to confirm** |
+| 5 | The crates' licence texts accompany the binaries, or the owner accepts the pointers the notices give | **open: the owner's decision** (notices, "Open points") |
+| 6 | The image privacy check fails when its own `find` fails, not only when it finds a file (`scripts/test-image-privacy.sh` proves it) | done |
+| 7 | The bundle's pin check accepts `sha-<40 hex>`, `X.Y.Z` and either with `@sha256:<64 hex>` (`check-isolation.sh`); the examples keep the `sha-` form | done; set the digest form after the first publish if you want an immutable pin |
+| 8 | What the registry holds is looked at first: a tag already there is overwritten by a push of the same tag (see below) | **open: at the time** |
+
 ## What a publish needs (all of it)
 
 1. **Release publishing is turned on**: the repository variable `ENDORA_CORE_IMAGE_PUBLISH` is

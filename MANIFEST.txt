@@ -26,6 +26,7 @@ Makefile
 NOTICE
 README.md
 SECURITY.md
+THIRD-PARTY-NOTICES.md
 app/cli/Cargo.toml
 app/cli/src/client.rs
 app/cli/src/main.rs

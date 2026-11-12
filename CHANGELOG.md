@@ -19,6 +19,14 @@ tagged release.
 
 ### Changed
 
+- **The image privacy check reads `find`'s exit status.** A `find` that could not traverse the
+  image or the build context (or was not there) was read as "nothing found", so the check passed.
+  It now fails ("could not list"); `scripts/test-image-privacy.sh` proves a failing `find` fails
+  and a clean tree still passes, and the check's own `--self-test` adds an image with no `find`.
+- **The bundle's pin check accepts `<tag>@sha256:<digest>`.** `ENDORA_CORE_VERSION` may be
+  `sha-<40 hex>`, `X.Y.Z`, or either with `@sha256:<64 hex>`; an unpinned value, `latest`, a short
+  sha or a digest with no tag is still refused (`check-isolation.sh --self-test` covers both).
+  The shipped examples keep the `sha-` form.
 - **The full-system bundle test no longer touches what it did not make.** `test-bundle.sh` ran
   under the project name `endora` and ended with `down -v --remove-orphans`, which removed a real
   install's stopped containers, volumes and networks from a shared Docker daemon. It now runs under a
@@ -35,6 +43,10 @@ tagged release.
 
 ### Added
 
+- **`THIRD-PARTY-NOTICES.md`.** The Rust crates and the 495 Debian packages of Core's image, their
+  licences, which parts are copyleft and where their source is, with a written source offer. Copying
+  it into the image is a Dockerfile change left open (see its "Open points"). Nothing is published
+  by this change.
 - **Every Core store has a nightly copy proven by restore** (milestone f;
   [ADR 0098](docs/adr/0098-it-can-be-rebuilt.md), amended 2026-11-09). HQ's `hq.db` (goals,
   tasks, desk) now gets what the node's `endora.db` always had: a 01:30 copy in its own
