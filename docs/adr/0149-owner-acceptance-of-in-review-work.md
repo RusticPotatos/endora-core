@@ -47,7 +47,15 @@ Three candidates were weighed:
      a reviewer's approval is held to (`work::gate_passed_for_done`, shared with `work::is_done`).
    - `send_back` moves the task from `in_review` to `doing`, posts the note, emits the feed's
      `task.sent_back` (`via: "owner"`) and wakes the holder with `WakeReason::SentBack`, as a
-     reviewer's send-back does. It refuses a stale card the same way.
+     reviewer's send-back does. It refuses a stale card the same way. It also refuses, with no
+     state change, when the owner has paused the task's project: no turn runs there and the wake
+     is refused (`wake.refused project_paused`), so the work would sit in `doing` with nobody on
+     it and nothing telling the owner. The refusal is `Refusal::ProjectPaused`, `409` at HQ's
+     route and on Core's `/v1/decisions/{id}`, saying the project is paused and must be resumed
+     first; the task stays `in_review`, nothing is posted or stored, and the card keeps waiting,
+     so the same answer works after the resume. It is the same condition the wake refusal tests
+     (`held_by_owner`: a project the owner paused, not one paused for its budget). `accept` is
+     allowed in a paused project: it closes the task and wakes nobody.
    - A card decided once is decided once, and a repeat does nothing twice. At the engine (and HQ's
      own `/v1/desk/{id}`) a second `accept` is refused `409` (`this task is over`). On Core's
      `POST /v1/decisions/{id}`, the route the owner and Console use, the desk's existing
@@ -111,6 +119,12 @@ Four outcomes stay apart in tests and in what the owner reads: **completed** (re
   is never left stale.
 - **Open: the project snapshot does not show `solo` or `acceptance`.** `GET /v1/hq` shows neither
   on a project, in this build or the one before. Showing them is a contract change, not made here.
+- **A send-back needs a running project.** In a project the owner paused, `send_back` is refused
+  (`409`, "that task's project is paused: resume the project first, then send the work back (the
+  card stays waiting for you)") rather than moving the task to `doing` with its wake refused:
+  found on the isolated stack, where the task was left stranded and unannounced. Pinned by the
+  scenario "Rejecting work in a paused project is refused until the project is resumed", and by
+  HQ and Core tests of the `409`.
 - **The self-review is rejected on purpose.** `reviewer_among` is unchanged.
 - **Gates, privacy and release gates are untouched.** Accepting gated work still needs its gate
   to have passed; the push to the fork is still offered, and still the owner's to approve.

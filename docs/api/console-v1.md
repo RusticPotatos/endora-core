@@ -96,6 +96,10 @@ review: `accept`, `send_back`, `read` and `not_now`. `words` is the optional not
 - Refusals, `400` with `{"error"}` and nothing recorded, the card still waiting: the task is no
   longer `in_review` (`a task does not go from doing to done`, or `... to doing` for
   `send_back`); the task is gated and its gate has not passed (`the gate has not passed`).
+- `send_back` on a task in a project the owner paused is refused `409` with `{"error": "that
+  task's project is paused: resume the project first, then send the work back (the card stays
+  waiting for you)"}`; nothing is recorded or posted, the task stays `in_review` and the card keeps
+  waiting, so the same answer works once the project is resumed. `accept` is allowed there.
   A card whose task is no longer in review (for instance another card of a task already done)
   gets the same `400`; an unknown choice is `400` (`no such decision for this item`).
   A repeated `accept` is not an error: see Idempotent below.

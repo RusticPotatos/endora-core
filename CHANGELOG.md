@@ -18,6 +18,10 @@ tagged release.
   changes nothing, as for any decided card (HQ's own route says `409`). A card whose task is no
   longer in review is `400` with the reason. Other waiting cards of a task that closes are not
   settled (existing behaviour, recorded in the ADR).
+- **Sending work back in a paused project is refused, not stranded.** `send_back` on a task whose
+  project the owner paused is `409` ("that task's project is paused: resume the project first, ...")
+  with no state change: the task stays in review and the card keeps waiting, instead of going to
+  `doing` with its wake refused and nobody told. `accept` there still closes it.
 - **A per-project `acceptance` policy**, set next to `solo` on `POST /v1/hq/projects`: `owner` (the
   default) or `unverified` (the explicit opt-out that keeps HQ closing a solo item as
   `completed_unverified`, never shown as accepted).
