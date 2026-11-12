@@ -222,7 +222,7 @@ and pinning new versions would fix only the names.
 
 | Volume | Holds | Back it up |
 |---|---|---|
-| `endora-core-data` | Core's database (settings, sealed credentials, sign-in, records), its secrets key `secrets.key` and its TLS certificate | **yes**, and keep `secrets.key` apart from the database copies: without it the sealed credentials cannot be opened |
+| `endora-core-data` | Core's database (settings, sealed credentials, sign-in, records), its secrets key `secrets.key` and its TLS certificate | **yes**. The online copy (`endora-backup.db`) does not hold `secrets.key`: keep the key apart from it, since without the key the sealed credentials cannot be opened. The cold tarball does hold the key (see below) |
 | `endora-core-hq-data` | HQ's database: the team's work, record and budgets | **yes** |
 | `endora-core-hq-token`, `endora-core-hq-runner-token` | the tokens HQ makes for the node and the runner | no: remade if lost |
 | `endora-audio-data` | Audio's settings (`sound.json`) | **yes** |
@@ -249,6 +249,11 @@ copy this install's own, whatever they are named (`second.env.example`, or `*_VO
 volume (`docker run -v` would, even with `:ro`); and the tarball takes the volume's Compose name
 (`endora-core-data.tgz`, `endora-core-hq-data.tgz`), which is what the restore check below reads.
 
+The cold tarball of `endora-core-data` contains the database **and** `secrets.key`, so treat the
+tarball itself as a secret: the block writes it owner-only (mode 0600), and you keep it off shared
+or cloud-synced storage and never next to a plain copy of the key. (The online copy above holds only
+the database, not the key.)
+
 ```sh
 KEYS="endora-core-data endora-core-hq-data" sh -eu <<'EOF'
 PROJECT=$(docker compose config | sed -n 's/^name: //p')
@@ -261,9 +266,10 @@ done
 docker compose stop
 for k in $KEYS; do
   v=$(vol "$k")
-  # The container runs as root; the tarball is handed back to you, not left root-owned.
+  # The container runs as root; the tarball is handed back to you, not left root-owned, and
+  # owner-only (it holds secrets.key): umask for a new file, chmod for one left by an earlier run.
   docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$v":/v:ro -v "$PWD":/b alpine:3.21 \
-    sh -c 'tar czf "/b/$1.tgz" -C /v . && chown "$OWNER" "/b/$1.tgz"' sh "$k"
+    sh -c 'umask 077 && tar czf "/b/$1.tgz" -C /v . && chown "$OWNER" "/b/$1.tgz" && chmod 600 "/b/$1.tgz"' sh "$k"
 done
 docker compose start
 EOF
