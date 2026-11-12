@@ -155,3 +155,40 @@ fn owner_drops(w: &mut Office, title: String, why: String) {
     w.hq.drop_task_because(task, closure, None)
         .expect("the owner drops it");
 }
+
+#[given(expr = "the owner pauses the loop {string}")]
+#[when(expr = "the owner pauses the loop {string}")]
+fn owner_pauses_loop(w: &mut Office, project: String) {
+    let project = w.project(&project).id;
+    w.hq.change_project(project, "pause")
+        .expect("the owner pauses a project");
+}
+
+#[when(expr = "the owner resumes the loop {string}")]
+fn owner_resumes_loop(w: &mut Office, project: String) {
+    let project = w.project(&project).id;
+    w.hq.change_project(project, "resume")
+        .expect("the owner resumes a project");
+}
+
+#[then(expr = "the thread of {string} holds no word from the owner")]
+fn no_word_from_the_owner(w: &mut Office, title: String) {
+    let thread =
+        w.hq.store()
+            .thread(w.task(&title))
+            .expect("the store answers");
+    let owner: Vec<_> = thread.iter().filter(|p| p.author == "owner").collect();
+    assert!(owner.is_empty(), "{owner:?}");
+}
+
+#[then(expr = "{word} is not woken by a send-back on {string}")]
+fn not_woken_by_send_back(w: &mut Office, name: String, title: String) {
+    let (member, task) = (w.member(&name), w.task(&title));
+    let woken = w
+        .hq
+        .wakes()
+        .expect("the store answers")
+        .into_iter()
+        .any(|k| k.task == Some(task) && k.member == member && k.reason == WakeReason::SentBack);
+    assert!(!woken, "{name} was woken by a send-back");
+}

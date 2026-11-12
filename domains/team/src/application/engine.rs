@@ -2914,9 +2914,14 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
     /// and its holder is woken, as a reviewer's send-back does (ADR 0149).
     ///
     /// # Errors
-    /// [`Refusal::NotAStep`] for a task not in review.
+    /// [`Refusal::NotAStep`] for a task not in review; [`Refusal::ProjectPaused`] for a task in
+    /// a project the owner paused, where the wake would be refused (`project_paused`) and the
+    /// work would be stranded in `doing`: nothing changes, and the card keeps waiting.
     fn owner_sends_back(&self, found: &DeskItem, words: &str) -> Done<()> {
         let task = self.in_review_for_the_owner(found, TaskStatus::Doing)?;
+        if self.held_by_owner(task.project)? {
+            return Err(EngineError::Refused(Refusal::ProjectPaused));
+        }
         self.store.set_task_status(task.id, TaskStatus::Doing)?;
         let said = if words.is_empty() {
             "Sent back by the owner."

@@ -390,6 +390,10 @@ pub enum Refusal {
     OtherGoal,
     /// The project takes no work: it is proposed, done or dropped.
     ProjectClosed,
+    /// The owner paused the task's project: no turn runs there, so work sent back to a worker
+    /// would sit unworked and unseen (ADR 0149). Nothing changed; the owner answers after
+    /// resuming the project.
+    ProjectPaused,
     /// The projects' caps together would pass the pool's month; this much is left.
     CapsOverPool {
         /// What is left of the pool's month for this cap.
@@ -605,6 +609,10 @@ impl fmt::Display for Refusal {
             Self::ProjectClosed => {
                 f.write_str("that project takes no work: it is proposed, done or dropped")
             }
+            Self::ProjectPaused => f.write_str(
+                "that task's project is paused: resume the project first, then send the work back \
+                 (the card stays waiting for you)",
+            ),
             Self::CapsOverPool { room } => write!(
                 f,
                 "the projects' caps together may not pass the pool's month: at most {} is left \

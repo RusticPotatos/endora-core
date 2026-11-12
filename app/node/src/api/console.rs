@@ -376,12 +376,20 @@ async fn apply(state: &AppState, desk: i64, choice: &str, words: &str, duplicate
             };
             mark(state, desk, kind, executed).await?;
         }
-        Err((StatusCode::CONFLICT, _)) => {
+        Err((StatusCode::CONFLICT, Json(said))) => {
             // Decided between the look and the answer: by this same answer, or by another.
             let again = match desk_item(state, desk).await? {
                 Ok(again) => again,
                 Err(e) => return Err(unreachable(state, desk, e.to_string()).await),
             };
+            // Still waiting: HQ refused the answer itself (a send-back in a paused project,
+            // ADR 0149). Its reason is relayed, nothing is recorded, and the same answer
+            // works once that is put right.
+            if again["status"].as_str() == Some("waiting") {
+                release(state, desk).await?;
+                let why = said["error"].as_str().unwrap_or("refused");
+                return Err(refuse(StatusCode::CONFLICT, why.to_owned()));
+            }
             return settled_elsewhere(state, desk, choice, kind, again).await;
         }
         Err((status, Json(said))) if status.is_client_error() => {

@@ -239,7 +239,9 @@ impl IntoResponse for Failed {
     fn into_response(self) -> Response {
         let status = match &self.0 {
             EngineError::Unknown(_) => StatusCode::NOT_FOUND,
-            EngineError::Refused(Refusal::Finished) => StatusCode::CONFLICT,
+            EngineError::Refused(Refusal::Finished | Refusal::ProjectPaused) => {
+                StatusCode::CONFLICT
+            }
             EngineError::Refused(_) => StatusCode::BAD_REQUEST,
             EngineError::Store(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -4105,6 +4107,58 @@ mod tests {
             .unwrap();
         assert_eq!(again.status(), StatusCode::CONFLICT, "decided once");
         assert_eq!(st.hq.store().closure(task).unwrap().unwrap().at, closed.at);
+    }
+
+    /// ADR 0149: a send-back in a paused project is refused `409` with the reason (resume the
+    /// project first); the task stays in review, the card waits, nothing is posted, and
+    /// `accept` still works there. (The resumed send-back is the engine scenario's.)
+    #[tokio::test]
+    async fn a_send_back_in_a_paused_project_is_refused_409_and_accept_still_works() {
+        use endora_team::domain::TaskStatus;
+        let st = state(false);
+        let (task, card) = a_card_to_accept(&st, TaskStatus::InReview);
+        let found = st.hq.store().task(task).unwrap().unwrap();
+        let lead = found.assignee.unwrap();
+        let project = st
+            .hq
+            .add_project(found.goal, "Cables", "", lead, None)
+            .unwrap();
+        st.hq.move_task_to_project(task, project).unwrap();
+        st.hq.change_project(project, "pause").unwrap();
+        let app = app(st.clone());
+        let decide = |body: &str| call("POST", &format!("/v1/desk/{}", card.0), Some(TOKEN), body);
+        let thread = st.hq.store().thread(task).unwrap().len();
+        let res = app
+            .clone()
+            .oneshot(decide(r#"{"decision":"send_back","answer":"Again."}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = json_of(res).await;
+        let said = body["error"].as_str().unwrap();
+        assert!(
+            said.contains("project is paused") && said.contains("resume"),
+            "{body}"
+        );
+        assert_eq!(
+            st.hq.store().task(task).unwrap().unwrap().status,
+            TaskStatus::InReview
+        );
+        assert_eq!(st.hq.store().thread(task).unwrap().len(), thread, "no post");
+        let desk = st.hq.store().desk().unwrap();
+        assert_eq!(
+            desk.iter().find(|d| d.id == card).unwrap().status,
+            "waiting"
+        );
+        let res = app
+            .oneshot(decide(r#"{"decision":"accept"}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            st.hq.store().task(task).unwrap().unwrap().status,
+            TaskStatus::Done
+        );
     }
 
     /// ADR 0149: a card whose task is no longer in review refuses both choices with a body that

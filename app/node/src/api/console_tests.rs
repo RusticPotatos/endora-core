@@ -271,7 +271,13 @@ struct Hq {
     tasks: HashMap<i64, (String, Option<i64>)>,
     /// Posts to a task's thread (a send-back's note, an acceptance's words).
     posts: usize,
+    /// Whether the owner has paused the project of the tasks above (ADR 0149).
+    paused: bool,
 }
+
+/// What HQ's engine says to a send-back in a paused project (ADR 0149).
+const PAUSED_SEND_BACK: &str = "that task's project is paused: resume the project first, then send \
+                                the work back (the card stays waiting for you)";
 
 type Shared = Arc<Mutex<Hq>>;
 
@@ -367,6 +373,12 @@ fn decide_work_in_review(hq: &mut Hq, id: i64, choice: &str) -> (StatusCode, Jso
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": format!("a task does not go from {task} to {to}")})),
+        );
+    }
+    if hq.paused && choice == "send_back" {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": PAUSED_SEND_BACK})),
         );
     }
     hq.tasks
@@ -577,6 +589,47 @@ async fn a_second_accept_with_a_new_request_id_answers_the_first_decision_and_ch
     let other = answer(r#"{"choice":"send_back"}"#).await.unwrap();
     assert_eq!(other.status(), StatusCode::CONFLICT);
     assert_eq!(json_body(other).await["decision"]["choice"], "accept");
+}
+
+/// ADR 0149: sending work back in a paused project is refused `409` with HQ's own reason (resume
+/// the project first), and nothing is recorded or changed: the task stays in review, the card
+/// stays waiting, and the same answer works once the project is resumed. `accept` is allowed.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_back_in_a_paused_project_is_refused_409_with_the_reason_and_changes_nothing() {
+    let hq = a_card_of_work(23, "in_review");
+    hq.lock().unwrap().paused = true;
+    let router = app(node_with_hq(hq.clone()).await);
+    let answer = |body: &'static str| router.clone().oneshot(post("/v1/decisions/23", body));
+    for _ in 0..2 {
+        let res = answer(r#"{"choice":"send_back","words":"Again."}"#)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        assert_eq!(json_body(res).await["error"], PAUSED_SEND_BACK);
+    }
+    {
+        let now = hq.lock().unwrap();
+        assert_eq!(now.tasks[&23], ("in_review".to_owned(), None));
+        assert_eq!((now.applied, now.posts), (0, 0));
+        assert_eq!(now.desk[&23].1, "waiting", "the card is still waiting");
+    }
+    // Resumed, the same card's send-back is applied: the refusal kept no decision behind.
+    hq.lock().unwrap().paused = false;
+    let res = answer(r#"{"choice":"send_back","words":"Again."}"#)
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(json_body(res).await["decision"]["choice"], "send_back");
+    assert_eq!(hq.lock().unwrap().tasks[&23].0, "doing");
+    // A paused project does not stop an acceptance.
+    let hq = a_card_of_work(24, "in_review");
+    hq.lock().unwrap().paused = true;
+    let res = app(node_with_hq(hq.clone()).await)
+        .oneshot(post("/v1/decisions/24", r#"{"choice":"accept"}"#))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(hq.lock().unwrap().tasks[&24].0, "done");
 }
 
 /// ADR 0149: a card whose task is no longer in review (another card of a done task) is refused

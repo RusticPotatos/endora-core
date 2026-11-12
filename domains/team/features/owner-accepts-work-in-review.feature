@@ -101,6 +101,44 @@ Feature: The owner accepts work that nobody reviews
     When the owner accepts "Settle the VPN restart"
     Then "Settle the VPN restart" closed as "accepted_by_owner": "the owner accepted it"
 
+  Scenario: Rejecting work in a paused project is refused until the project is resumed, then it goes back as usual
+    Given the loop "solo arm" has the item "Settle the VPN restart": "Is the 2-hourly restart still needed?"
+    And a tick passes
+    When Sol takes "Settle the VPN restart" and reads gluetun's logs: "gluetun: healthy"
+    And Sol asks for review of "Settle the VPN restart", citing her reading
+    And the owner pauses the loop "solo arm"
+    When the owner sends "Settle the VPN restart" back
+    Then it is refused for "project is paused"
+    And it is refused for "resume"
+    And the task "Settle the VPN restart" is in_review
+    And "Settle the VPN restart" has no closing on record
+    And the thread of "Settle the VPN restart" holds no word from the owner
+    And Sol is not woken by a send-back on "Settle the VPN restart"
+    And the owner's desk holds one card to accept "Settle the VPN restart"
+    When the owner resumes the loop "solo arm"
+    And the owner sends "Settle the VPN restart" back, saying "Check the second restart too."
+    Then the task "Settle the VPN restart" is doing
+    And the thread of "Settle the VPN restart" says "Check the second restart too."
+    And Sol is woken by a send-back on "Settle the VPN restart"
+    And the owner's desk holds nothing about "Settle the VPN restart"
+    When Sol reads gluetun's logs again: "gluetun: healthy after the second restart"
+    And Sol asks for review of "Settle the VPN restart", citing her reading
+    Then the task "Settle the VPN restart" is in_review
+    And the owner's desk holds one card to accept "Settle the VPN restart"
+    When the owner accepts "Settle the VPN restart"
+    Then "Settle the VPN restart" closed as "accepted_by_owner": "the owner accepted it"
+
+  Scenario: Accepting work in a paused project still closes it, accepted by the owner
+    Given the loop "solo arm" has the item "Settle the VPN restart": "Is the 2-hourly restart still needed?"
+    And a tick passes
+    When Sol takes "Settle the VPN restart" and reads gluetun's logs: "gluetun: healthy"
+    And Sol asks for review of "Settle the VPN restart", citing her reading
+    And the owner pauses the loop "solo arm"
+    When the owner accepts "Settle the VPN restart"
+    Then the task "Settle the VPN restart" is done
+    And "Settle the VPN restart" closed as "accepted_by_owner": "the owner accepted it"
+    And "Settle the VPN restart" was closed by "owner"
+
   Scenario: Abandoned work stays dropped, with the reason it was given
     Given the loop "solo arm" has the item "Settle the VPN restart": "Is the 2-hourly restart still needed?"
     And a tick passes
