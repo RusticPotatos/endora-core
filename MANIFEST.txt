@@ -978,6 +978,7 @@ scripts/test-data-dir.sh
 scripts/test-deploy-recipes.sh
 scripts/test-homelab-proxy.py
 scripts/test-hq-drain.sh
+scripts/test-image-privacy.sh
 scripts/test-image-workflow.py
 scripts/test-mac-brain.sh
 scripts/test-owner-value-exceptions.sh

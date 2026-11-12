@@ -46,6 +46,14 @@ old_name_refs() {
   return 0
 }
 
+# pin_ok FILE: FILE has an ENDORA_CORE_VERSION line that pins a published build: the tag
+# `sha-<40 hex>` or `X.Y.Z`, optionally with the digest that makes the pin immutable
+# (`<tag>@sha256:<64 hex>`, the form Compose and Docker take for `image:tag@digest`). An empty
+# value, `latest`, `local`, a short sha, or a digest with no tag all refuse.
+pin_ok() {
+  grep -Eq '^ENDORA_CORE_VERSION=(sha-[0-9a-f]{40}|[0-9]+\.[0-9]+\.[0-9]+)(@sha256:[0-9a-f]{64})?$' "$1"
+}
+
 if [ "${1:-}" = --self-test ]; then
   t="$work/self"; mkdir -p "$t/tree" "$t/clean" "$t/shim"
   printf 'network: endora-core-team\n' > "$t/tree/leak.txt"
@@ -77,6 +85,24 @@ if [ "${1:-}" = --self-test ]; then
   rc=0; out=$(old_name_refs "$t/tree/own.sh" "$t/clean" 2>/dev/null) || rc=$?
   [ "$rc" -eq 0 ] && [ -z "$out" ]
   st "a clean tree passes with no references" $?
+
+  # The pin: a published tag, with or without its digest, is accepted; anything unpinned is refused.
+  # (built, not typed: a literal run of hex is what the personal-values check reads as a secret)
+  sha40=$(printf '%040d' 0 | tr 0 a)
+  dig64=$(printf '%064d' 0 | tr 0 b)
+  pin() { printf 'ENDORA_CORE_VERSION=%s\n' "$1" > "$t/pin.env"; pin_ok "$t/pin.env"; }
+  for good in "sha-$sha40" "1.2.3" "sha-$sha40@sha256:$dig64" "1.2.3@sha256:$dig64"; do
+    pin "$good"; st "pin accepted: ${good%%@*}${good#"${good%%@*}"}" $?
+  done
+  for badpin in "" latest local ci "sha-0123" "sha-${sha40}0" "1.2" "v1.2.3" "latest@sha256:$dig64" "@sha256:$dig64" \
+                "1.2.3@sha256:${dig64%?}" "1.2.3@sha256:${dig64}0" "1.2.3@sha256:$(printf '%s' "$dig64" | tr a-f A-F)" \
+                "1.2.3@sha512:$dig64" "1.2.3 @sha256:$dig64" "1.2.3@sha256:"; do
+    if pin "$badpin"; then rc=1; else rc=0; fi; st "pin refused: '$badpin'" $rc
+  done
+  printf '# ENDORA_CORE_VERSION=1.2.3\n' > "$t/pin.env"
+  if pin_ok "$t/pin.env"; then rc=1; else rc=0; fi; st "pin refused: a commented-out line" $rc
+  printf 'OTHER=1.2.3\n' > "$t/pin.env"
+  if pin_ok "$t/pin.env"; then rc=1; else rc=0; fi; st "pin refused: no ENDORA_CORE_VERSION line" $rc
   exit "$st_fail"
 fi
 
@@ -103,18 +129,18 @@ if ! render "$work/bundle" endora-a "$work/a.json"; then
   exit 1
 fi
 ok "the bundle renders from bundle.env.example with no edit"
-if ! grep -Eq '^ENDORA_CORE_VERSION=(sha-[0-9a-f]{40}|[0-9]+\.[0-9]+\.[0-9]+)$' "$here/bundle.env.example"; then
-  bad "bundle.env.example: ENDORA_CORE_VERSION is not a published tag (sha-<40 hex> or X.Y.Z)"
+if ! pin_ok "$here/bundle.env.example"; then
+  bad "bundle.env.example: ENDORA_CORE_VERSION is not a published tag (sha-<40 hex> or X.Y.Z, optionally @sha256:<64 hex>)"
 else
   ok "bundle.env.example: ENDORA_CORE_VERSION names a published tag"
 fi
-if ! grep -Eq '^ENDORA_CORE_VERSION=(sha-[0-9a-f]{40}|[0-9]+\.[0-9]+\.[0-9]+)$' "$here/core/core.env.example"; then
-  bad "core/core.env.example: ENDORA_CORE_VERSION is not a published tag (sha-<40 hex> or X.Y.Z)"
+if ! pin_ok "$here/core/core.env.example"; then
+  bad "core/core.env.example: ENDORA_CORE_VERSION is not a published tag (sha-<40 hex> or X.Y.Z, optionally @sha256:<64 hex>)"
 else
   ok "core/core.env.example: ENDORA_CORE_VERSION names a published tag"
 fi
-if ! grep -Eq '^ENDORA_CORE_VERSION=(sha-[0-9a-f]{40}|[0-9]+\.[0-9]+\.[0-9]+)$' "$here/core/second.env.example"; then
-  bad "core/second.env.example: ENDORA_CORE_VERSION is not a published tag (sha-<40 hex> or X.Y.Z)"
+if ! pin_ok "$here/core/second.env.example"; then
+  bad "core/second.env.example: ENDORA_CORE_VERSION is not a published tag (sha-<40 hex> or X.Y.Z, optionally @sha256:<64 hex>)"
 else
   ok "core/second.env.example: ENDORA_CORE_VERSION names a published tag"
 fi

@@ -35,8 +35,9 @@ resolve_values() {
 
 context() {
   dir=$1
-  # Fails closed: no image built, or no listing read back, is a failure, never "clean".
-  built=$(printf 'FROM busybox:1.37.0\nCOPY . /ctx\nRUN (%s 2>/dev/null | grep "^/ctx/" || true) > /found && echo listed > /done\nCMD ["sh", "-c", "cat /done /found"]\n' "$FIND_LOCAL" \
+  # Fails closed: no image built, or no listing read back, is a failure, never "clean". The scan's own
+  # status is read (a failing find fails the RUN, so the build): a pipeline or `|| true` would hide it.
+  built=$(printf 'FROM busybox:1.37.0\nCOPY . /ctx\nRUN rc=0; %s > /all 2>/dev/null || rc=$?; [ "$rc" -eq 0 ] || exit 1; (grep "^/ctx/" /all || true) > /found && echo listed > /done\nCMD ["sh", "-c", "cat /done /found"]\n' "$FIND_LOCAL" \
     | docker build -q -f - "$dir") || { echo "FAIL could not build the context of $dir"; return 1; }
   [ -n "$built" ] || { echo "FAIL could not build the context of $dir"; return 1; }
   listing=$(docker run --rm "$built") || { docker rmi -f "$built" >/dev/null 2>&1; echo "FAIL could not list the context of $dir"; return 1; }
@@ -52,9 +53,11 @@ context() {
 image() {
   img=$1; bad=0
   # Fails closed: the listing ends with a marker, so an image that could not be run is a failure.
-  listing=$(docker run --rm --entrypoint sh "$img" -c "$FIND_LOCAL 2>/dev/null; echo listed") \
+  # find's own exit status is part of the marker (listed:0): a find that could not traverse, or is
+  # not there, must not read as "nothing found".
+  listing=$(docker run --rm --entrypoint sh "$img" -c "$FIND_LOCAL 2>/dev/null; echo listed:\$?") \
     || { echo "FAIL could not run $img"; return 1; }
-  [ "$(printf '%s\n' "$listing" | tail -n 1)" = listed ] || { echo "FAIL could not list $img"; return 1; }
+  [ "$(printf '%s\n' "$listing" | tail -n 1)" = listed:0 ] || { echo "FAIL could not list $img (the scan itself failed)"; return 1; }
   found=$(printf '%s\n' "$listing" | sed '$d')
   if [ -n "$found" ]; then
     echo "FAIL $img carries local files:"; printf '  %s\n' $found; bad=1
@@ -96,12 +99,14 @@ self_test() {
   if context "$work/ctx" >/dev/null; then echo "FAIL self-test: a context with owner.mk passed"; return 1; fi
   printf 'FROM busybox:1.37.0\nRUN echo x > /root/owner.mk\n' | docker build -q -t endora-privacy-selftest:planted - >/dev/null
   if image endora-privacy-selftest:planted >/dev/null; then echo "FAIL self-test: an image with owner.mk passed"; return 1; fi
+  printf 'FROM busybox:1.37.0\nRUN rm /bin/find\n' | docker build -q -t endora-privacy-selftest:nofind - >/dev/null
+  if image endora-privacy-selftest:nofind >/dev/null; then echo "FAIL self-test: an image whose find fails passed"; return 1; fi
   printf 'FROM busybox:1.37.0\nRUN mkdir -p /usr/local && echo x > /usr/local/notes\n' | docker build -q -t endora-privacy-selftest:clean - >/dev/null
   image endora-privacy-selftest:clean >/dev/null || { echo "FAIL self-test: a clean image failed"; return 1; }
   printf 'FROM busybox:1.37.0\nRUN mkdir -p /usr/local && echo "Jane Doe lives here" > /usr/local/notes\n' | docker build -q -t endora-privacy-selftest:value - >/dev/null
   if ENDORA_OWNER_VALUES="Jane Doe" image endora-privacy-selftest:value >/dev/null; then echo "FAIL self-test: an image holding a personal value passed"; return 1; fi
-  docker rmi -f endora-privacy-selftest:planted endora-privacy-selftest:clean endora-privacy-selftest:value >/dev/null
-  echo "ok   self-test: .dockerignore keeps planted files out; a planted file or value fails"
+  docker rmi -f endora-privacy-selftest:planted endora-privacy-selftest:nofind endora-privacy-selftest:clean endora-privacy-selftest:value >/dev/null
+  echo "ok   self-test: .dockerignore keeps planted files out; a planted file or value, or a find that fails, fails"
 }
 
 case "${1:-}" in
