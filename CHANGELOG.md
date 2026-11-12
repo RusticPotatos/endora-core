@@ -7,6 +7,20 @@ tagged release.
 
 ## [Unreleased]
 
+### Released
+
+- **Core's first image is published** (`v0.1.0`, 12 Nov 2026, commit `f62d1fe0ee5d`, index digest
+  `sha256:001c9bb48dd0...`, linux/amd64 and linux/arm64). The bundle's three `.env.example` files pin
+  `sha-f62d1fe0ee5dbd1e4c3c25f9052a7aaadd8caeae`, and the interim-pin disclosure is gone: the image is
+  built from this repository. How it was published, and the one-time package access it needed, is
+  in [docs/releasing-core-image.md](docs/releasing-core-image.md).
+
+### Fixed (image publishing)
+
+- **A version publish no longer moves `latest` unless asked.** `docker/metadata-action` adds `latest`
+  on a semver tag by default; the workflow now sets `flavor: latest=false`. The first publish moved
+  `latest` to `0.1.0` before this fix.
+
 ### Added (image licensing)
 
 - **Core's image carries its licence texts.** `/usr/share/doc/endora-core` holds `LICENSE`, `NOTICE`,
@@ -24,6 +38,7 @@ tagged release.
 - **The interim image pin is disclosed** ([docs/install.md](docs/install.md) and the bundle's
   `.env.example` files): it is the build made before Core had its own release, not a build of this
   repository, and it still serves the retired HQ artwork that this repository does not contain.
+  (Replaced by the first-release pin below.)
 
 ### Removed
 

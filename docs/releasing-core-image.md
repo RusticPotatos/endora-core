@@ -55,6 +55,21 @@ adds `latest` by itself on a semver tag unless its `flavor` says `latest=false`;
 at `0.1.0`. The workflow sets `flavor: latest=false`, so from that fix on `latest` moves only when
 someone ticks *Move latest* from `main`.
 
+## First release
+
+| | |
+|---|---|
+| Date | 12 Nov 2026 |
+| Tag | `v0.1.0`, commit `f62d1fe0ee5d` |
+| Run | `43187979255`, success |
+| Index digest | `sha256:001c9bb48dd0d6dc5dc2d8d00922e89573194bff8678055821dbc1526b933c8e` (linux/amd64, linux/arm64 and two attestation manifests) |
+| Tags written | `0.1.0`, `sha-f62d1fe0ee5dbd1e4c3c25f9052a7aaadd8caeae` and, by the action's default (note above), `latest` |
+
+One step was needed once. The package `ghcr.io/rusticpotatos/endora-node` was created by the old
+Endora repository's workflows, so `RusticPotatos/endora-core` had to be granted Write under the
+package's *Manage Actions access*; without it the push failed with `permission_denied:
+write_package`. The licence notices were checked fresh against that commit before publication.
+
 ## Turning it back off
 
 Delete the variable (or set it to anything but `enabled`). The next run cannot publish.

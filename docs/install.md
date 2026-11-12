@@ -50,9 +50,10 @@ The bundle is part of the repository, so the checkout is what you pin: after `gi
 `git checkout` with a release tag that contains `deploy/compose` (`git tag --list 'v*'`) or with a
 commit you have tested, then `cd deploy/compose`. That one step fixes the compose files, the
 `SOURCES.json` pins for Console and Audio, and the `ENDORA_CORE_VERSION` that `bundle.env.example`
-names. That is the published build of the commit Core's tree was taken from
-([core-origin.md](core-origin.md)), not a build of this exact checkout, which has changed since;
-for an exact match build the image yourself (see Prerequisites). The pinned image is the build made before Core had its own release, not a build of this repository, and it still serves the retired HQ artwork (MIT and CC0 as credited, notices included) that this repository does not contain; Core's own first release replaces the pin. Keep that checkout (or note its commit) so a
+names. That is Core's first published image (`v0.1.0`, built from this repository at commit
+`f62d1fe0ee5d`; [releasing-core-image.md](releasing-core-image.md)), not a build of this exact
+checkout if it has changed since; for an exact match build the image yourself (see Prerequisites).
+Keep that checkout (or note its commit) so a
 reinstall or rollback starts from the same files. To move later, check out the newer tag or commit
 and read the diff of `bundle.env.example` before you copy it over `.env`.
 
@@ -379,8 +380,8 @@ now `<project>_team`. Once, run `docker compose down` (without `-v`: the volumes
 stay) and then `docker compose up -d --wait`.
 
 **Rollback** is the same with the previous version. **Version rollback is unproven:** the
-repository has no tagged release, and no previous pin that was published as the earlier one of
-two releases, so no rollback from one documented pin to another has been run. Restoring a backup
+repository has one tagged release (`v0.1.0`), and no previous pin that was published as the earlier
+one of two releases, so no rollback from one documented pin to another has been run. Restoring a backup
 into the running version is proven (above); changing `ENDORA_CORE_VERSION` to an older image
 and restoring the matching backup is not, and its acceptance test waits for a genuine second
 release. Core's database migrations run forward on
