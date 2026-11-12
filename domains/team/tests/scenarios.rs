@@ -96,6 +96,10 @@ mod setup;
 #[path = "scenarios/loops.rs"]
 mod loops;
 
+/// The owner accepts or sends back work in review (ADR 0149), in its own file.
+#[path = "scenarios/acceptance.rs"]
+mod acceptance;
+
 /// The Live Work map (the owner's decision M3), in its own file.
 #[path = "scenarios/live_work.rs"]
 mod live_work;

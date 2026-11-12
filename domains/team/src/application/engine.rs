@@ -13,6 +13,7 @@ use super::ports::{
     WorkerAdapter,
 };
 use super::scorecard;
+use crate::domain::closure::Acceptance;
 use crate::domain::cut::cut;
 use crate::domain::docs;
 use crate::domain::guards::{GuardRefusal, Stopped};
@@ -1476,9 +1477,18 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
         if self.checked_at_review(task)? {
             return Ok(());
         }
-        // A loop worked alone has no review: HQ's checks passed, so it is done.
+        // A loop worked alone has no reviewer, and HQ does not invent one (ADR 0149). By default
+        // the owner accepts it on a card; only the owner's explicit opt-out has HQ close it
+        // itself, as completed, not verified (ADR 0142, amended 2026-11-01; ADR 0124).
         if let Some(alone) = self.solo_of(task)? {
-            return self.done_alone(task, alone);
+            if self.acceptance_of(task)? == Acceptance::Unverified {
+                return self.done_alone(task, alone);
+            }
+            let name = self.member(alone)?.name;
+            return self.ask_owner_to_decide(
+                task,
+                &format!("{name} works this loop alone; nobody reviews it"),
+            );
         }
         // In the loops, a member at Haiku's rank or below reviews it, when there is one (ADR
         // 0142, amended 2026-10-31).
@@ -1492,6 +1502,21 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             return Ok(());
         }
         // No reviewer on the team: the owner reads it.
+        self.ask_owner_to_decide(task, "nobody on the team reviews")
+    }
+
+    /// Work in review that nobody reviews is on the owner's desk, with its thread as it stands:
+    /// to accept or send back (ADR 0149), or only read and leave. One card at a time: a card
+    /// already waiting for the task is not put up again, whoever asked (a stranded item's
+    /// nudge asks its review again).
+    fn ask_owner_to_decide(&self, task: &Task, why: &str) -> Done<()> {
+        let waiting =
+            self.store.desk()?.iter().any(|d| {
+                d.kind == "ready_to_read" && d.status == "waiting" && d.task == Some(task.id)
+            });
+        if waiting {
+            return Ok(());
+        }
         let members = self.store.members()?;
         let thread: Vec<String> = self
             .store
@@ -1509,7 +1534,7 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             None,
             None,
             &format!(
-                "Ready to read: {} (nobody on the team reviews)\n{}",
+                "Ready to read: {} ({why})\n{}",
                 task.title,
                 thread.join("\n")
             ),
@@ -2831,6 +2856,9 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             | ("ready_to_merge", "merged" | "not_now")
             | ("ready_to_read", "read" | "not_now")
             | ("question", "dismiss") => {}
+            // Work in review that nobody reviews (ADR 0149): the owner's acceptance or send-back.
+            ("ready_to_read", "accept") => self.owner_accepts(found, words)?,
+            ("ready_to_read", "send_back") => self.owner_sends_back(found, words)?,
             _ => return Err(EngineError::Unknown("decision for this item")),
         }
         self.store.set_desk_status(item, decision)?;
@@ -2838,6 +2866,72 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             EventKind::DeskDecided,
             json!({ "item": item.0, "kind": found.kind, "decision": decision }),
         )?;
+        Ok(())
+    }
+
+    /// The task a "ready to read" card of work in review is about, still in review: the one
+    /// guard of both of the owner's choices on it.
+    ///
+    /// # Errors
+    /// [`Refusal::NotAStep`] for a task no longer in review (a stale card), changing nothing.
+    fn in_review_for_the_owner(&self, found: &DeskItem, to: TaskStatus) -> Done<Task> {
+        let task = self.task(found.task.ok_or(EngineError::Unknown("task"))?)?;
+        if task.status != TaskStatus::InReview {
+            return Err(EngineError::Refused(Refusal::NotAStep {
+                from: task.status,
+                to,
+            }));
+        }
+        Ok(task)
+    }
+
+    /// The owner accepts work in review: done, closed as `accepted_by_owner` (who and when kept),
+    /// and on as accepted work goes. Gated work needs its gate to have passed, by the rule a
+    /// reviewer's approval is held to ([`work::gate_passed_for_done`]) (ADR 0149).
+    ///
+    /// # Errors
+    /// [`Refusal::NotAStep`] for a task not in review; [`Refusal::GateNotPassed`].
+    fn owner_accepts(&self, found: &DeskItem, words: &str) -> Done<()> {
+        use crate::domain::closure::{Closure, DoneWhy};
+        let task = self.in_review_for_the_owner(found, TaskStatus::Done)?;
+        if self.gated(&task)? {
+            work::gate_passed_for_done(self.store.gate(task.id)?.unwrap_or(false))
+                .map_err(EngineError::Refused)?;
+        }
+        if !words.is_empty() {
+            self.post_held_lock(Author::Owner, task.id, words)?;
+        }
+        self.accept(&task)?;
+        self.closed(
+            task.id,
+            Closure::Done(DoneWhy::AcceptedByOwner),
+            None,
+            "owner",
+        )
+    }
+
+    /// The owner sends work in review back: it returns as `doing`, the note goes in the thread,
+    /// and its holder is woken, as a reviewer's send-back does (ADR 0149).
+    ///
+    /// # Errors
+    /// [`Refusal::NotAStep`] for a task not in review.
+    fn owner_sends_back(&self, found: &DeskItem, words: &str) -> Done<()> {
+        let task = self.in_review_for_the_owner(found, TaskStatus::Doing)?;
+        self.store.set_task_status(task.id, TaskStatus::Doing)?;
+        let said = if words.is_empty() {
+            "Sent back by the owner."
+        } else {
+            words
+        };
+        self.post_held_lock(Author::Owner, task.id, said)?;
+        self.emit_status(&task, TaskStatus::Doing)?;
+        self.emit(
+            EventKind::SentBack,
+            json!({ "task": task.id.0, "by": null, "via": "owner", "reason": null }),
+        )?;
+        if let Some(holder) = task.holder() {
+            self.wake_held_lock(holder, Some(task.id), WakeReason::SentBack)?;
+        }
         Ok(())
     }
 

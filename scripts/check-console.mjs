@@ -1473,6 +1473,19 @@ if (failures.length) {
         return out;
       })()`, context);
       if (marks.some((ok) => !ok)) fail(`hq: a worker's sign does not follow the record of its problems and recoveries: ${marks}`);
+
+      // ADR 0149: work in review waits on the owner's card with accept and send back, and an
+      // owner's acceptance is shown apart from a completion nothing checked and from met criteria.
+      const accepting = runInContext(`(() => {
+        const choices = HQ_DESK_CHOICES.ready_to_read.map((c) => c[0]);
+        const task = (why) => ({ id: 90, goal: 1, title: "Settle it", status: "done", owner: 3, brief: false, thread: [], branches: [], closure: { why, by: "owner", at: 1 } });
+        const said = (why) => hqStatusWord(task(why));
+        return [choices.includes("accept"), choices.includes("send_back"), choices.includes("read"), choices.includes("not_now"),
+          HQ_DESK_HELP.ready_to_read.includes("Accept"), HQ_DESK_HELP.ready_to_read.includes("Send it back"),
+          said("accepted_by_owner") === "Done · Accepted by the owner", said("completed_unverified") === "Completed · Not verified",
+          said("met_criteria") === "done", HQ_DONE_KINDS.accepted_by_owner === true];
+      })()`, context);
+      if (accepting.some((ok) => !ok)) fail(`hq: the ready-to-read card lacks accept and send back, or an acceptance is not shown apart from unverified completion: ${accepting}`);
     } finally {
       runInContext(`HQ.snap = JSON.parse(${JSON.stringify(saved)}); HQ.selected = null; HQ.fresh = {}; HQ.weekNow = 0; HQ.landing = {}; HQ.recovered = {}; HQ.log = JSON.parse(${JSON.stringify(savedLog)});`, context);
     }
@@ -1592,7 +1605,9 @@ if (failures.length) {
     console.log("hq density at rest: " + PLACES.map((id) => `${id} ${JSON.stringify(density(placeOf(home, id)))}`).join("; "));
     // The map's own count of its members and items is the record's, not a budget; its decisions
     // are the old Work tab's desk and digest (27 buttons, 42 rows), and the rest lost Work's share.
-    const MOST_IN_A_PLACE = { map: { buttons: 28, rows: 45 }, work: { buttons: 4, rows: 6 }, manage: { buttons: 27, rows: 32 }, health: { buttons: 14, rows: 22 },
+    // ADR 0149: the ready-to-read card carries Accept and Send it back and a note box: two buttons
+    // and a row more than before (28/45 became 30/46); nothing else on the map grew.
+    const MOST_IN_A_PLACE = { map: { buttons: 30, rows: 46 }, work: { buttons: 4, rows: 6 }, manage: { buttons: 27, rows: 32 }, health: { buttons: 14, rows: 22 },
       activity: { buttons: 11, rows: 23 }, chess: { buttons: 12, rows: 30 } };
     for (const [id, most] of Object.entries(MOST_IN_A_PLACE)) {
       const d = density(placeOf(home, id));

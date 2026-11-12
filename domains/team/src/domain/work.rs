@@ -804,6 +804,15 @@ pub fn is_done(
     if worker == Some(reviewer) {
         return Err(Refusal::OwnWork);
     }
+    gate_passed_for_done(gate_passed)
+}
+
+/// The gate's half of [`is_done`], the one rule for gated work: whoever closes it, a reviewer's
+/// approval or the owner's acceptance (ADR 0149), the gate must have passed.
+///
+/// # Errors
+/// [`Refusal::GateNotPassed`].
+pub const fn gate_passed_for_done(gate_passed: bool) -> Result<(), Refusal> {
     if !gate_passed {
         return Err(Refusal::GateNotPassed);
     }

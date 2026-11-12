@@ -18,6 +18,7 @@ use serde_json::json;
 
 use endora_team::application::engine::{Author, EngineError, Fired};
 use endora_team::application::ports::{Clock, NewRoutine, NewTask};
+use endora_team::domain::closure::Acceptance;
 use endora_team::domain::{
     DeskId, GoalId, MemberId, Priority, ProjectId, Refusal, RoutineId, RunId, TaskId,
 };
@@ -766,6 +767,10 @@ struct ProjectRequest {
     /// The member who works the loop alone (ADR 0142, amended 2026-11-01), if any.
     #[serde(default)]
     solo: Option<i64>,
+    /// How the loop's work is accepted when nobody reviews it (ADR 0149): `owner` (the default) or
+    /// `unverified`, the owner's explicit opt-out.
+    #[serde(default)]
+    acceptance: Option<String>,
 }
 
 /// The owner makes a project, active at once, worked alone by `solo` when it names a member.
@@ -774,6 +779,15 @@ async fn add_project(
     Json(req): Json<ProjectRequest>,
 ) -> Result<Json<serde_json::Value>, Failed> {
     let cap = cap_of(req.cap.as_ref())?;
+    // A policy that is neither is refused before anything is made (ADR 0149).
+    let acceptance = match req.acceptance.as_deref() {
+        None => None,
+        Some(name) => Some(Acceptance::read(name).ok_or_else(|| {
+            Failed(EngineError::Refused(Refusal::Scenario(
+                "acceptance is `owner` or `unverified`".to_owned(),
+            )))
+        })?),
+    };
     let hq = state.hq.clone();
     let id = blocking(move || {
         let id = hq.add_project(
@@ -785,6 +799,9 @@ async fn add_project(
         )?;
         if let Some(solo) = req.solo {
             hq.set_loop_solo(id, Some(MemberId(solo)))?;
+        }
+        if let Some(acceptance) = acceptance {
+            hq.set_loop_acceptance(id, acceptance)?;
         }
         Ok(id)
     })
@@ -3986,6 +4003,173 @@ mod tests {
         )
         .await;
         assert_ne!(status, StatusCode::OK, "no such loop");
+    }
+
+    /// ADR 0149: a project's acceptance policy is set next to `solo`; unset it is `owner`; a value
+    /// that is neither is refused and makes nothing.
+    #[tokio::test]
+    async fn a_project_is_made_with_an_acceptance_policy_that_defaults_to_owner() {
+        let st = state(false);
+        let lead = st.hq.hire("John Doe", 25, 2, 0).unwrap();
+        let goal = st
+            .hq
+            .set_goal("Keep the home lab healthy", "", Author::Owner)
+            .unwrap();
+        let app = app(st.clone());
+        let make = |extra: serde_json::Value| {
+            let app = app.clone();
+            let mut body =
+                json!({ "goal": goal.0, "title": "Solo", "lead": lead.0, "solo": lead.0 });
+            body.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            async move {
+                let res = app
+                    .oneshot(call("POST", "/v1/projects", Some(TOKEN), &body.to_string()))
+                    .await
+                    .unwrap();
+                (res.status(), json_of(res).await)
+            }
+        };
+        let (status, made) = make(json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{made}");
+        let unset = ProjectId(made["project"].as_i64().unwrap());
+        assert_eq!(st.hq.loop_acceptance(unset).unwrap().name(), "owner");
+        let (status, made) = make(json!({ "acceptance": "unverified" })).await;
+        assert_eq!(status, StatusCode::OK, "{made}");
+        let opted = ProjectId(made["project"].as_i64().unwrap());
+        assert_eq!(st.hq.loop_acceptance(opted).unwrap().name(), "unverified");
+        let projects = st.hq.store().projects().unwrap().len();
+        let (status, refused) = make(json!({ "acceptance": "whenever" })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refused}");
+        assert!(
+            refused["error"].as_str().unwrap().contains("acceptance"),
+            "{refused}"
+        );
+        assert_eq!(
+            st.hq.store().projects().unwrap().len(),
+            projects,
+            "nothing was made"
+        );
+    }
+
+    /// The card of work in review, as the engine puts it up, on a task of a solo loop.
+    fn a_card_to_accept(st: &State, status: endora_team::domain::TaskStatus) -> (TaskId, DeskId) {
+        let (_run, task) = a_turn_starts(st);
+        st.hq.store().set_task_status(task, status).unwrap();
+        let card = st
+            .hq
+            .store()
+            .add_desk(
+                "ready_to_read",
+                Some(task),
+                None,
+                None,
+                "Ready to read: Sort the cables",
+                1,
+            )
+            .unwrap();
+        (task, card)
+    }
+
+    /// ADR 0149: accept on the existing route closes work in review as `accepted_by_owner`; a
+    /// repeat is refused with the card already decided, and nothing changes.
+    #[tokio::test]
+    async fn the_owner_accepts_work_in_review_and_a_second_accept_is_refused() {
+        use endora_team::application::guard_ports::GuardStore;
+        use endora_team::domain::TaskStatus;
+        let st = state(false);
+        let (task, card) = a_card_to_accept(&st, TaskStatus::InReview);
+        let app = app(st.clone());
+        let decide = |body: &str| call("POST", &format!("/v1/desk/{}", card.0), Some(TOKEN), body);
+        let res = app
+            .clone()
+            .oneshot(decide(r#"{"decision":"accept"}"#))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            st.hq.store().task(task).unwrap().unwrap().status,
+            TaskStatus::Done
+        );
+        let closed = st.hq.store().closure(task).unwrap().unwrap();
+        assert_eq!(
+            (closed.closure.name(), closed.by.as_str()),
+            ("accepted_by_owner", "owner")
+        );
+        let again = app
+            .oneshot(decide(r#"{"decision":"accept"}"#))
+            .await
+            .unwrap();
+        assert_eq!(again.status(), StatusCode::CONFLICT, "decided once");
+        assert_eq!(st.hq.store().closure(task).unwrap().unwrap().at, closed.at);
+    }
+
+    /// ADR 0149: a card whose task is no longer in review refuses both choices with a body that
+    /// says why, leaves the card waiting and the task as it is.
+    #[tokio::test]
+    async fn a_stale_card_refuses_accept_and_send_back_and_changes_nothing() {
+        use endora_team::application::guard_ports::GuardStore;
+        use endora_team::domain::TaskStatus;
+        let st = state(false);
+        let (task, card) = a_card_to_accept(&st, TaskStatus::Doing);
+        let app = app(st.clone());
+        for (choice, said) in [
+            ("accept", "a task does not go from doing to done"),
+            ("send_back", "a task does not go from doing to doing"),
+        ] {
+            let res = app
+                .clone()
+                .oneshot(call(
+                    "POST",
+                    &format!("/v1/desk/{}", card.0),
+                    Some(TOKEN),
+                    &json!({ "decision": choice }).to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{choice}");
+            let body = json_of(res).await;
+            assert!(body["error"].as_str().unwrap().contains(said), "{body}");
+        }
+        assert_eq!(
+            st.hq.store().task(task).unwrap().unwrap().status,
+            TaskStatus::Doing
+        );
+        assert!(st.hq.store().closure(task).unwrap().is_none());
+        let desk = st.hq.store().desk().unwrap();
+        assert_eq!(
+            desk.iter().find(|d| d.id == card).unwrap().status,
+            "waiting"
+        );
+    }
+
+    /// ADR 0149: send_back returns work in review to doing and posts the owner's note.
+    #[tokio::test]
+    async fn the_owner_sends_work_in_review_back_with_a_note() {
+        use endora_team::domain::TaskStatus;
+        let st = state(false);
+        let (task, card) = a_card_to_accept(&st, TaskStatus::InReview);
+        let res = app(st.clone())
+            .oneshot(call(
+                "POST",
+                &format!("/v1/desk/{}", card.0),
+                Some(TOKEN),
+                r#"{"decision":"send_back","answer":"Label the blue ones too."}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            st.hq.store().task(task).unwrap().unwrap().status,
+            TaskStatus::Doing
+        );
+        let said = st.hq.store().thread(task).unwrap();
+        assert!(
+            said.iter()
+                .any(|p| p.author == "owner" && p.text == "Label the blue ones too."),
+            "{said:?}"
+        );
     }
 
     /// ADR 0142, amended 2026-11-01: `scripts/experiment.py start` sets the round's items; no

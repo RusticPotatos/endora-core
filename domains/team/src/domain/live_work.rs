@@ -169,6 +169,8 @@ pub enum State {
     Completed,
     /// Done, with nothing that verified it.
     DoneUnverified,
+    /// Done, and the owner accepted it (ADR 0149): neither verified nor unverified.
+    Accepted,
     /// Dropped or closed without doing it.
     Closed,
 }
@@ -184,6 +186,7 @@ impl State {
             Self::Unknown => "unknown",
             Self::Completed => "completed",
             Self::DoneUnverified => "done_unverified",
+            Self::Accepted => "accepted",
             Self::Closed => "closed",
         }
     }
@@ -365,6 +368,7 @@ fn milestones(seen: &Seen) -> Vec<Step> {
     if let Some(c) = &seen.closure {
         let (tone, label) = match (seen.status.as_str(), c.why.as_str()) {
             (_, "completed_unverified") => (Tone::Open, "Done, not verified".to_owned()),
+            (_, "accepted_by_owner") => (Tone::Ok, "Accepted by the owner".to_owned()),
             ("done", _) => (Tone::Ok, format!("Done: {}", c.said)),
             _ => (Tone::Calm, format!("Closed: {}", c.said)),
         };
@@ -512,6 +516,9 @@ fn state(seen: &Seen) -> (State, String, Option<Millis>) {
                 "Done, not verified: nothing on record confirmed it".into(),
                 None,
             );
+        }
+        if c.why == "accepted_by_owner" {
+            return (State::Accepted, "Done, accepted by the owner".into(), None);
         }
         if seen.status == "done" {
             return (

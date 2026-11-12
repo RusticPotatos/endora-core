@@ -44,6 +44,43 @@ pub enum DoneWhy {
     /// nobody to review (a loop worked alone, no branch): completed, not verified (ADR 0124,
     /// amended 2026-11-03). Never "met its criteria", which says the evidence was checked.
     CompletedUnverified,
+    /// Its criteria were satisfied and the owner accepted it on the card of work in review: an
+    /// authorized acceptance, which no member and no rule of HQ's can give (ADR 0149). Kept apart
+    /// from `CompletedUnverified`, which is never an acceptance.
+    AcceptedByOwner,
+}
+
+/// How a loop's finished work is accepted when nobody reviews it (ADR 0149).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Acceptance {
+    /// The default: the item waits in review on the owner's card to accept or send back; HQ never
+    /// closes it, and never invents a reviewer.
+    #[default]
+    Owner,
+    /// The owner's explicit opt-out: HQ closes the item itself once its checks passed, recorded as
+    /// completed, not verified (ADR 0124) and never shown or counted as accepted.
+    Unverified,
+}
+
+impl Acceptance {
+    /// Stable lowercase name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Owner => "owner",
+            Self::Unverified => "unverified",
+        }
+    }
+
+    /// A policy by name; `None` for a name that is neither.
+    #[must_use]
+    pub fn read(name: &str) -> Option<Self> {
+        match name.trim() {
+            "owner" => Some(Self::Owner),
+            "unverified" => Some(Self::Unverified),
+            _ => None,
+        }
+    }
 }
 
 /// Why work is dropped.
@@ -86,6 +123,7 @@ impl Closure {
             Self::Done(DoneWhy::Superseded) => "superseded",
             Self::Done(DoneWhy::NotNeeded) => "not_needed",
             Self::Done(DoneWhy::CompletedUnverified) => "completed_unverified",
+            Self::Done(DoneWhy::AcceptedByOwner) => "accepted_by_owner",
             Self::Dropped(DropWhy::Obsolete) => "obsolete",
             Self::Dropped(DropWhy::Duplicate(_)) => "duplicate",
             Self::Dropped(DropWhy::WontDo) => "wont_do",
@@ -112,6 +150,7 @@ impl Closure {
             Self::Done(DoneWhy::CompletedUnverified) => "it was completed, not verified: its \
                 evidence was cited, and nothing checked that it settles the item"
                 .to_owned(),
+            Self::Done(DoneWhy::AcceptedByOwner) => "the owner accepted it".to_owned(),
             Self::Dropped(DropWhy::Obsolete) => "what it was for is gone".to_owned(),
             Self::Dropped(DropWhy::Duplicate(of)) => format!("it duplicates #{of}"),
             Self::Dropped(DropWhy::WontDo) => "it will not be done".to_owned(),
@@ -136,6 +175,8 @@ impl Closure {
             (TaskStatus::Done, "not_needed") => Self::Done(DoneWhy::NotNeeded),
             // HQ's own, for work it closes with nothing checked; read back from what it kept.
             (TaskStatus::Done, "completed_unverified") => Self::Done(DoneWhy::CompletedUnverified),
+            // The owner's own, from the card of work in review; read back from what it kept.
+            (TaskStatus::Done, "accepted_by_owner") => Self::Done(DoneWhy::AcceptedByOwner),
             (TaskStatus::Dropped, "obsolete") => Self::Dropped(DropWhy::Obsolete),
             (TaskStatus::Dropped, "duplicate") => match duplicate_of {
                 Some(of) => Self::Dropped(DropWhy::Duplicate(of)),
@@ -256,6 +297,35 @@ mod tests {
             Err(not_a_closure(TaskStatus::Dropped)),
             "a drop is never completed"
         );
+    }
+
+    /// ADR 0149: work the owner accepted is its own reason, apart from met criteria and from a
+    /// completion nothing checked; a drop is never accepted; the policy reads by name.
+    #[test]
+    fn work_the_owner_accepted_is_its_own_reason_apart_from_unverified_and_met() {
+        let accepted = Closure::Done(DoneWhy::AcceptedByOwner);
+        assert_eq!(accepted.name(), "accepted_by_owner");
+        assert_eq!(accepted.plainly(), "the owner accepted it");
+        assert_eq!(
+            Closure::read(TaskStatus::Done, "accepted_by_owner", None),
+            Ok(accepted)
+        );
+        assert_eq!(
+            Closure::read(TaskStatus::Dropped, "accepted_by_owner", None),
+            Err(not_a_closure(TaskStatus::Dropped)),
+            "a drop is never accepted"
+        );
+        assert_ne!(accepted, Closure::Done(DoneWhy::CompletedUnverified));
+        assert_ne!(accepted, Closure::Done(DoneWhy::MetCriteria));
+        assert!(
+            !Closure::names(TaskStatus::Done).contains(&"accepted_by_owner"),
+            "a member cannot pick it: only the owner's decision records it"
+        );
+        assert_eq!(Acceptance::default(), Acceptance::Owner);
+        assert_eq!(Acceptance::read("owner"), Some(Acceptance::Owner));
+        assert_eq!(Acceptance::read("unverified"), Some(Acceptance::Unverified));
+        assert_eq!(Acceptance::read("whenever"), None);
+        assert_eq!(Acceptance::read(""), None);
     }
 
     #[test]

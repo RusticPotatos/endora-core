@@ -27,6 +27,9 @@ CREATE TABLE IF NOT EXISTS closures (
 CREATE TABLE IF NOT EXISTS unverified_closings (
     task INTEGER PRIMARY KEY REFERENCES tasks(id), by TEXT NOT NULL, at_ms INTEGER NOT NULL
 ) STRICT;
+CREATE TABLE IF NOT EXISTS owner_acceptances (
+    task INTEGER PRIMARY KEY REFERENCES tasks(id), by TEXT NOT NULL, at_ms INTEGER NOT NULL
+) STRICT;
 CREATE TABLE IF NOT EXISTS desk_attached (
     desk INTEGER NOT NULL REFERENCES desk(id), task INTEGER NOT NULL REFERENCES tasks(id),
     member INTEGER REFERENCES members(id), PRIMARY KEY (desk, task)
@@ -64,6 +67,19 @@ impl GuardStore for SqliteTeamStore {
             [c.task.0],
         )
         .map_err(backend)?;
+        conn.execute("DELETE FROM owner_acceptances WHERE task = ?1", [c.task.0])
+            .map_err(backend)?;
+        // An owner's acceptance is kept the same way, for the same reason (ADR 0149).
+        if c.closure == Closure::Done(DoneWhy::AcceptedByOwner) {
+            conn.execute("DELETE FROM closures WHERE task = ?1", [c.task.0])
+                .map_err(backend)?;
+            conn.execute(
+                "INSERT INTO owner_acceptances (task, by, at_ms) VALUES (?1, ?2, ?3)",
+                params![c.task.0, c.by, c.at],
+            )
+            .map_err(backend)?;
+            return Ok(());
+        }
         if c.closure == Closure::Done(DoneWhy::CompletedUnverified) {
             conn.execute("DELETE FROM closures WHERE task = ?1", [c.task.0])
                 .map_err(backend)?;
@@ -112,6 +128,25 @@ impl GuardStore for SqliteTeamStore {
             .optional()
             .map_err(backend)?;
         let Some((status, why, duplicate_of, successor, by, at)) = row else {
+            let accepted = conn
+                .query_row(
+                    "SELECT by, at_ms FROM owner_acceptances WHERE task = ?1",
+                    [task.0],
+                    |r| {
+                        Ok(Closed {
+                            task,
+                            closure: Closure::Done(DoneWhy::AcceptedByOwner),
+                            successor: None,
+                            by: r.get(0)?,
+                            at: r.get(1)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(backend)?;
+            if accepted.is_some() {
+                return Ok(accepted);
+            }
             return conn
                 .query_row(
                     "SELECT by, at_ms FROM unverified_closings WHERE task = ?1",
@@ -268,6 +303,66 @@ mod tests {
             store.closure(task).unwrap().unwrap().closure,
             Closure::Done(DoneWhy::CompletedUnverified),
             "the newest closing is the one read"
+        );
+    }
+
+    /// ADR 0149: an owner's acceptance is kept apart from `closures` too, so a build from before
+    /// it was named never meets a reason it cannot read; this build reads it back with who and
+    /// when, and a closing kept before it (task 5's or 10's completed-unverified one, a met-criteria
+    /// one) reads exactly as it did.
+    #[test]
+    fn an_acceptance_by_the_owner_is_kept_where_an_older_build_never_misreads_it() {
+        use crate::domain::closure::DoneWhy;
+        let (store, task, _) = store_with_a_task();
+        let closed = |closure, by: &str, at| Closed {
+            task,
+            closure,
+            successor: None,
+            by: by.to_owned(),
+            at,
+        };
+        store
+            .record_closure(&closed(
+                Closure::Done(DoneWhy::CompletedUnverified),
+                "endora",
+                5,
+            ))
+            .unwrap();
+        assert_eq!(
+            store.closure(task).unwrap().unwrap().closure,
+            Closure::Done(DoneWhy::CompletedUnverified),
+            "an earlier unverified closing reads as it did"
+        );
+        store
+            .record_closure(&closed(Closure::Done(DoneWhy::AcceptedByOwner), "owner", 9))
+            .unwrap();
+        let read = store.closure(task).unwrap().unwrap();
+        assert_eq!(read.closure, Closure::Done(DoneWhy::AcceptedByOwner));
+        assert_eq!((read.by.as_str(), read.at), ("owner", 9), "who and when");
+        let count = |table: &str| -> i64 {
+            store
+                .conn()
+                .unwrap()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(
+            count("closures"),
+            0,
+            "an older build finds no reason it cannot read"
+        );
+        assert_eq!(
+            count("unverified_closings"),
+            0,
+            "the acceptance replaced the unverified closing"
+        );
+        store
+            .record_closure(&closed(Closure::Done(DoneWhy::MetCriteria), "endora", 11))
+            .unwrap();
+        assert_eq!(count("owner_acceptances"), 0, "a later closing replaces it");
+        assert_eq!(
+            store.closure(task).unwrap().unwrap().closure,
+            Closure::Done(DoneWhy::MetCriteria)
         );
     }
 

@@ -6,6 +6,7 @@
 
 use super::{Done, Engine, EngineError};
 use crate::application::ports::{Clock, TeamStore, WorkerAdapter};
+use crate::domain::closure::Acceptance;
 use crate::domain::{
     Brain, Member, MemberId, Millis, ProjectId, ProjectStatus, Refusal, Task, TaskId, TaskStatus,
     WakeReason,
@@ -77,6 +78,12 @@ fn items_key(project: ProjectId) -> String {
 /// when the team works it.
 fn solo_key(project: ProjectId) -> String {
     format!("loop_solo:{}", project.0)
+}
+
+/// Where a loop's acceptance policy is kept (ADR 0149): absent for every loop made before it
+/// existed, which reads as the default, `owner`.
+fn acceptance_key(project: ProjectId) -> String {
+    format!("loop_acceptance:{}", project.0)
 }
 
 /// Whether an item is in hand: given to a member, and not yet in review or finished.
@@ -242,6 +249,36 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
         Ok(())
     }
 
+    /// The owner sets how a loop's work is accepted when nobody reviews it (ADR 0149).
+    ///
+    /// # Errors
+    /// [`EngineError::Unknown`] for a project that does not exist; a store failure.
+    pub fn set_loop_acceptance(&self, project: ProjectId, policy: Acceptance) -> Done<()> {
+        let _held = self.held();
+        self.project(project)?;
+        self.store
+            .set_setting(&acceptance_key(project), policy.name())?;
+        Ok(())
+    }
+
+    /// How a loop's work is accepted: what the owner set, `owner` if nothing was (so every loop
+    /// from before the policy existed waits for the owner).
+    pub fn loop_acceptance(&self, project: ProjectId) -> Done<Acceptance> {
+        Ok(self
+            .store
+            .setting(&acceptance_key(project))?
+            .and_then(|v| Acceptance::read(&v))
+            .unwrap_or_default())
+    }
+
+    /// The acceptance policy of the loop `task` is an item of; `owner` for work outside one.
+    pub(super) fn acceptance_of(&self, task: &Task) -> Done<Acceptance> {
+        match task.project {
+            Some(project) => self.loop_acceptance(project),
+            None => Ok(Acceptance::default()),
+        }
+    }
+
     /// The member who works a loop alone, if the owner named one.
     pub fn loop_solo(&self, project: ProjectId) -> Done<Option<MemberId>> {
         Ok(self
@@ -283,12 +320,15 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             self.the_home_labs(&item)?,
         );
         let outside = self.outside_repo_of_task(item.id)?.is_some();
+        let route = match self.acceptance_of(&item)? {
+            Acceptance::Unverified => alone_route(gate, outside).to_owned(),
+            Acceptance::Owner => alone_route_owner(gate, outside),
+        };
         Ok(format!(
             "You work this loop alone: nobody reviews your item and nobody takes it over. Check \
-             its criteria yourself. {} Three failures do not take it a rank up: after \
+             its criteria yourself. {route} Three failures do not take it a rank up: after \
              {FAILURES_ALONE} it is blocked; if it cannot be done, block it yourself with the \
              reason.\n",
-            alone_route(gate, outside)
         ))
     }
 
@@ -1179,6 +1219,28 @@ pub(super) fn alone_route(gate: bool, outside: bool) -> &'static str {
     "This item needs no check of HQ's first: no gate stands between your work and setting it \
      ready. When it meets its criteria (and any branch is submitted), setting it ready \
      (set_status in_review) closes it, with no review."
+}
+
+/// What setting an item ready does in a loop whose work the owner accepts (ADR 0149): the item
+/// is not closed by it, and waits in review for the owner.
+pub(super) fn alone_route_owner(gate: bool, outside: bool) -> String {
+    let wait = "Setting it ready (set_status in_review) puts it on the owner's desk: it is done \
+                only when the owner accepts it, and the owner may send it back to you with a \
+                note.";
+    if gate && !outside {
+        return format!("Once HQ's check of your newest submission has passed, {wait}");
+    }
+    if outside {
+        return format!(
+            "This item's repository is outside the lab, so no check of the lab's applies to it. \
+             Submit any changes with repo_submit before setting it ready; if none were needed, \
+             do not create a branch merely to close it. {wait} A submitted branch is kept on \
+             the node for judging, never pushed or deployed."
+        );
+    }
+    format!(
+        "This item needs no check of HQ's first. When it meets its criteria (and any branch is submitted), {wait}"
+    )
 }
 
 #[cfg(test)]

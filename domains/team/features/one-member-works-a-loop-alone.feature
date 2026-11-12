@@ -23,6 +23,7 @@ Feature: One member works a loop alone
     And the loop "ansible-nas" for the goal "Keep the fork tidy"
     And the loop "solo arm"
     And the owner sets the loop "solo arm" to be worked by Sol alone
+    And the owner lets the loop "solo arm" close its work unverified
 
   Scenario: The item goes to the named member, and is done when HQ's checks pass and she sets it ready
     The answer to setting it ready says what the item is now: in run 5316 it said "in_review" of

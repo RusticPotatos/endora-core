@@ -138,6 +138,30 @@ fn a_closed_item_without_verification_says_done_unverified_never_completed() {
     assert!(map.said.contains("not verified"), "{}", map.said);
 }
 
+/// ADR 0149: work the owner accepted is its own state, never "done, not verified" and never
+/// "done, verified against its criteria".
+#[test]
+fn a_closed_item_the_owner_accepted_says_so_and_is_neither_verified_nor_unverified() {
+    let mut seen = worked();
+    seen.closure = Some(ClosureSeen {
+        why: "accepted_by_owner".into(),
+        said: "the owner accepted it".into(),
+        at: 0,
+    });
+    let map = live_map(&seen);
+    assert_eq!(map.state, State::Accepted);
+    assert_eq!(map.state.name(), "accepted");
+    assert_eq!(map.said, "Done, accepted by the owner");
+    assert!(!map.said.contains("not verified"), "{}", map.said);
+    assert!(
+        map.steps
+            .iter()
+            .any(|s| s.kind == "closed" && s.label == "Accepted by the owner"),
+        "{:?}",
+        map.steps
+    );
+}
+
 #[test]
 fn a_dropped_item_is_closed_and_says_why() {
     let mut seen = worked();

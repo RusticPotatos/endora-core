@@ -17,6 +17,7 @@ Feature: The Live Work map
     And the loop "ansible-nas" for the goal "Keep the fork tidy"
     And the loop "solo arm"
     And the owner sets the loop "solo arm" to be worked by Sol alone
+    And the owner lets the loop "solo arm" close its work unverified
 
   Scenario: A question waiting on the owner comes first, and leaves once answered
     Given the loop "ansible-nas" has the item "Raise sonarr's memory"
