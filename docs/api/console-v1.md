@@ -96,10 +96,14 @@ review: `accept`, `send_back`, `read` and `not_now`. `words` is the optional not
 - Refusals, `400` with `{"error"}` and nothing recorded, the card still waiting: the task is no
   longer `in_review` (`a task does not go from doing to done`, or `... to doing` for
   `send_back`); the task is gated and its gate has not passed (`the gate has not passed`).
-  A card already decided is `409` (`this task is over`).
+  A card whose task is no longer in review (for instance another card of a task already done)
+  gets the same `400`; an unknown choice is `400` (`no such decision for this item`).
+  A repeated `accept` is not an error: see Idempotent below.
 
 Idempotent: the same choice again (a double press, a retry after a dropped connection) changes
-nothing and answers the stored record with `"duplicate": true`. A different choice for an item
+nothing and answers the stored record with `"duplicate": true`, whether the repeat carries the
+same request id, a new one or none (`accept` twice is `200`, `duplicate: true`, the first
+decision, the task and its closure unchanged, no second post). A different choice for an item
 already answered, here or in another client, is `409` with what is recorded. A choice the item
 does not allow is refused by HQ (`400`), and nothing is recorded. If HQ cannot be reached the
 record stays at **requested** and the answer is `502`; sending the same answer again finishes

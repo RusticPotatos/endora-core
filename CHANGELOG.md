@@ -13,7 +13,11 @@ tagged release.
   could review it.** The `ready_to_read` card of work in review gains `accept` (closes it `done`
   as the new closure `accepted_by_owner`, refused for a stale card or an unpassed gate) and
   `send_back` (back to `doing`, the owner's note posted, the worker woken), through the existing
-  `POST /v1/decisions/{id}`. No new route, desk kind or approval subsystem.
+  `POST /v1/decisions/{id}`. No new route, desk kind or approval subsystem. A repeat of an accept
+  is not refused on that route: it answers `200` with the first decision and `duplicate: true` and
+  changes nothing, as for any decided card (HQ's own route says `409`). A card whose task is no
+  longer in review is `400` with the reason. Other waiting cards of a task that closes are not
+  settled (existing behaviour, recorded in the ADR).
 - **A per-project `acceptance` policy**, set next to `solo` on `POST /v1/hq/projects`: `owner` (the
   default) or `unverified` (the explicit opt-out that keeps HQ closing a solo item as
   `completed_unverified`, never shown as accepted).

@@ -48,7 +48,19 @@ Three candidates were weighed:
    - `send_back` moves the task from `in_review` to `doing`, posts the note, emits the feed's
      `task.sent_back` (`via: "owner"`) and wakes the holder with `WakeReason::SentBack`, as a
      reviewer's send-back does. It refuses a stale card the same way.
-   - A card decided once is decided once: a second `accept` is `409` (`this task is over`).
+   - A card decided once is decided once, and a repeat does nothing twice. At the engine (and HQ's
+     own `/v1/desk/{id}`) a second `accept` is refused `409` (`this task is over`). On Core's
+     `POST /v1/decisions/{id}`, the route the owner and Console use, the desk's existing
+     idempotency answers first: a repeat of the same choice, whether it replays the first request
+     id, carries a new one or none, is `200` with the first decision and `duplicate: true`, and
+     changes nothing (no second closing, no second post, HQ not asked again). A *different*
+     choice for a card already answered is `409` with what is recorded. This is the desk's
+     behaviour for any decided card, not specific to acceptance; an accept that already happened
+     must not fail or double-apply. Pinned by `console_tests.rs`
+     (`a_second_accept_with_a_new_request_id_answers_the_first_decision_and_changes_nothing`).
+   - A card whose task is no longer in review (another card of a done task) is `400` with HQ's
+     reason, `accept is not a choice this item allows (a task does not go from done to done)`;
+     an unknown choice is `400` too.
 2. **A per-project acceptance policy**, `acceptance`, set on project creation next to `solo`:
    - `owner` (the default, and what every loop made before this reads as): a solo item set ready
      stays `in_review`, and the engine posts the same card. HQ never closes it.
@@ -81,7 +93,24 @@ Four outcomes stay apart in tests and in what the owner reads: **completed** (re
 - **No new subsystem, no new route, no new desk kind.** The Console contract gains choices, a
   closure reason and two project fields, additively within v1.
 - **History is unchanged.** Existing closures read as they did; tasks closed `completed_unverified`
-  stay so. A rollback to an older build reads the data, and finds no closing for an accepted item.
+  stay so.
+- **Rollback is conservative and silent.** Observed on the isolated stack: the older build (0.1.0)
+  on the same data loads without error and reads an accepted task as done with the closure
+  unreadable (null); its live view says "Done, not verified". The acceptance is not lost (its
+  sibling table is still there), only not shown; nothing reads as more accepted than it was.
+- **Open: other cards of a closed task stay pending.** HQ has no mechanism that settles a task's
+  other open desk cards when the task closes. Only a `stuck` card clears itself when its work
+  moves (`guards_tick`), and `put_away` settles cards when a goal is retired or a project closed
+  (what it was for is gone). Closing by review (`met_criteria`), by the opt-out
+  (`completed_unverified`) and now by acceptance leave a second waiting `ready_to_read` card
+  waiting, and the task's live view still lists it under attention; the old card of a task done
+  before this change stays too. Pre-existing, observed on the isolated stack with task 9 (card 8)
+  and task 5, and pinned as found by
+  `closing_by_review_leaves_a_waiting_ready_to_read_card_as_it_found_it`. Not fixed here: no
+  mechanism is invented in this change. The card that was answered is decided, so a single card
+  is never left stale.
+- **Open: the project snapshot does not show `solo` or `acceptance`.** `GET /v1/hq` shows neither
+  on a project, in this build or the one before. Showing them is a contract change, not made here.
 - **The self-review is rejected on purpose.** `reviewer_among` is unchanged.
 - **Gates, privacy and release gates are untouched.** Accepting gated work still needs its gate
   to have passed; the push to the fork is still offered, and still the owner's to approve.
