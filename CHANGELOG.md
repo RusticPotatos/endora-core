@@ -17,8 +17,17 @@ tagged release.
   comes in brief) renders as before.
 - **The "needs something of you" card's buttons say what they do.** "Done" is now "I've set it" and
   "Dismiss" is "Not needed", and the help line says "Not needed" closes the request without anything
-  being set. The decisions sent are unchanged (`seen`, `dismiss`). The card's own sentence, from the
-  node ("then mark this seen", the raw variable name), is unchanged and is for a later change.
+  being set. The decisions sent are unchanged (`seen`, `dismiss`).
+- **The "needs something of you" card's sentence agrees with those buttons.** The node's text used
+  to end "Set it where your own values live (the vault), then mark this seen", and there is no "seen"
+  button. It now opens with what the card is: "An accepted change reads values that are not set yet.
+  Press I've set it once they are set, or Not needed if the thing is not used (for example a role
+  that is not deployed)." The branch, the variable names and their paths follow, for the owner's
+  reference, with "Set each where your own values live (the vault)". Wording only.
+- **The "ready to read" card of a solo loop says the owner reviews it.** It said "(Sol works this
+  loop alone; nobody reviews it)" beside an Accept button, which read as a warning that no one looks
+  at the work. It now says "(Sol works this loop alone: you review it, nobody else does)" (ADR 0149).
+  Wording only; the card, its choices and counts are unchanged.
 
 ### Added (runner-down visibility)
 

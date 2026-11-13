@@ -52,6 +52,7 @@ Feature: Accepted work reaches the fork without a card
     When Rae passes "Add the drift check" on a reading of her own
     And the node pushes "hq/task-1-add-the-drift-check", finding it needs "vault_drift_token" at "roles/drift/defaults/main.yml"
     Then the owner's desk holds one "needs_owner" card saying "vault_drift_token (roles/drift/defaults/main.yml)"
+    And the owner's desk holds one "needs_owner" card saying "Press I've set it once they are set, or Not needed if the thing is not used"
 
   Scenario: Merging develop is off while the rounds run, so a pushed branch stays listed
     When Rae passes "Add the drift check" on a reading of her own

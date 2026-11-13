@@ -128,5 +128,9 @@ Four outcomes stay apart in tests and in what the owner reads: **completed** (re
 - **The self-review is rejected on purpose.** `reviewer_among` is unchanged.
 - **Gates, privacy and release gates are untouched.** Accepting gated work still needs its gate
   to have passed; the push to the fork is still offered, and still the owner's to approve.
+- **The card's reason says who reviews.** On the owner-acceptance card of a solo loop the engine's
+  reason reads "<name> works this loop alone: you review it, nobody else does", not "nobody reviews
+  it", which beside an Accept button read as a warning. Pinned by the scenario "The card says the
+  owner reviews it, not that nobody does".
 - The standalone Console (separate repository) must offer the two choices and show the reason;
   see the finding in the change's report. It is not edited here.

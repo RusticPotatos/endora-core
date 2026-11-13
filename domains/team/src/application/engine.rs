@@ -1487,7 +1487,7 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             let name = self.member(alone)?.name;
             return self.ask_owner_to_decide(
                 task,
-                &format!("{name} works this loop alone; nobody reviews it"),
+                &format!("{name} works this loop alone: you review it, nobody else does"),
             );
         }
         // In the loops, a member at Haiku's rank or below reviews it, when there is one (ADR

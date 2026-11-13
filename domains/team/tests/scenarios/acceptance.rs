@@ -84,6 +84,14 @@ fn one_card_to_accept(w: &mut Office, title: String) {
     assert_eq!(cards.len(), 1, "{cards:?}");
 }
 
+#[then(expr = "the card to accept {string} says {string} and not {string}")]
+fn the_card_says(w: &mut Office, title: String, said: String, not_said: String) {
+    let cards = w.waiting_cards_about(&title);
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    assert!(cards[0].text.contains(&said), "{}", cards[0].text);
+    assert!(!cards[0].text.contains(&not_said), "{}", cards[0].text);
+}
+
 #[when(expr = "the owner accepts {string}")]
 #[given(expr = "the owner accepts {string}")]
 fn owner_accepts(w: &mut Office, title: String) {

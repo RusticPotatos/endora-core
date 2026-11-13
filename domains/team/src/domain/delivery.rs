@@ -163,8 +163,10 @@ pub fn held_said(branch: &str, found: &[Found]) -> String {
 #[must_use]
 pub fn needs_said(branch: &str, needs: &[Found]) -> String {
     format!(
-        "{branch} needs something of you before it is deployed: {}. Set it where your own \
-         values live (the vault), then mark this seen.",
+        "An accepted change reads values that are not set yet. Press I've set it once they are \
+         set, or Not needed if the thing is not used (for example a role that is not deployed). \
+         For your reference, {branch} needs these before it is deployed: {}. Set each where \
+         your own values live (the vault).",
         listed(needs)
     )
 }
@@ -241,6 +243,40 @@ mod tests {
         for s in [MERGED, "offered", "approved", "pushed", "submitted"] {
             assert!(!waiting(s), "{s}");
         }
+    }
+
+    #[test]
+    fn a_needs_card_says_what_it_is_in_the_words_of_its_buttons_and_keeps_the_names() {
+        let needs = [Found {
+            what: "vault_drift_token".to_owned(),
+            at: "roles/drift/defaults/main.yml".to_owned(),
+        }];
+        let said = needs_said("hq/task-1-x", &needs);
+        // The plain sentence comes first, and uses the buttons' own words ("I've set it", "Not
+        // needed"), so the card agrees with them.
+        assert!(
+            said.starts_with("An accepted change reads values that are not set yet."),
+            "{said}"
+        );
+        assert!(
+            said.contains("Press I've set it once they are set"),
+            "{said}"
+        );
+        assert!(
+            said.contains("Not needed if the thing is not used"),
+            "{said}"
+        );
+        assert!(said.contains("a role that is not deployed"), "{said}");
+        assert!(!said.contains("mark this seen"), "{said}");
+        // The names and paths stay, for the owner's reference, after the sentence.
+        assert!(said.contains("hq/task-1-x"), "{said}");
+        assert!(
+            said.contains("vault_drift_token (roles/drift/defaults/main.yml)"),
+            "{said}"
+        );
+        let plain = said.find("Press I've set it").expect("the sentence");
+        let name = said.find("vault_drift_token").expect("the name");
+        assert!(plain < name, "{said}");
     }
 
     #[test]

@@ -29,6 +29,15 @@ Feature: The owner accepts work that nobody reviews
     And the owner's desk holds one card to accept "Settle the VPN restart"
     And no member is asked to review "Settle the VPN restart"
 
+  # The card sits beside an Accept button, so its reason must not read as a warning that no one
+  # looks at the work: the owner is the reviewer.
+  Scenario: The card says the owner reviews it, not that nobody does
+    Given the loop "solo arm" has the item "Settle the VPN restart": "Is the 2-hourly restart still needed?"
+    And a tick passes
+    When Sol takes "Settle the VPN restart" and reads gluetun's logs: "gluetun: healthy"
+    And Sol asks for review of "Settle the VPN restart", citing her reading
+    Then the card to accept "Settle the VPN restart" says "Sol works this loop alone: you review it, nobody else does" and not "nobody reviews it"
+
   Scenario: The owner accepts it: done, closed as accepted by the owner, who and when recorded
     Given the loop "solo arm" has the item "Settle the VPN restart": "Is the 2-hourly restart still needed?"
     And a tick passes
