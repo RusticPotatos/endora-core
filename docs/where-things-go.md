@@ -82,6 +82,12 @@ here and delete the routes only they used.
   `/v1/hq/projects/{id}/repo`; the rule of which addresses may be named is the kernel's
   (`shared/kernel/src/lab.rs`, `outside_repo`), and the node's mirrors of such repositories sit
   in its data folder under `outside-repos/`, beside the fork's. No screen yet.
+- Whether a runner is asking HQ for turns is **one chip in the chips on every HQ place**
+  (`hqRunnerChip` in `47-hq.js`), shown only when it is not (`stale`, or `never` with turns
+  waiting). HQ notes the time of each signed `/v1/runner/*` request in memory
+  (`RemoteRunner::seen`, `domains/team/src/infrastructure/remote.rs`) and says the state in its
+  snapshot's `runner` object (`app/hq/src/api.rs`), which the node passes on as `/v1/hq`; the rule
+  and its one threshold are `domains/team/src/domain/runner_sight.rs`. No screen of its own.
 - HQ opens on the **agents map** ([ADR 0143](adr/0143-hq-opens-on-the-agents-map.md), the
   owner's decision M6, 7 Nov 2026) on every device, after a reload, from the menu and from any
   old route; nothing remembers another landing. The map is the shell: the bar (Give work, the kill

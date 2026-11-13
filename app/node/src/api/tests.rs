@@ -1335,6 +1335,26 @@ async fn hq_that_is_not_set_up_says_so() {
     assert_eq!(json_body(res).await["configured"], false);
 }
 
+/// The runner's state is HQ's to know and the owner's screen's to show: the node passes it on
+/// as HQ said it, so a runner that has gone quiet reaches the Console. (A pin, not a red test:
+/// the node already forwards every field of HQ's snapshot.)
+#[tokio::test]
+async fn the_hq_summary_carries_the_runner_state_through() {
+    let (url, seen) =
+        one_hq_answer(r#"{"desk":[],"runner":{"state":"stale","last_poll_secs":300,"waiting":1}}"#);
+    let state = test_state().with_hq(endora_infrastructure::HqClient::new(
+        &url,
+        "a-token-of-at-least-thirty-two-characters",
+    ));
+    let res = app(state).oneshot(get("/v1/hq")).await.unwrap();
+    assert_eq!(res.status(), StatusCode::OK);
+    seen.join().unwrap();
+    let body = json_body(res).await;
+    assert_eq!(body["runner"]["state"], "stale");
+    assert_eq!(body["runner"]["last_poll_secs"], 300);
+    assert_eq!(body["runner"]["waiting"], 1);
+}
+
 #[tokio::test]
 async fn the_kill_switch_goes_to_hq_signed_and_into_endoras_own_record() {
     let (url, seen) = one_hq_answer(r#"{"stopped":true}"#);

@@ -279,10 +279,28 @@ async fn health(Extract(state): Extract<State>) -> Json<serde_json::Value> {
     }))
 }
 
+/// What the owner's screen says of the runner: whether it is asking for turns (`up`, `stale`
+/// or `never`, with the seconds since it last did) and how many turns wait for one to take
+/// them. All runners count as one: they share a token, so HQ cannot tell them apart. `null`
+/// with the demo on, when HQ runs no real turns and no runner is wanted.
+fn runner_said(state: &State) -> serde_json::Value {
+    let Some(remote) = state.hq.runner().remote() else {
+        return serde_json::Value::Null;
+    };
+    let sight =
+        endora_team::domain::runner_sight::runner_sight(remote.last_seen(), SystemClock.now());
+    json!({
+        "state": sight.state.name(),
+        "last_poll_secs": sight.last_poll_secs,
+        "waiting": remote.waiting(),
+    })
+}
+
 async fn snapshot(Extract(state): Extract<State>) -> Result<Json<serde_json::Value>, Failed> {
     let hq = state.hq.clone();
     let mut snap = blocking(move || hq.snapshot()).await?;
     snap["tick_seconds"] = json!(state.tick_seconds);
+    snap["runner"] = runner_said(&state);
     Ok(Json(snap))
 }
 
@@ -2841,6 +2859,103 @@ mod tests {
         ("GET", "/v1/runner/stops", ""),
         ("POST", "/v1/runner/sandboxes", r#"{"items":[1]}"#),
     ];
+
+    /// The snapshot's `runner` object, as the owner's screen reads it.
+    async fn runner_sight(app: &Router) -> serde_json::Value {
+        let res = app
+            .clone()
+            .oneshot(call("GET", "/v1/snapshot", Some(TOKEN), ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        json_of(res).await["runner"].clone()
+    }
+
+    #[tokio::test]
+    async fn the_snapshot_says_never_until_a_runner_has_asked() {
+        let st = state(false);
+        let app = app(st.clone());
+        let sight = runner_sight(&app).await;
+        assert_eq!(sight["state"], "never");
+        assert_eq!(sight["last_poll_secs"], json!(null));
+        assert_eq!(sight["waiting"], 0);
+        let unsigned = app
+            .clone()
+            .oneshot(call(
+                "POST",
+                "/v1/runner/next",
+                Some(TOKEN),
+                r#"{"free":1}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(unsigned.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            runner_sight(&app).await["state"],
+            "never",
+            "a request the door refused is not a runner asking"
+        );
+    }
+
+    #[tokio::test]
+    async fn any_signed_runner_call_makes_the_runner_up() {
+        for (method, uri, body) in RUNNER_ROUTES {
+            let st = state(false);
+            let app = app(st.clone());
+            app.clone()
+                .oneshot(call(method, uri, Some(RUNNER), body))
+                .await
+                .unwrap();
+            let sight = runner_sight(&app).await;
+            assert_eq!(sight["state"], "up", "{uri}: {sight}");
+            assert!(
+                sight["last_poll_secs"].as_i64().is_some_and(|s| s <= 2),
+                "{uri}: {sight}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_runner_quiet_past_the_threshold_is_stale_and_work_waiting_for_it_is_counted() {
+        let st = state(false);
+        a_turn_starts(&st);
+        let app = app(st.clone());
+        let quiet_ms = (endora_team::domain::runner_sight::STALE_AFTER_SECS + 30) * 1_000;
+        st.hq
+            .runner()
+            .remote()
+            .unwrap()
+            .seen(SystemClock.now() - quiet_ms);
+        let sight = runner_sight(&app).await;
+        assert_eq!(sight["state"], "stale");
+        assert!(
+            sight["last_poll_secs"]
+                .as_i64()
+                .is_some_and(|s| s >= quiet_ms / 1_000),
+            "{sight}"
+        );
+        assert_eq!(sight["waiting"], 1, "the started turn waits for a runner");
+        let polled = app
+            .clone()
+            .oneshot(call(
+                "POST",
+                "/v1/runner/next",
+                Some(RUNNER),
+                r#"{"free":1}"#,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(polled.status(), StatusCode::OK);
+        let sight = runner_sight(&app).await;
+        assert_eq!(sight["state"], "up", "a poll brings it back");
+        assert_eq!(sight["waiting"], 0, "and it took the turn");
+    }
+
+    #[tokio::test]
+    async fn the_simulated_runner_has_no_runner_to_report() {
+        let app = app(state(true));
+        assert_eq!(runner_sight(&app).await, json!(null));
+    }
 
     #[tokio::test]
     async fn only_the_runners_token_opens_the_runners_door() {

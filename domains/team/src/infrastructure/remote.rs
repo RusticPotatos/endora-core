@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::application::ports::{RunContext, StartError, WorkerAdapter};
+use crate::domain::work::Millis;
 use crate::domain::{Exit, Liveness, RunId};
 
 /// How many turns a runner takes at once unless HQ is told otherwise.
@@ -49,6 +50,10 @@ struct State {
     /// The next lease to give. Seeded from the clock, so an HQ that restarts never hands out
     /// a lease an earlier one already gave.
     next_lease: u64,
+    /// When a runner last made any signed request, in HQ's memory only: HQ cannot tell one
+    /// runner from another (they share a token), so this is the latest of all of them, and it
+    /// is empty until the first request after HQ starts.
+    last_seen: Option<Millis>,
 }
 
 /// A runner on another host, which asks HQ for the turns to start.
@@ -86,6 +91,24 @@ impl RemoteRunner {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Notes that a runner made a signed request at `at`: any call to its door, a poll for
+    /// turns or for stops alike, since a runner at capacity asks only for stops. Never goes
+    /// back in time.
+    pub fn seen(&self, at: Millis) {
+        let mut state = self.state();
+        state.last_seen = state.last_seen.max(Some(at));
+    }
+
+    /// When a runner last made a signed request; `None` before the first since HQ started.
+    pub fn last_seen(&self) -> Option<Millis> {
+        self.state().last_seen
+    }
+
+    /// How many turns wait for a runner to take them.
+    pub fn waiting(&self) -> usize {
+        self.state().waiting.len()
     }
 
     /// The oldest turn waiting to start, handed out now with its lease; `None` when none
@@ -225,6 +248,37 @@ mod tests {
             told: "You are the developer.".to_owned(),
             token: token.to_owned(),
         }
+    }
+
+    #[test]
+    fn a_runner_never_heard_from_has_no_last_request_and_no_turns_waiting() {
+        let runner = RemoteRunner::default();
+        assert_eq!(runner.last_seen(), None);
+        assert_eq!(runner.waiting(), 0);
+    }
+
+    #[test]
+    fn the_latest_request_is_the_one_kept() {
+        let runner = RemoteRunner::default();
+        runner.seen(5_000);
+        runner.seen(9_000);
+        assert_eq!(runner.last_seen(), Some(9_000));
+    }
+
+    #[test]
+    fn turns_waiting_to_be_taken_are_counted_until_handed_out_or_stopped() {
+        let runner = RemoteRunner::default();
+        runner.start(&turn(1, "a")).unwrap();
+        runner.start(&turn(2, "b")).unwrap();
+        assert_eq!(runner.waiting(), 2);
+        runner.next().unwrap();
+        assert_eq!(runner.waiting(), 1, "one handed out is no longer waiting");
+        runner.stop(RunId(2), GRACE);
+        assert_eq!(
+            runner.waiting(),
+            0,
+            "one stopped before it was taken is dropped"
+        );
     }
 
     #[test]

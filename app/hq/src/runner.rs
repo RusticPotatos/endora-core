@@ -20,7 +20,8 @@ use endora_team::application::ports::{StoreError, TeamStore as _};
 use endora_team::domain::{Exit, RunId, TaskId};
 use endora_team::infrastructure::RemoteRunner;
 
-use crate::api::{State, bearer, same};
+use crate::api::{State, SystemClock, bearer, same};
+use endora_team::application::ports::Clock as _;
 use endora_team::application::wing_ports::WingStore;
 
 /// The runner's routes.
@@ -49,6 +50,11 @@ async fn signed_by_the_runner(
             Json(json!({ "error": "not signed by the runner" })),
         )
             .into_response();
+    }
+    // Any signed call is a runner alive, a poll for stops included: one at capacity asks for
+    // nothing else. A refused call returned above and does not count.
+    if let Some(remote) = state.hq.runner().remote() {
+        remote.seen(SystemClock.now());
     }
     next.run(request).await
 }

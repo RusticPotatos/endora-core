@@ -37,6 +37,7 @@ pub mod record;
 pub mod relevance;
 pub mod review;
 pub mod routines;
+pub mod runner_sight;
 pub mod runs;
 pub mod runtime;
 pub mod situations;

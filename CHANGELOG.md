@@ -7,6 +7,19 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (runner-down visibility)
+
+- **HQ says when no runner is asking for turns.** HQ notes, in memory, the time of the last signed
+  `/v1/runner/*` request (a poll for turns or for stops), and `GET /v1/hq` gains
+  `runner: { state: "up" | "stale" | "never", last_poll_secs, waiting }`: `stale` after 90 s without
+  one (the runner asks every 2 s), `never` until the first since HQ started, `waiting` the turns
+  started and not yet taken. `null` with the demo on. Several runners count as one (they share a
+  token); per-runner identity is a known limit. The threshold is
+  `domains/team/src/domain/runner_sight.rs::STALE_AFTER_SECS`.
+- **The web console shows it as a chip beside the HQ chips**: nothing while the runner is up; red
+  "Runner quiet for 5 min" when it is stale; "No runner has asked since HQ started" when never,
+  red only when turns are waiting for one. See `docs/api/console-v1.md`.
+
 ### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))
 
 - **A task is done because its criteria were met and the owner accepted it, not because nobody

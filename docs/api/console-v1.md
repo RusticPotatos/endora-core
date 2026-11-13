@@ -38,6 +38,27 @@ proxy passes exactly this list and its checks hold the screens to it
 | Home | the web console's home lab, media and smart home: the lab's figures, containers and their logs, the allowlisted jobs, media requests, the house's favorites and catalogue (`GET /v1/terminal/*`), and their one action route `POST /v1/terminal/action`, which Core checks against its own allowlist and runs once per request id. The paths keep their old name; the handheld that first used them is retired |
 | Settings | capabilities, tool servers, connections (the Spotify account until Audio's cutover), configuration undo, export and purge |
 
+### The runner in the snapshot
+
+`GET /v1/hq` carries `runner`, so a Console can say when no runner is asking for turns (HQ never
+reaches out to one: if every runner stops or loses the network, nothing moves and nothing else says why):
+
+```json
+"runner": { "state": "up" | "stale" | "never", "last_poll_secs": 2, "waiting": 0 }
+```
+
+- `state`: `up` when a runner made any signed `/v1/runner/*` request (a poll for turns or for stops)
+  in the last 90 seconds (the runner asks every 2 s); `stale` when its last request is older;
+  `never` when there has been none since HQ started. HQ keeps the time in memory, so it says `never`
+  after each restart until a runner next asks, within seconds.
+- `last_poll_secs`: whole seconds since that request; `null` when `never`.
+- `waiting`: turns HQ has started that no runner has taken yet.
+- `runner` is `null` with the demo on (HQ runs no real turns). Treat a missing `runner` (an older HQ)
+  as unknown, not as down.
+- **Limit:** runners share one token, so HQ cannot tell them apart. With several, `up` means at least one is
+  asking, and one that is down among them goes unseen. Per-runner identity needs a name in each runner's
+  requests and is not built.
+
 ## Sessions
 
 Signing in is Core's: `POST /v1/session` with `{"password", "code"}` (an authenticator code)
