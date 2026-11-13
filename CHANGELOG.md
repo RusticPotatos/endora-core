@@ -7,6 +7,19 @@ tagged release.
 
 ## [Unreleased]
 
+### Changed (desk card clarity)
+
+- **The "ready to read" card shows the task's done-criteria and what was cited for each**, above its
+  buttons: the criterion's text (escaped), then the stages that cited evidence for it, or "No
+  evidence yet." and "needs re-check" where the criteria changed after a pass. Citing is not proof; the
+  receipts are in the task. It reuses the evidence the snapshot already carries for work still open
+  (`task.evidence`), so no API or Rust change; a task with no criteria in the snapshot (finished work
+  comes in brief) renders as before.
+- **The "needs something of you" card's buttons say what they do.** "Done" is now "I've set it" and
+  "Dismiss" is "Not needed", and the help line says "Not needed" closes the request without anything
+  being set. The decisions sent are unchanged (`seen`, `dismiss`). The card's own sentence, from the
+  node ("then mark this seen", the raw variable name), is unchanged and is for a later change.
+
 ### Added (runner-down visibility)
 
 - **HQ says when no runner is asking for turns.** HQ notes, in memory, the time of the last signed
