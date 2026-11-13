@@ -164,6 +164,10 @@ services:
       TEAM_NETWORK: ${COMPOSE_PROJECT_NAME}_team
       # Turns at once (each within the limits above).
       RUNNER_CAPACITY: ${ENDORA_RUNNER_CAPACITY:-2}
+      # What this runner calls itself to HQ, so HQ can name the one that goes quiet. Set a different
+      # name on each runner host (a container's own hostname changes on every recreate, so it is not
+      # the default here).
+      RUNNER_NAME: ${ENDORA_RUNNER_NAME:-runner}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # The token HQ makes for the runner. Read-only here; only HQ writes it.

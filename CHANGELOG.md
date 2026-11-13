@@ -7,6 +7,23 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (which runner went quiet)
+
+- **Each runner says its name, and HQ names the one that stopped asking.** Runners share one token, so
+  with two polling (the Pi and another host) a dead one among live ones was invisible. The runner now sends
+  `RUNNER_NAME` (default: the machine's hostname, or `runner`; `ENDORA_RUNNER_NAME` in the compose file,
+  default `runner`; `scripts/pi-runner.sh` passes `RUNNER_NAME`, default `pi`) as `?runner=` on every call; the node's team gateway passes that one query parameter
+  on, so a runner on the Pi is named too (update the node before such a runner, or it shows as
+  `unnamed`). HQ cleans the name where it arrives (ASCII letters, digits, `.`, `_`, `-`, at most 32),
+  never records one from a refused call, keeps the last request per name (in memory, at most 16 names,
+  the quietest dropped for a new one) and lists them in the snapshot's new `runners`
+  (`[{name, state, last_poll_secs}]`, the quietest first, same 90-second rule). `runner` is unchanged.
+  The Console's chip names any stale runner ("Runner runner-a quiet for 5 min", several: "+N more"), even
+  beside one that is up; with no `runners`, or one `unnamed`, it reads as before. A runner stopped on
+  purpose stays listed as stale until HQ restarts. Tests: the rule and its 16-name bound
+  (`runner_sight.rs`), HQ's door (`app/hq`), the runner's request (`app/runner`), the gateway
+  (`app/node/src/api/gateway.rs`) and the Console check.
+
 ### Changed (desk card clarity)
 
 - **The "ready to read" card shows the task's done-criteria and what was cited for each**, above its

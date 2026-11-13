@@ -281,7 +281,7 @@ async fn health(Extract(state): Extract<State>) -> Json<serde_json::Value> {
 
 /// What the owner's screen says of the runner: whether it is asking for turns (`up`, `stale`
 /// or `never`, with the seconds since it last did) and how many turns wait for one to take
-/// them. All runners count as one: they share a token, so HQ cannot tell them apart. `null`
+/// them. This is all runners as one (the latest request of any); `runners` tells them apart by the name each says. `null`
 /// with the demo on, when HQ runs no real turns and no runner is wanted.
 fn runner_said(state: &State) -> serde_json::Value {
     let Some(remote) = state.hq.runner().remote() else {
@@ -296,11 +296,33 @@ fn runner_said(state: &State) -> serde_json::Value {
     })
 }
 
+/// Each runner HQ has heard from, by the name it says: `[{name, state, last_poll_secs}]`, the
+/// quietest first, with the same up/stale rule as `runner`. A runner that was stopped on
+/// purpose stays listed as stale until HQ restarts. `null` with the demo on, like `runner`.
+fn runners_said(state: &State) -> serde_json::Value {
+    let Some(remote) = state.hq.runner().remote() else {
+        return serde_json::Value::Null;
+    };
+    let runners: Vec<serde_json::Value> = remote
+        .runners(SystemClock.now())
+        .into_iter()
+        .map(|r| {
+            json!({
+                "name": r.name,
+                "state": r.sight.state.name(),
+                "last_poll_secs": r.sight.last_poll_secs,
+            })
+        })
+        .collect();
+    json!(runners)
+}
+
 async fn snapshot(Extract(state): Extract<State>) -> Result<Json<serde_json::Value>, Failed> {
     let hq = state.hq.clone();
     let mut snap = blocking(move || hq.snapshot()).await?;
     snap["tick_seconds"] = json!(state.tick_seconds);
     snap["runner"] = runner_said(&state);
+    snap["runners"] = runners_said(&state);
     Ok(Json(snap))
 }
 
@@ -2925,7 +2947,7 @@ mod tests {
             .runner()
             .remote()
             .unwrap()
-            .seen(SystemClock.now() - quiet_ms);
+            .seen("", SystemClock.now() - quiet_ms);
         let sight = runner_sight(&app).await;
         assert_eq!(sight["state"], "stale");
         assert!(
@@ -2955,6 +2977,187 @@ mod tests {
     async fn the_simulated_runner_has_no_runner_to_report() {
         let app = app(state(true));
         assert_eq!(runner_sight(&app).await, json!(null));
+        assert_eq!(runners_sight(&app).await, json!(null));
+    }
+
+    /// The snapshot's `runners` list: each runner by the name it says.
+    async fn runners_sight(app: &Router) -> serde_json::Value {
+        let res = app
+            .clone()
+            .oneshot(call("GET", "/v1/snapshot", Some(TOKEN), ""))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        json_of(res).await["runners"].clone()
+    }
+
+    /// `[[name, state]]` of the `runners` list, in its order.
+    fn named_states(runners: &serde_json::Value) -> Vec<(String, String)> {
+        runners
+            .as_array()
+            .expect("a list")
+            .iter()
+            .map(|r| {
+                (
+                    r["name"].as_str().unwrap().to_owned(),
+                    r["state"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    fn pair(name: &str, state: &str) -> (String, String) {
+        (name.to_owned(), state.to_owned())
+    }
+
+    #[tokio::test]
+    async fn no_runner_asked_yet_lists_no_runners() {
+        let app = app(state(false));
+        assert_eq!(runners_sight(&app).await, json!([]));
+        assert_eq!(runner_sight(&app).await["state"], "never");
+    }
+
+    #[tokio::test]
+    async fn a_named_signed_call_is_listed_under_its_name_and_the_runner_object_is_unchanged() {
+        for (method, uri, body) in RUNNER_ROUTES {
+            let st = state(false);
+            let app = app(st.clone());
+            let uri = format!("{uri}?runner=runner-a");
+            app.clone()
+                .oneshot(call(method, &uri, Some(RUNNER), body))
+                .await
+                .unwrap();
+            let runners = runners_sight(&app).await;
+            assert_eq!(named_states(&runners), [pair("runner-a", "up")], "{uri}");
+            assert!(
+                runners[0]["last_poll_secs"]
+                    .as_i64()
+                    .is_some_and(|s| s <= 2),
+                "{runners}"
+            );
+            let sight = runner_sight(&app).await;
+            assert_eq!(sight["state"], "up", "the overall object as before");
+            let mut keys: Vec<&String> = sight.as_object().unwrap().keys().collect();
+            keys.sort();
+            assert_eq!(keys, ["last_poll_secs", "state", "waiting"], "{sight}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_signed_call_with_no_name_is_listed_as_unnamed() {
+        let app = app(state(false));
+        for uri in [
+            "/v1/runner/stops",
+            "/v1/runner/stops?runner=",
+            "/v1/runner/stops?other=1",
+        ] {
+            app.clone()
+                .oneshot(call("GET", uri, Some(RUNNER), ""))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            named_states(&runners_sight(&app).await),
+            [pair("unnamed", "up")],
+            "an older runner, which says no name, shows as one unnamed entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_name_on_a_refused_call_is_never_recorded() {
+        let app = app(state(false));
+        for token in [None, Some(TOKEN), Some("not-the-runners-token")] {
+            let res = app
+                .clone()
+                .oneshot(call("GET", "/v1/runner/stops?runner=intruder", token, ""))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(runners_sight(&app).await, json!([]));
+    }
+
+    #[tokio::test]
+    async fn a_name_is_made_safe_where_it_arrives() {
+        let app = app(state(false));
+        let long = "x".repeat(100);
+        for name in ["we!rd/na%20me", long.as_str(), "%3Cscript%3E"] {
+            app.clone()
+                .oneshot(call(
+                    "GET",
+                    &format!("/v1/runner/stops?runner={name}"),
+                    Some(RUNNER),
+                    "",
+                ))
+                .await
+                .unwrap();
+        }
+        let mut names: Vec<String> = named_states(&runners_sight(&app).await)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
+        names.sort();
+        let mut expected = vec![
+            "3Cscript3E".to_owned(),
+            "werdna20me".to_owned(),
+            "x".repeat(32),
+        ];
+        expected.sort();
+        assert_eq!(names, expected);
+    }
+
+    #[tokio::test]
+    async fn a_stale_named_runner_shows_beside_one_that_is_up() {
+        let st = state(false);
+        let app = app(st.clone());
+        let quiet_ms = (endora_team::domain::runner_sight::STALE_AFTER_SECS + 30) * 1_000;
+        st.hq
+            .runner()
+            .remote()
+            .unwrap()
+            .seen("runner-a", SystemClock.now() - quiet_ms);
+        app.clone()
+            .oneshot(call(
+                "GET",
+                "/v1/runner/stops?runner=runner-b",
+                Some(RUNNER),
+                "",
+            ))
+            .await
+            .unwrap();
+        let runners = runners_sight(&app).await;
+        assert_eq!(
+            named_states(&runners),
+            [pair("runner-a", "stale"), pair("runner-b", "up")],
+            "the quietest first"
+        );
+        assert!(runners[0]["last_poll_secs"].as_i64().unwrap() >= quiet_ms / 1_000);
+        assert_eq!(
+            runner_sight(&app).await["state"],
+            "up",
+            "the overall object still says up: that is the blindness the list ends"
+        );
+    }
+
+    #[tokio::test]
+    async fn at_most_sixteen_runners_are_listed() {
+        let app = app(state(false));
+        for i in 0..20 {
+            app.clone()
+                .oneshot(call(
+                    "GET",
+                    &format!("/v1/runner/stops?runner=r{i:02}"),
+                    Some(RUNNER),
+                    "",
+                ))
+                .await
+                .unwrap();
+        }
+        let runners = runners_sight(&app).await;
+        assert_eq!(
+            runners.as_array().unwrap().len(),
+            endora_team::domain::runner_sight::MAX_RUNNERS
+        );
     }
 
     #[tokio::test]

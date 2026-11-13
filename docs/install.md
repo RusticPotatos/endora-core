@@ -182,6 +182,14 @@ and limits of every worker are fixed in the runner's own code, not taken from HQ
 `ENDORA_RUNNER_CAPACITY` (default 2) is how many turns run at once. The runner itself is capped
 at 64 MB. With the demo on (`ENDORA_HQ_DEMO=1`) HQ hands it nothing.
 
+`RUNNER_NAME` (`ENDORA_RUNNER_NAME` in the compose file, default `runner`) is what the runner calls
+itself to HQ: set a different `RUNNER_NAME` on each runner host, so that HQ's chip can name the one that
+went quiet while another is still asking. Letters, digits, `.`, `_` and `-`, at most 32 characters.
+On the Pi, `scripts/pi-runner.sh` passes `RUNNER_NAME` from its own environment (default `pi`). Run bare (no container), the runner's name is the machine's hostname. A runner you stopped on purpose
+stays listed as quiet until HQ restarts. A runner on another host goes through the node's team
+gateway, which passes its name on only from the version that carries this change: update the node
+before such a runner, or it shows as `unnamed`.
+
 ## Ports
 
 | Port | What | Reachable from |

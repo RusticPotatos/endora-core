@@ -3,7 +3,8 @@
 //! token), and a runner on the Pi asks for turns here (`/team-gateway/runner/...`, signed with
 //! the runner's token). The node checks neither token: it passes the request, its method, body
 //! and `Authorization` untouched, to HQ's own URL and nowhere else, and HQ decides. The node's
-//! own token for HQ is never added.
+//! own token for HQ is never added. The one part of a runner call's query that goes on is the
+//! name the runner says, `?runner=<name>` (a plain one), which HQ lists it under.
 
 use super::*;
 use axum::body::Body;
@@ -48,8 +49,27 @@ pub(super) async fn runner(State(state): State<AppState>, request: Request) -> R
     if !plain {
         return refuse(StatusCode::NOT_FOUND, "no such route");
     }
-    let path = format!("/v1/runner/{route}");
+    let mut path = format!("/v1/runner/{route}");
+    // The one thing of the query that goes on: the name the runner says (`?runner=`), which HQ
+    // lists it under. Only a plain one; HQ cleans whatever it gets all the same.
+    if let Some(name) = runner_name(request.uri().query().unwrap_or("")) {
+        path = format!("{path}?runner={name}");
+    }
     pass(state, path, request).await
+}
+
+/// The runner's name in a query string, if it is a plain one: 1 to 64 ASCII letters, digits,
+/// `.`, `_` or `-`. Nothing else of the query is passed on.
+fn runner_name(query: &str) -> Option<&str> {
+    let name = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("runner="))?;
+    let plain = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    plain.then_some(name)
 }
 
 /// Passes `request` on to `path` on HQ, and HQ's answer back.
@@ -304,6 +324,51 @@ mod tests {
         assert_eq!(
             text(res).await,
             r#"{"error":"no running turn has that token"}"#
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_runners_name_goes_on_to_hq_and_nothing_else_of_its_query() {
+        let (url, seen) = fake_hq(200, r#"{"runs":[]}"#);
+        let app = team_relay(node(Some(&url)));
+        let too_long = format!("/team-gateway/runner/stops?runner={}", "n".repeat(65));
+        for uri in [
+            too_long.as_str(),
+            "/team-gateway/runner/stops?runner=runner-a",
+            "/team-gateway/runner/stops?x=1&runner=Pi_5.lan&y=2",
+            "/team-gateway/runner/next?runner=runner-b",
+            "/team-gateway/runner/12/ended?runner=runner-a",
+            // Not plain, empty, too long, or absent: nothing of the query goes on.
+            "/team-gateway/runner/stops?runner=a%0d%0aX-Evil:1",
+            "/team-gateway/runner/stops?runner=",
+            "/team-gateway/runner/stops?x=1",
+        ] {
+            let method = if uri.contains("stops") { "GET" } else { "POST" };
+            let res = app
+                .clone()
+                .oneshot(call(method, uri, "the-runners-token", "{}".into()))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        }
+        let asked: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(a, _, _)| a.clone())
+            .collect();
+        assert_eq!(
+            asked,
+            [
+                "GET /v1/runner/stops",
+                "GET /v1/runner/stops?runner=runner-a",
+                "GET /v1/runner/stops?runner=Pi_5.lan",
+                "POST /v1/runner/next?runner=runner-b",
+                "POST /v1/runner/12/ended?runner=runner-a",
+                "GET /v1/runner/stops",
+                "GET /v1/runner/stops",
+                "GET /v1/runner/stops",
+            ]
         );
     }
 

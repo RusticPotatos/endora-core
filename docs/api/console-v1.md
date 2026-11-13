@@ -55,9 +55,26 @@ reaches out to one: if every runner stops or loses the network, nothing moves an
 - `waiting`: turns HQ has started that no runner has taken yet.
 - `runner` is `null` with the demo on (HQ runs no real turns). Treat a missing `runner` (an older HQ)
   as unknown, not as down.
-- **Limit:** runners share one token, so HQ cannot tell them apart. With several, `up` means at least one is
-  asking, and one that is down among them goes unseen. Per-runner identity needs a name in each runner's
-  requests and is not built.
+- `runner` is all runners as one: runners share one token, so `up` here means at least one is asking.
+  It is unchanged.
+- `runners` tells them apart (HQ's snapshot, beside `runner`; `null` with the demo on; absent from an older HQ):
+
+  ```json
+  "runners": [ { "name": "runner-a", "state": "up" | "stale", "last_poll_secs": 140 } ]
+  ```
+
+  Each runner says its name (`RUNNER_NAME`, sent as `?runner=` on every signed call, so it survives
+  the node's team gateway, which passes that one parameter on). HQ keeps ASCII letters, digits, `.`,
+  `_` and `-`, at most 32; a call that names none, such as an older runner's, is listed as `unnamed`.
+  The list is the quietest first, with the same rule and the same 90 seconds as `runner`, and holds at
+  most 16 names (a new name past that drops the one quiet longest). A name from a refused (unsigned)
+  call is never listed. `state` is `up` or `stale`; a name is listed only once it has asked.
+- The Console shows a loud chip, "Runner `<name>` quiet for ...", when any listed runner is stale, even
+  beside one that is up (several: the first and "+N more"), and none when all are up. With no `runners`,
+  or one `unnamed` entry, it reads `runner` as before.
+- **Limit:** a runner stopped on purpose stays listed as `stale` until HQ restarts (HQ keeps the list in
+  memory only, and forgetting one name is not built). A runner is also named only as well as its host
+  sets `RUNNER_NAME`: two runners with one name count as one.
 
 ## Sessions
 

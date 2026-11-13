@@ -112,6 +112,9 @@ services:
     environment:
       HQ_URL: http://hq:8790
       HQ_RUNNER_TOKEN_FILE: /runner-token/token
+      # What this runner calls itself to HQ; a different name on each runner host (a container's
+      # own hostname changes on every recreate, so it is not the default).
+      RUNNER_NAME: runner
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # The token HQ makes for the runner. Read-only here; only HQ writes it.

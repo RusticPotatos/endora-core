@@ -88,6 +88,11 @@ here and delete the routes only they used.
   (`RemoteRunner::seen`, `domains/team/src/infrastructure/remote.rs`) and says the state in its
   snapshot's `runner` object (`app/hq/src/api.rs`), which the node passes on as `/v1/hq`; the rule
   and its one threshold are `domains/team/src/domain/runner_sight.rs`. No screen of its own.
+  **Which runner**: each runner says its name (`RUNNER_NAME`; `app/runner/src/hq.rs` sends it as
+  `?runner=` on every signed call, and `app/node/src/api/gateway.rs` passes that one parameter on
+  from the Pi). HQ cleans the name where it arrives (`clean_name`), keeps the last request per name,
+  at most 16 (`Sightings`, `runner_sight.rs`), and lists them in the snapshot's `runners`. The same
+  chip then names any listed runner that is stale.
 - HQ opens on the **agents map** ([ADR 0143](adr/0143-hq-opens-on-the-agents-map.md), the
   owner's decision M6, 7 Nov 2026) on every device, after a reload, from the menu and from any
   old route; nothing remembers another landing. The map is the shell: the bar (Give work, the kill

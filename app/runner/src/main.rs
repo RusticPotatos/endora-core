@@ -51,10 +51,15 @@ fn config(get: impl Fn(&str) -> Option<String>) -> Result<Config, String> {
             "RUNNER_CAPACITY is not a number of turns: {capacity:?}"
         ));
     };
+    // What this runner calls itself to HQ, so a quiet one among live ones can be named:
+    // `RUNNER_NAME`, else the machine's own name, else `runner`.
+    let name = hq::runner_name(&or("RUNNER_NAME", &or("HOSTNAME", "")))
+        .unwrap_or_else(|| "runner".to_owned());
     let hq = Hq::new(
         &or("HQ_URL", "http://hq:8790"),
         or("HQ_RUNNER_TOKEN_FILE", "/runner-token/token"),
-    )?;
+    )?
+    .named(&name);
     let pi = hq.through_the_gateway();
     // The gateway's listener, which also serves the model relays.
     let listener = hq.origin();
@@ -127,7 +132,14 @@ fn now() -> u64 {
 }
 
 fn main() {
-    let config = match config(|name| std::env::var(name).ok()) {
+    let config = match config(|name| {
+        std::env::var(name).ok().or_else(|| {
+            // The machine's name where the environment has none (a shell exports it; a service may not).
+            (name == "HOSTNAME")
+                .then(|| std::fs::read_to_string("/etc/hostname").ok())
+                .flatten()
+        })
+    }) {
         Ok(config) => config,
         Err(why) => {
             eprintln!("runner: {why}. The runner does not start.");
@@ -215,6 +227,38 @@ mod tests {
         }
         assert!(config(|name| (name == "HQ_URL").then(|| "https://hq:8790".to_owned())).is_err());
         assert!(!defaults.work.worksite, "the NAS's runner: no worksite");
+    }
+
+    #[test]
+    fn the_runner_calls_itself_by_name_hostname_or_runner() {
+        let name = |env: &'static [(&'static str, &'static str)]| {
+            config(|n| {
+                env.iter()
+                    .find(|(k, _)| *k == n)
+                    .map(|(_, v)| (*v).to_owned())
+            })
+            .unwrap()
+            .hq
+            .name()
+            .to_owned()
+        };
+        assert_eq!(name(&[("RUNNER_NAME", "runner-a")]), "runner-a");
+        assert_eq!(
+            name(&[("RUNNER_NAME", "Pi 5!"), ("HOSTNAME", "host-x")]),
+            "Pi5",
+            "cleaned"
+        );
+        assert_eq!(name(&[("HOSTNAME", "host-x\n")]), "host-x");
+        assert_eq!(
+            name(&[("RUNNER_NAME", " "), ("HOSTNAME", "host-x")]),
+            "host-x"
+        );
+        assert_eq!(name(&[]), "runner", "no name at all");
+        assert_eq!(
+            name(&[("RUNNER_NAME", "///")]),
+            "runner",
+            "nothing of it is left"
+        );
     }
 
     /// Observers are the runner's own to allow: off unless `OBSERVER_PROJECTS` lists project

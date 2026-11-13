@@ -54,9 +54,25 @@ async fn signed_by_the_runner(
     // Any signed call is a runner alive, a poll for stops included: one at capacity asks for
     // nothing else. A refused call returned above and does not count.
     if let Some(remote) = state.hq.runner().remote() {
-        remote.seen(SystemClock.now());
+        remote.seen(
+            &named_in(request.uri().query().unwrap_or("")),
+            SystemClock.now(),
+        );
     }
     next.run(request).await
+}
+
+/// The name the runner says in its request's query (`?runner=<name>`), as it said it: empty for
+/// none. Cleaned where it is noted (`runner_sight::clean_name`), never here and never earlier.
+/// The name rides the query because it is the one place the node's team gateway passes on from
+/// the Pi's calls with no body (`GET /runner/stops`): the gateway forwards this parameter, no
+/// other.
+fn named_in(query: &str) -> String {
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("runner="))
+        .unwrap_or("")
+        .to_owned()
 }
 
 /// The demo is on: the simulated runner takes the turns, and a real one has none to take.

@@ -59,6 +59,7 @@ docker run -d --name endora-runner --restart unless-stopped \
     --memory 64m --memory-swap 64m --cpus 0.5 --pids-limit 64 \
     -e HQ_URL="$gateway/team-gateway" \
     -e HQ_RUNNER_TOKEN_FILE=/runner-token/token \
+    -e RUNNER_NAME="${RUNNER_NAME:-pi}" \
     -e TEAM_NETWORK=endora_sandbox \
     -e OBSERVER_PROJECTS="$observers" \
     -e WORKER_HQ_MCP="$gateway/team-gateway/v2/mcp" \

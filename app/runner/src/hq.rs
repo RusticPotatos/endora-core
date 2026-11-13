@@ -57,6 +57,22 @@ pub struct Hq {
     prefix: String,
     /// The file HQ keeps the runner's token in.
     token_file: PathBuf,
+    /// What the runner calls itself, sent with each signed call (`?runner=`) so HQ can tell it
+    /// from another runner with the same token. Empty: the runner says no name, as an older
+    /// one.
+    name: String,
+}
+
+/// A runner's name as the runner sends it: ASCII letters, digits, `.`, `_` and `-`, at most 32.
+/// HQ cleans what it receives by the same rule, so this is no defence, only what a line in a
+/// URL needs; nothing left is `None`.
+pub fn runner_name(raw: &str) -> Option<String> {
+    let name: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        .take(32)
+        .collect();
+    (!name.is_empty()).then_some(name)
 }
 
 impl Hq {
@@ -94,7 +110,22 @@ impl Hq {
                 format!("/{prefix}")
             },
             token_file: token_file.into(),
+            name: String::new(),
         })
+    }
+
+    /// The same HQ, with the runner saying it is called `name` (cleaned by [`runner_name`]; no
+    /// name when nothing of it is left).
+    #[must_use]
+    pub fn named(mut self, name: &str) -> Self {
+        self.name = runner_name(name).unwrap_or_default();
+        self
+    }
+
+    /// What the runner calls itself to HQ; empty if it says nothing.
+    #[cfg(test)]
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// Where HQ is, for the log.
@@ -141,6 +172,16 @@ impl Hq {
     /// again, like no answer.
     fn call(&self, method: &str, route: &str, body: Option<&Value>) -> Result<Answer, HqError> {
         let token = self.token()?;
+        // The name rides every call the runner's token signs, in the query: the one place the
+        // node's team gateway passes on for a call with no body, as it does for this
+        // parameter alone.
+        let signed_route;
+        let route = if self.name.is_empty() {
+            route
+        } else {
+            signed_route = format!("{route}?runner={}", self.name);
+            &signed_route
+        };
         self.call_as(&token, method, route, body)
     }
 
@@ -364,5 +405,82 @@ mod tests {
         assert!(matches!(hq.next(2), Err(HqError::Unreachable(_))));
         assert!(matches!(hq.stops(), Err(HqError::Unreachable(_))));
         assert!(listener.accept().is_err(), "not even a connection was made");
+    }
+
+    /// Serves one canned 200 and gives back the request line it was asked.
+    fn asked_once(path_prefix: &str, name: &str, ask: impl FnOnce(&Hq)) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}{path_prefix}", listener.local_addr().unwrap());
+        let file = std::env::temp_dir().join(format!(
+            "endora-runner-name-{}-{}",
+            std::process::id(),
+            name.len()
+        ));
+        std::fs::write(&file, "a-runner-token-of-at-least-thirty-two-characters").unwrap();
+        let served = std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8];
+            while !head.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte).unwrap();
+                head.push(byte[0]);
+            }
+            let body = r#"{"runs":[]}"#;
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            String::from_utf8(head).unwrap()
+        });
+        let hq = Hq::new(&url, &file).unwrap().named(name);
+        ask(&hq);
+        let _ = std::fs::remove_file(&file);
+        served.join().unwrap().lines().next().unwrap().to_owned()
+    }
+
+    #[test]
+    fn a_named_runner_says_its_name_on_every_call_direct_and_through_the_gateway() {
+        assert_eq!(
+            asked_once("", "runner-a", |hq| {
+                hq.stops().unwrap();
+            }),
+            "GET /v1/runner/stops?runner=runner-a HTTP/1.1"
+        );
+        assert_eq!(
+            asked_once("/team-gateway", "runner-a", |hq| {
+                hq.stops().unwrap();
+            }),
+            "GET /team-gateway/runner/stops?runner=runner-a HTTP/1.1"
+        );
+        assert_eq!(
+            asked_once("/team-gateway", "runner-a", |hq| {
+                let _ = hq.next(1);
+            }),
+            "POST /team-gateway/runner/next?runner=runner-a HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn a_runner_with_no_name_asks_as_it_always_did() {
+        assert_eq!(
+            asked_once("", "", |hq| {
+                hq.stops().unwrap();
+            }),
+            "GET /v1/runner/stops HTTP/1.1"
+        );
+    }
+
+    #[test]
+    fn a_runners_name_is_cut_to_what_a_name_may_hold() {
+        assert_eq!(runner_name("Pi 5/lan;x\r\n").as_deref(), Some("Pi5lanx"));
+        assert_eq!(runner_name(&"a".repeat(50)).unwrap().len(), 32);
+        assert_eq!(runner_name("  /; "), None);
+        assert_eq!(
+            Hq::new("http://hq", "/t").unwrap().named("a b").name(),
+            "ab"
+        );
     }
 }

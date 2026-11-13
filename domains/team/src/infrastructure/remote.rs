@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::application::ports::{RunContext, StartError, WorkerAdapter};
+use crate::domain::runner_sight::{NamedSight, Sightings};
 use crate::domain::work::Millis;
 use crate::domain::{Exit, Liveness, RunId};
 
@@ -50,10 +51,12 @@ struct State {
     /// The next lease to give. Seeded from the clock, so an HQ that restarts never hands out
     /// a lease an earlier one already gave.
     next_lease: u64,
-    /// When a runner last made any signed request, in HQ's memory only: HQ cannot tell one
-    /// runner from another (they share a token), so this is the latest of all of them, and it
-    /// is empty until the first request after HQ starts.
+    /// When a runner last made any signed request, in HQ's memory only: the latest of all of
+    /// them, whatever they call themselves, and empty until the first request after HQ starts.
     last_seen: Option<Millis>,
+    /// The same, for each runner by the name it says (they share a token, so the name is all
+    /// that tells them apart).
+    named: Sightings,
 }
 
 /// A runner on another host, which asks HQ for the turns to start.
@@ -93,12 +96,19 @@ impl RemoteRunner {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Notes that a runner made a signed request at `at`: any call to its door, a poll for
-    /// turns or for stops alike, since a runner at capacity asks only for stops. Never goes
-    /// back in time.
-    pub fn seen(&self, at: Millis) {
+    /// Notes that the runner called `name` made a signed request at `at`: any call to its door,
+    /// a poll for turns or for stops alike, since a runner at capacity asks only for stops.
+    /// `name` is whatever the caller said, empty for none; it is cleaned here. Never goes back
+    /// in time.
+    pub fn seen(&self, name: &str, at: Millis) {
         let mut state = self.state();
         state.last_seen = state.last_seen.max(Some(at));
+        state.named.note(name, at);
+    }
+
+    /// Each runner HQ has heard from since it started, as it is at `now`: the quietest first.
+    pub fn runners(&self, now: Millis) -> Vec<NamedSight> {
+        self.state().named.all(now)
     }
 
     /// When a runner last made a signed request; `None` before the first since HQ started.
@@ -260,9 +270,21 @@ mod tests {
     #[test]
     fn the_latest_request_is_the_one_kept() {
         let runner = RemoteRunner::default();
-        runner.seen(5_000);
-        runner.seen(9_000);
+        runner.seen("", 5_000);
+        runner.seen("", 9_000);
         assert_eq!(runner.last_seen(), Some(9_000));
+    }
+
+    #[test]
+    fn each_named_runner_is_kept_beside_the_latest_of_all() {
+        let runner = RemoteRunner::default();
+        assert!(runner.runners(9_000).is_empty());
+        runner.seen("runner-a", 5_000);
+        runner.seen("runner-b", 9_000);
+        runner.seen("", 7_000);
+        assert_eq!(runner.last_seen(), Some(9_000), "the overall time stays");
+        let names: Vec<String> = runner.runners(9_000).into_iter().map(|n| n.name).collect();
+        assert_eq!(names, ["runner-a", "unnamed", "runner-b"], "quietest first");
     }
 
     #[test]
