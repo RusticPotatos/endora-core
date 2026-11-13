@@ -220,6 +220,7 @@ RUN python3 -m venv /opt/venv \
         geerlingguy.docker,7.1.0 geerlingguy.nfs,2.0.0 \
     && find /opt/venv -type d -name '__pycache__' -prune -exec rm -rf '{}' + \
     && rm -rf /root/.ansible /root/.cache /opt/venv/collections/ansible_collections/*/*/docs \
+    && rm -rf /opt/venv/collections/ansible_collections/*/*/tests \
     && chmod -R a+rX /opt/venv
 # Endora's own collection (endora.homelab), built from THIS source so the image carries the
 # version of the Endora it was built from. The fork's requirements.yml pins it to a git commit,
@@ -275,7 +276,8 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         bash ca-certificates curl dnsutils git iputils-ping jq less procps python3 python3-venv \
-    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/partial \
     && useradd --uid 10001 --home-dir /work --no-create-home --shell /bin/bash worksite
 # The lab's checks and Claude Code, from their stages above (ADR 0115, 0117).
 COPY --from=lab-checks /opt/venv /opt/venv

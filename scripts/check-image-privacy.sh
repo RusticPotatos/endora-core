@@ -13,8 +13,14 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 
-# Files that are someone's own, by name. *.pem and *.key outside the system's CA folders.
-FIND_LOCAL='find / -xdev \( -path /proc -o -path /sys -o -path /etc/ssl -o -path /usr/share/ca-certificates -o -path /usr/lib/ssl -o -path /usr/local/share/ca-certificates \) -prune -o -type f \( -name owner.mk -o -name .env -o -name ".env.*" -o -name secrets.key -o -name "*.db" -o -name "*.db-wal" -o -name docker-compose.override.yml -o -name id_rsa -o -name id_ed25519 -o -name "*.pem" -o -name "*.key" \) ! -name "*.example" -print'
+# Files that are someone's own, by name. *.pem and *.key outside the system's CA folders, and
+# outside one exact file: pip's vendored copy of the public CA bundle (certifi) in the worksite's
+# venv, which is public data and not Endora's or the owner's (the worksite image, ADR 0115). It is
+# one path, not a folder or a name: a key.pem beside it, or a cacert.pem anywhere else, is still
+# listed, and image() also fails the image if that file holds a private key. Only a regular file at
+# that path is exempt: a directory there is searched like any other.
+CERTIFI_CA=/opt/venv/lib/python3.11/site-packages/pip/_vendor/certifi/cacert.pem
+FIND_LOCAL='find / -xdev \( -path /proc -o -path /sys -o -path /etc/ssl -o -path /usr/share/ca-certificates -o -path /usr/lib/ssl -o -path /usr/local/share/ca-certificates -o \( -path '"$CERTIFI_CA"' -type f \) \) -prune -o -type f \( -name owner.mk -o -name .env -o -name ".env.*" -o -name secrets.key -o -name "*.db" -o -name "*.db-wal" -o -name docker-compose.override.yml -o -name id_rsa -o -name id_ed25519 -o -name "*.pem" -o -name "*.key" \) ! -name "*.example" -print'
 
 # The owner's own values, resolved once. The variable was renamed: the previous name alone would be
 # ignored (the image would be checked against nothing), and two names with different values would
@@ -52,10 +58,13 @@ context() {
 
 image() {
   img=$1; bad=0
+  # Scanned as root, whatever user the image runs as: a directory that user cannot enter (/root is
+  # mode 0700 on a stock Debian) would fail the scan, or hide a file in the likeliest place.
   # Fails closed: the listing ends with a marker, so an image that could not be run is a failure.
   # find's own exit status is part of the marker (listed:0): a find that could not traverse, or is
   # not there, must not read as "nothing found".
-  listing=$(docker run --rm --entrypoint sh "$img" -c "$FIND_LOCAL 2>/dev/null; echo listed:\$?") \
+  # The exempt CA bundle must be a CA bundle: if it holds a private key its path is listed too.
+  listing=$(docker run --rm --user 0:0 --entrypoint sh "$img" -c "$FIND_LOCAL 2>/dev/null; rc=\$?; grep -l 'PRIVATE KEY' $CERTIFI_CA 2>/dev/null; echo listed:\$rc") \
     || { echo "FAIL could not run $img"; return 1; }
   [ "$(printf '%s\n' "$listing" | tail -n 1)" = listed:0 ] || { echo "FAIL could not list $img (the scan itself failed)"; return 1; }
   found=$(printf '%s\n' "$listing" | sed '$d')
@@ -74,7 +83,7 @@ image() {
     for value in $own_values; do
       value=$(printf '%s' "$value" | sed 's/^ *//; s/ *$//')
       [ "${#value}" -gt 2 ] || continue
-      if docker run --rm --entrypoint grep "$img" -rqsIF -- "$value" /usr/local /etc /root 2>/dev/null; then
+      if docker run --rm --user 0:0 --entrypoint grep "$img" -rqsIF -- "$value" /usr/local /etc /root 2>/dev/null; then
         echo "FAIL $img holds one of your own values"; bad=1
       fi
     done
@@ -105,7 +114,20 @@ self_test() {
   image endora-privacy-selftest:clean >/dev/null || { echo "FAIL self-test: a clean image failed"; return 1; }
   printf 'FROM busybox:1.37.0\nRUN mkdir -p /usr/local && echo "Jane Doe lives here" > /usr/local/notes\n' | docker build -q -t endora-privacy-selftest:value - >/dev/null
   if ENDORA_OWNER_VALUES="Jane Doe" image endora-privacy-selftest:value >/dev/null; then echo "FAIL self-test: an image holding a personal value passed"; return 1; fi
-  docker rmi -f endora-privacy-selftest:planted endora-privacy-selftest:nofind endora-privacy-selftest:clean endora-privacy-selftest:value >/dev/null
+  # The one exempt file, pip's certifi bundle at its exact path: a public bundle passes; a key beside
+  # it, the same name elsewhere, or a private key inside it fails.
+  ca_dir=$(dirname "$CERTIFI_CA")
+  printf 'FROM busybox:1.37.0\nRUN mkdir -p %s && echo "-----BEGIN CERTIFICATE-----" > %s\n' "$ca_dir" "$CERTIFI_CA" | docker build -q -t endora-privacy-selftest:ca - >/dev/null
+  image endora-privacy-selftest:ca >/dev/null || { echo "FAIL self-test: the exempt CA bundle failed"; return 1; }
+  printf 'FROM busybox:1.37.0\nRUN mkdir -p %s && echo "-----BEGIN CERTIFICATE-----" > %s && echo x > %s/key.pem\n' "$ca_dir" "$CERTIFI_CA" "$ca_dir" | docker build -q -t endora-privacy-selftest:cakey - >/dev/null
+  if image endora-privacy-selftest:cakey >/dev/null; then echo "FAIL self-test: a key.pem beside the exempt CA bundle passed"; return 1; fi
+  printf 'FROM busybox:1.37.0\nRUN mkdir -p /opt/other && echo "-----BEGIN CERTIFICATE-----" > /opt/other/cacert.pem\n' | docker build -q -t endora-privacy-selftest:caelse - >/dev/null
+  if image endora-privacy-selftest:caelse >/dev/null; then echo "FAIL self-test: a cacert.pem elsewhere passed"; return 1; fi
+  printf 'FROM busybox:1.37.0\nRUN mkdir -p %s && echo "-----BEGIN PRIVATE KEY-----" > %s\n' "$ca_dir" "$CERTIFI_CA" | docker build -q -t endora-privacy-selftest:capriv - >/dev/null
+  if image endora-privacy-selftest:capriv >/dev/null; then echo "FAIL self-test: a private key in the exempt file passed"; return 1; fi
+  printf 'FROM busybox:1.37.0\nRUN mkdir -p %s && echo x > %s/id_rsa\n' "$CERTIFI_CA" "$CERTIFI_CA" | docker build -q -t endora-privacy-selftest:cadir - >/dev/null
+  if image endora-privacy-selftest:cadir >/dev/null; then echo "FAIL self-test: an id_rsa in a directory at the exempt path passed"; return 1; fi
+  docker rmi -f endora-privacy-selftest:planted endora-privacy-selftest:nofind endora-privacy-selftest:clean endora-privacy-selftest:value endora-privacy-selftest:ca endora-privacy-selftest:cakey endora-privacy-selftest:caelse endora-privacy-selftest:capriv endora-privacy-selftest:cadir >/dev/null
   echo "ok   self-test: .dockerignore keeps planted files out; a planted file or value, or a find that fails, fails"
 }
 

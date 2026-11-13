@@ -59,6 +59,18 @@ tagged release.
   on a semver tag by default; the workflow now sets `flavor: latest=false`. The first publish moved
   `latest` to `0.1.0` before this fix.
 
+### Fixed (the worksite image and its privacy check)
+
+- **The `worksite` image can now pass `scripts/check-image-privacy.sh image`.** The image no longer
+  ships the test fixtures of its ansible collections (each collection's `tests/` folder: 11 sample
+  `*.pem`/`*.key` files, and dead weight) or apt's leftover cache folder. The check scans the image
+  **as root** (a stock Debian `/root` and `/var/cache/ldconfig` are mode 0700, so a scan as the
+  image's own user failed, and never looked in `/root`, where an owner's file is likeliest to
+  hide); and it exempts exactly one file, pip's vendored `certifi/cacert.pem` (the public CA bundle),
+  by exact path, failing the image if that file holds a private key. A `.pem` or key beside it, or a
+  `cacert.pem` anywhere else, is still listed. Tests: `scripts/test-image-privacy.sh` and the
+  script's `--self-test`.
+
 ### Added (image licensing)
 
 - **Core's image carries its licence texts.** `/usr/share/doc/endora-core` holds `LICENSE`, `NOTICE`,
