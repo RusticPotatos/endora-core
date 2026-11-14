@@ -1,0 +1,27 @@
+[package]
+name = "endora-foundation-cli"
+description = "The foundation's command line: one SQLite file, plain-text commands, capabilities from a config file"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "endora-foundation"
+path = "src/main.rs"
+
+[dependencies]
+endora-foundation = { path = "../../domains/foundation" }
+endora-foundation-git = { path = "../../domains/foundation-git" }
+endora-foundation-observe = { path = "../../domains/foundation-observe" }
+endora-kernel = { path = "../../shared/kernel" }
+endora-persistence = { path = "../../shared/persistence" }
+signal-hook = "0.3"
+
+[dev-dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[lints]
+workspace = true

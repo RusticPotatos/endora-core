@@ -1,0 +1,60 @@
+# Foundation interface stability
+
+**Frozen by the Director at 4f45c80 on 14 Nov 2026 after: two independent authority reviews, a real
+executor (3 runs, macOS), the Docker backend attacked on Linux (Linux test host), the integrated gate (2,587/0
+workspace; 199 Linux).** The EXPERIMENTAL rows are unchanged and can still change.
+
+Statuses are only these two:
+
+- **FROZEN**: additive changes only (new optional fields, new commands). Any breaking change needs a
+  recorded decision and a schema or version bump. **Reversal rule:** a demonstrated gap from the NAS
+  run, a real run with the new units, or a new independent review unfreezes the row.
+- **EXPERIMENTAL**: new, covered only by its own tests, or exercised only by scripted stand-ins, or an
+  open finding or a known limit says it may change.
+
+A test (`domains/foundation/tests/stability_doc.rs`) fails if a row has any other status.
+
+### Known limits at freeze
+- The NAS is unverified (nothing has run there).
+- The dollar cap is unproven (no real run reached `--max-budget-usd`).
+- The real executor has not been re-run with micro-USD units.
+- Rootless Docker is untested.
+- A same-user, unconfined process can read the owner token and edit the database (the stated boundary).
+
+Interfaces are documented frozen or experimental here and nowhere else. "What would change it" is the
+evidence that should move a row.
+
+| Interface | Status | Evidence | What would change it |
+|---|---|---|---|
+| Work item and goal shapes (title, why, criteria, scope, tier, cap in micro-USD, subject) | FROZEN | `criteria.rs`, `core_rules.rs`, `contract_shapes.rs`, `micro_usd.rs`; both capabilities' tests; three real runs (an item run by the real executor, accepted by the owner) | `{subject}` is not validated at goal creation; a job needing per-item budgets or deadlines |
+| Evidence record shape (item, call, actor, actor kind, band, decision, kind, intent, inputs hash, output, time, cost in micro-USD, profile) | FROZEN | `core_rules.rs` t4/t4b/t5, `typed_actor.rs`, `spend.rs`, `micro_usd.rs` (profile and unit); REVIEW2 and REVIEW3 attacked the record | Structured (non-text) output stored beside the text; a second structured field |
+| Evidence hash chain (supplemental tamper detection for covered rows, not whole-database integrity; `prev_hash`, `hash`, canonical row text, `verify-evidence`) | EXPERIMENTAL | `evidence_chain.rs`, `micro_usd.rs` (an old-unit chain keeps its head across the migration; a new row's profile is hashed), CLI `verify_evidence_...`; REVIEW3 findings 3 and 4 (re-chaining by migration fixed, dropped triggers not detected) | Anchoring the head off-box, chaining the other tables, noticing dropped triggers, a second verifier. Two canonical texts exist (rows with and without `cost_micros`); a change to either breaks chains |
+| Capability call spec (name, band, tier, max cost in micro-USD, max seconds, max turns, typed inputs, declared facts, budget mode) and `Budget` (`max_cost_micros`, `max_seconds`, `max_turns`) | EXPERIMENTAL | `contract_shapes.rs`, `call_routing.rs`, `budget.rs`, `micro_usd.rs` (granted values reach the capability), `slice6.rs` (the real executor builds its flags from them); the unit and the seconds/turns fields came from the real runs | Core grants the spec's maximum: there is no per-call request and no shared pool of seconds or turns. A second real executor, or a request channel, may change it |
+| Spend enforcement | EXPERIMENTAL | Cost: Core checks and reserves the maximum in one transaction (`spend_race.rs`), charges at most the maximum (`spend.rs`); **turns**: executor-enforced with a one-step overshoot (`--max-turns 1` stopped at 2, a real run); **wall-clock**: the capability's process-group kill at the deadline, tested with fake CLIs and scripted agents only; **dollars**: `--max-budget-usd` is accepted by the CLI, but no real run reached the cap, so the dollar cap is **unproven** | A real run that reaches the dollar cap; a real hang killed at the deadline; any executor that enforces its own budget |
+| Owner decision methods and commands (`accept`, `decline`, `confirm-criterion`, `resume`, `resume-goal`, `routine resume`, `grant`, `overall-cap`, goal and routine creation) | EXPERIMENTAL (defence in depth, not a boundary: `OwnerProof` is not bound to a database or process; see TRUST-BOUNDARY.md) | `owner_proof.rs`, `cli.rs` owner tests, `agent_attacks.rs`, `compile_fail` doctests on `Core::accept`; REVIEW3 finding 2; a real run where the owner accepted | `confirm` (deprecated alias) is removed next release; **`approve-call` does not exist** (additive: a per-call owner approval for outward-reversible calls) |
+| Actor kinds, reserved names, `OwnerProof` and the owner credential | EXPERIMENTAL (defence in depth; `Core::fail` takes any actor; enrolment is a trusted setup step; `init` exits 2 when a credential exists) | `typed_actor.rs`, `owner_proof.rs`, `agent_attacks.rs`; unit tests in `domain/actor.rs`; REVIEW3 findings 2, 7, 10 | Token rotation (the engine refuses to replace a credential), a Keychain-backed token, a second owner |
+| Routines and the missed-slot rule (1 s to 366 d, one summary row, pause at a failure cap, `routine resume`) | FROZEN | `watch_bounds.rs`, `core_rules.rs`, `cli.rs`, `spend_race.rs` (a slot never fires twice under 6 connections) | A real multi-process runner pair; a losing process may get an error rather than skip quietly |
+| Acceptance policy (`owner`, `auto-observe`, routine `auto_accept`; policy never above observe) | FROZEN | `auto_observe.rs`, `core_rules.rs`, unit tests in `domain/accept.rs`; a git task is never auto-accepted (CLI test) | A capability whose result legitimately needs owner review at the observe band |
+| Schema and forward migrations (`user_version`, seven ordered steps, newer file refused, a file with hashes under a version before the chain refused, the cents-to-micro-USD step) | FROZEN, with the note that migrations are part of the trusted setup context | `schema_version.rs` (real older schemas as fixtures), `micro_usd.rs` (a database holding cents), `evidence_chain.rs` (REVIEW3 finding 3 attacks), `spend.rs` | n/a for the forward path |
+| Migration rollback and downgrade | EXPERIMENTAL | A failed step rolls back in code, untested; no downgrade path | A migration that can fail on real data |
+| Concurrency (several processes on one file) | EXPERIMENTAL: a single runner process is the supported mode | `spend_race.rs` (spend caps, double firing: 6 connections, threads not processes), `watch_bounds.rs`, `stop` retry; REVIEW3 finding 1 | A second runner process; races on `items` transitions and on the chain are untested |
+| CLI commands (`goal`, `routine`, `git-task`, `run-due`, `serve`, `status`, `init`, `accept`, `decline`, `confirm-criterion`, `stop`, `resume`, `resume-goal`, `overall-cap`, `evidence`, `verify-evidence`, `backup`, `capabilities`, `publish`) | FROZEN | `cli.rs` (process tests, including units and the printed profile), `agent_attacks.rs` | Output text is not a contract; only commands, flags, exit codes (0 ok, 1 error, 2 refused) and the unit (micro-USD) are |
+| Git capability and its limits (`Config`, `Options`: protected paths, env allow-list, `trust_exit_code`, limits, `executor`, `claude_limits`, `credential_file`, `deny_paths`, `executor_image`) | EXPERIMENTAL | `slice5b.rs` (18 attack tests, scripted agents), `slice6.rs` (fake CLI), three real runs; REVIEW2. Limits: `git.publish` is always refused; the real executor needs outbound HTTPS and a credential (see README "Real executors"); `Options::read_dirs` is refused under Docker | A real agent on a larger task; a second real executor; the credential review |
+| Confinement profile: macOS scripted agent (`sandbox-exec`) | FROZEN | Tested on the Mac: `slice5b.rs`, `agent_attacks.rs` (token unreadable, database unopenable), the signal tests (finding 9 fixed: no signal to the engine or pid 1, own children and the group kill still work). Exec and mach lookups stay open; Apple marks `sandbox-exec` deprecated | A macOS release that drops `sandbox-exec` |
+| Confinement profile: macOS real-agent | EXPERIMENTAL | Three real runs; fake-CLI tests in `slice6.rs`. The agent's own tools were stopped by the CLI's permission layer before the profile was exercised; the CLI itself was shown confined (`EPERM` on a read of a canary). Outbound port 443 to any host stays open | A real agent that tries to leave the job; a host allow-list |
+| Confinement profile: Linux `bwrap` | EXPERIMENTAL | NOT usable on the Linux test host or the NAS (no binary; AppArmor blocks user namespaces). Argument vector and the probe with the real flags unit-tested only | A host where it can run |
+| Confinement backend: Docker container per call (Linux) | EXPERIMENTAL | Tested on the Linux test host (Docker 29, Ubuntu 26.04): `docker.rs` attack table (secrets, writes, network, pids, memory, daemon socket, timeout kill, SIGKILL clean-up) and the 27 confinement tests run through it. NOT yet tested on the NAS. The daemon is root; a container has no network (no real agent); the Docker tests skip on macOS | The NAS run with the same attack set; rootless Docker; a network design for a real agent |
+| Container recipe and image (`deploy/foundation`) | EXPERIMENTAL | Built on the Linux test host (118 MB, digest-pinned bases), healthcheck and smoke script pass in it; NOT deployed | A deployed run on the target host |
+
+## Target environments
+
+| Target | Status |
+|---|---|
+| macOS (the Mac) | Tested: scripted profile, real-agent profile (three real runs), the full gate. |
+| Linux, test host | Docker backend tested (attack table, 27 confinement tests, smoke, image). `bwrap` not usable. Not re-run on this integrated branch yet. |
+| Linux, NAS (Ubuntu 24.04, kernel 6.8, Docker 29) | **To verify at deployment** with the same attack set (`docker.rs`, `agent_attacks.rs`, the smoke script). Nothing has run there. |
+
+## Freeze gate (Director, 14 Nov 2026)
+Before any row is frozen: (1) the integrated attack script (`agent_attacks.rs`) and `docker.rs` pass on the
+Linux target; (2) a real executor runs through the confinement; (3) only gaps those runs demonstrate are
+fixed. No new security framework unless one of them shows a concrete need.

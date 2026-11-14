@@ -1,0 +1,26 @@
+# One service, no published ports. Copy this file and foundation.conf.example's lines into a
+# foundation.conf next to it, then:  docker compose -f compose.example.yml up -d --build
+# Build context is the repository root (this file lives in deploy/foundation/).
+services:
+  foundation:
+    build:
+      context: ../..
+      dockerfile: deploy/foundation/Dockerfile
+    image: endora-foundation:local
+    # The loop: run-due every minute. SIGTERM (docker stop) ends it cleanly.
+    command: ["serve", "--every", "60"]
+    restart: unless-stopped
+    stop_grace_period: 20s
+    # No ports: the program only reaches out (probes) and answers nothing.
+    volumes:
+      - foundation-data:/data                          # the one SQLite file
+      - ./foundation.conf:/config/foundation.conf:ro   # probes; edit on the host, restart
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  foundation-data:

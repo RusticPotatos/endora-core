@@ -887,6 +887,47 @@ dependencies = [
 ]
 
 [[package]]
+name = "endora-foundation"
+version = "0.12.0"
+dependencies = [
+ "endora-kernel",
+ "endora-persistence",
+ "rusqlite",
+ "sha2",
+]
+
+[[package]]
+name = "endora-foundation-cli"
+version = "0.12.0"
+dependencies = [
+ "endora-foundation",
+ "endora-foundation-git",
+ "endora-foundation-observe",
+ "endora-kernel",
+ "endora-persistence",
+ "rusqlite",
+ "signal-hook",
+]
+
+[[package]]
+name = "endora-foundation-git"
+version = "0.12.0"
+dependencies = [
+ "endora-foundation",
+ "endora-foundation-observe",
+ "endora-kernel",
+ "serde_json",
+]
+
+[[package]]
+name = "endora-foundation-observe"
+version = "0.12.0"
+dependencies = [
+ "endora-foundation",
+ "endora-kernel",
+]
+
+[[package]]
 name = "endora-hq"
 version = "0.12.0"
 dependencies = [

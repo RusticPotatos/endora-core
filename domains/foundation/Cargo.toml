@@ -1,0 +1,22 @@
+[package]
+name = "endora-foundation"
+description = "Foundation reset, slice 1: hold, decide, run, record, require and recover, with no capability inside"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+endora-kernel = { path = "../../shared/kernel" }
+endora-persistence = { path = "../../shared/persistence" }
+# The same SQLite the persistence crate bundles (the handle's `lock()` returns its Connection,
+# so its types and `params!` must be nameable here). Already in the lock file: no new crate.
+rusqlite = { version = "0.40", features = ["bundled"] }
+# Hash of a call's inputs for the evidence record. Already in the lock file at 0.10.9 (an
+# edge, not a new crate); used in `application` only, never in the domain.
+sha2 = "0.10"
+
+[lints]
+workspace = true

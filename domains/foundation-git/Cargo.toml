@@ -1,0 +1,21 @@
+[package]
+name = "endora-foundation-git"
+description = "Foundation capability B: a git change task (prepare, change, verify; publish declared but refused by authority)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+endora-foundation = { path = "../foundation" }
+endora-kernel = { path = "../../shared/kernel" }
+serde_json = "1"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Only the composition test: one engine, both capabilities, one status. Never a normal dependency.
+endora-foundation-observe = { path = "../foundation-observe" }

@@ -1,0 +1,16 @@
+[package]
+name = "endora-foundation-observe"
+description = "Foundation capability A: observe-and-verify (read-only probes) plus one capped reversible restart"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+endora-foundation = { path = "../foundation" }
+endora-kernel = { path = "../../shared/kernel" }
+
+[lints]
+workspace = true
