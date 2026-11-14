@@ -52,7 +52,8 @@ tagged release.
   button. It now opens with what the card is: "An accepted change reads values that are not set yet.
   Press I've set it once they are set, or Not needed if the thing is not used (for example a role
   that is not deployed)." The branch, the variable names and their paths follow, for the owner's
-  reference, with "Set each where your own values live (the vault)". Wording only.
+  reference, with "Set each wherever you keep your own values." (it first said "the vault", which the
+  owner may not have). Wording only.
 - **The "ready to read" card of a solo loop says the owner reviews it.** It said "(Sol works this
   loop alone; nobody reviews it)" beside an Accept button, which read as a warning that no one looks
   at the work. It now says "(Sol works this loop alone: you review it, nobody else does)" (ADR 0149).
