@@ -3673,6 +3673,9 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             // What done means, and what was cited for it at each stage (ADR 0114).
             row["evidence"] = self.evidence_shown(t)?;
             row["documents"] = self.documents_shown(t.id)?;
+            // The repository outside the lab it is done in, if any (ADR 0115, amended): where
+            // the node keeps its branches, which is where the owner's download of one looks.
+            row["repo"] = json!(self.outside_repo_of_task(t.id)?);
         }
         Ok(row)
     }

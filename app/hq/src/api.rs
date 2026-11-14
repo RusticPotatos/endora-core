@@ -4692,6 +4692,21 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{kept}");
         assert_eq!(kept["repo"], "https://github.com/example/tiny");
+        // The task as the owner's screen opens it names that repository (the node finds a kept
+        // branch's bundle by it), and none once the project has none.
+        let task = snap["tasks"][0]["id"].as_i64().unwrap();
+        let shown = |app: axum::Router| async move {
+            json_of(
+                app.oneshot(call("GET", &format!("/v1/tasks/{task}"), Some(TOKEN), ""))
+                    .await
+                    .unwrap(),
+            )
+            .await
+        };
+        assert_eq!(
+            shown(app.clone()).await["repo"],
+            "https://github.com/example/tiny"
+        );
         let (status, gone) = post(
             format!("/v1/projects/{id}/repo"),
             json!({ "url": null }).to_string(),
@@ -4701,6 +4716,7 @@ mod tests {
             (status, gone["repo"].clone()),
             (StatusCode::OK, json!(null))
         );
+        assert_eq!(shown(app.clone()).await["repo"], json!(null));
     }
 
     #[tokio::test]

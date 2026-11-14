@@ -635,6 +635,20 @@ impl LabKnowledge {
     /// # Errors
     /// An address that is not allowed, or the repository not answering for its default branch.
     pub(crate) fn outside_mirror(&self, url: &str) -> Result<Arc<Mirror>, String> {
+        self.outside_mirror_as(url, true)
+    }
+
+    /// The mirror of the outside repository at `url` as a download of a kept branch reads it:
+    /// the submissions are in it already, so the repository is not asked for its default branch
+    /// (no network), and a mirror made without one is not kept for a turn's work to find.
+    ///
+    /// # Errors
+    /// An address that is not allowed.
+    pub(crate) fn stored_outside_mirror(&self, url: &str) -> Result<Arc<Mirror>, String> {
+        self.outside_mirror_as(url, false)
+    }
+
+    fn outside_mirror_as(&self, url: &str, ask_base: bool) -> Result<Arc<Mirror>, String> {
         let plain = repo::outside_repo(url)?;
         // The owner's values are guarded in the fork, not outside it (ADR 0115, amended
         // 2026-11-05): the fork named as an outside repository would escape that guard.
@@ -659,6 +673,9 @@ impl LabKnowledge {
             .get(&plain)
             .cloned()
             .unwrap_or_else(|| plain.clone());
+        if !ask_base {
+            return Ok(Arc::new(Mirror::outside(&self.repo_dir, &from, "")));
+        }
         std::fs::create_dir_all(&self.repo_dir).map_err(|e| format!("no data folder: {e}"))?;
         let base = repo::default_branch(&self.repo_dir, &from)
             .map_err(|why| format!("{plain} did not say its default branch: {why}"))?;
@@ -1153,31 +1170,22 @@ pub(super) async fn check_bundle(
 
 /// `GET /v1/hq/bundles/{task}/{slug}` (ADR 0115): the newest stored submission of
 /// `hq/<slug>` for a task, whole, for the owner to fetch into their own clone when the node
-/// cannot push.
+/// cannot push. In the fork's mirror, or, for work in a repository outside the lab, in that
+/// repository's mirror, where `repo_submit` kept it.
 pub(super) async fn bundle_download(
     State(state): State<AppState>,
     Path((task, slug)): Path<(i64, String)>,
 ) -> Response {
     let branch = format!("hq/{slug}");
-    if repo::hq_branch(&branch).is_err() {
+    // Only a branch named for this task is looked for: a path, a climb, or the name of
+    // another task's branch stops here.
+    if repo::task_branch(&branch, task).is_err() {
         return refuse(StatusCode::NOT_FOUND, "", "not one of the team's branches");
     }
     let now = state.clock.now().unix_millis();
     let looked = state.clone();
-    let bundled = tokio::task::spawn_blocking(move || {
-        let mirror = looked.lab.mirror(now).ok_or_else(|| NO_FORK.to_owned())?;
-        let Some(stored) = mirror.stored_latest(task, &branch) else {
-            return Ok(None);
-        };
-        let head = stored
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .and_then(|s| s.rsplit('-').next())
-            .unwrap_or("")
-            .to_owned();
-        mirror.submission_bundle(&branch, &head)
-    })
-    .await;
+    let bundled =
+        tokio::task::spawn_blocking(move || kept_bundle_of(&looked, task, &branch, now)).await;
     match bundled {
         Ok(Ok(Some(bytes))) => {
             record(
@@ -1208,6 +1216,67 @@ pub(super) async fn bundle_download(
         Ok(Err(why)) => refuse(StatusCode::BAD_GATEWAY, "", &why),
         Err(_) => refuse(StatusCode::INTERNAL_SERVER_ERROR, "", "the bundle failed"),
     }
+}
+
+/// The newest kept submission of `branch` for `task`, whole: from the fork's mirror, else from
+/// the outside repository's mirror HQ says the task is done in, and only if HQ knows that
+/// branch on the task. `None` when none is kept.
+fn kept_bundle_of(
+    state: &AppState,
+    task: i64,
+    branch: &str,
+    now: i64,
+) -> Result<Option<Vec<u8>>, String> {
+    let fork = state.lab.mirror(now);
+    if let Some(bytes) = fork
+        .as_ref()
+        .map(|mirror| newest_kept(mirror, task, branch))
+        .transpose()?
+        .flatten()
+    {
+        return Ok(Some(bytes));
+    }
+    if let Some(bytes) = kept_outside(state, task, branch)? {
+        return Ok(Some(bytes));
+    }
+    // No fork and nothing outside it either: as before, say the fork is not set up.
+    fork.map(|_| None).ok_or_else(|| NO_FORK.to_owned())
+}
+
+/// The newest kept bundle of `branch` for `task` in `mirror`, at the head it was kept at.
+fn newest_kept(mirror: &Mirror, task: i64, branch: &str) -> Result<Option<Vec<u8>>, String> {
+    let Some(stored) = mirror.stored_latest(task, branch) else {
+        return Ok(None);
+    };
+    let head = stored
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.rsplit('-').next())
+        .unwrap_or("")
+        .to_owned();
+    mirror.submission_bundle(branch, &head)
+}
+
+/// A kept branch of a repository outside the lab (ADR 0115, amended 2026-11-01): those are
+/// never in the fork's mirror. HQ is asked which repository the task is done in and which
+/// branches it knows on the task; a branch it does not know is not served.
+fn kept_outside(state: &AppState, task: i64, branch: &str) -> Result<Option<Vec<u8>>, String> {
+    use endora_infrastructure::HqError;
+    let Some(hq) = state.hq.as_ref() else {
+        return Ok(None);
+    };
+    let shown = match hq.get(&format!("/v1/tasks/{task}")) {
+        Ok(shown) => shown,
+        Err(HqError::Answered { status: 404, .. }) => return Ok(None),
+        Err(why) => return Err(format!("HQ did not say what task {task} is: {why}")),
+    };
+    let known = shown["branches"]
+        .as_array()
+        .is_some_and(|all| all.iter().any(|b| b["name"].as_str() == Some(branch)));
+    let Some(url) = shown["repo"].as_str().filter(|_| known) else {
+        return Ok(None);
+    };
+    newest_kept(state.lab.stored_outside_mirror(url)?.as_ref(), task, branch)
 }
 
 /// Pushes the branch of a push the owner approved (ADR 0115), as HQ named it: to the fork over
@@ -4296,6 +4365,16 @@ mod tests {
                     )
                 }
                 ("/v1/team/receipt", _) => said(200, json!({ "receipt": 41 })),
+                // The task as the owner's screen opens it: its repository and the branches HQ
+                // knows on it.
+                ("/v1/tasks/940", _) => said(
+                    200,
+                    json!({ "id": 940, "repo": TINY,
+                            "branches": [{ "id": 1, "name": "hq/task-940-fix" }] }),
+                ),
+                ("/v1/tasks/941", _) => {
+                    said(200, json!({ "id": 941, "repo": TINY, "branches": [] }))
+                }
                 _ => said(200, json!({})),
             }
         }));
@@ -4434,6 +4513,94 @@ mod tests {
                 .contains("only a public https://github.com/"),
             "{said}"
         );
+        // 5. The owner downloads the kept branch of the outside repository: it is where
+        // `repo_submit` put it, in that repository's mirror, not the fork's.
+        let mut signed = state.clone();
+        signed.token = Arc::new(super::super::tests::TEST_TOKEN.to_owned());
+        let download = |uri: &str| {
+            let signed = signed.clone();
+            let request = super::super::tests::get(uri);
+            async move {
+                let res = app(signed).oneshot(request).await.unwrap();
+                let status = res.status();
+                let bytes = res.into_body().collect().await.unwrap().to_bytes();
+                (status, bytes)
+            }
+        };
+        let (status, bytes) = download("/v1/hq/bundles/940/task-940-fix").await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+        let kept = root.join("downloaded.bundle");
+        std::fs::write(&kept, &bytes).unwrap();
+        git_in(&root, &["init", "-q", "owner-clone"]);
+        git_in(
+            &root.join("owner-clone"),
+            &[
+                "fetch",
+                "-q",
+                kept.to_str().unwrap(),
+                "refs/submissions/hq/task-940-fix:refs/heads/mine",
+            ],
+        );
+        assert_eq!(
+            git_in(&root.join("owner-clone"), &["rev-parse", "mine"]),
+            head
+        );
+        // The same with no fork configured at all: the download was a 502 ("not configured").
+        let mut bare = state.clone();
+        bare.token = Arc::new(super::super::tests::TEST_TOKEN.to_owned());
+        let mut no_fork =
+            LabKnowledge::new(Docs::new(None, Box::new(ansible_nas::Web)), Vec::new())
+                .with_outside(TINY, tiny.to_str().unwrap());
+        no_fork.repo_dir = root.join("data");
+        bare.lab = Arc::new(no_fork);
+        let res = app(bare)
+            .oneshot(super::super::tests::get("/v1/hq/bundles/940/task-940-fix"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK, "no fork configured");
+        // 6. Nothing else is served: a path, a traversal, another task's file or branch, or a
+        // branch HQ does not know on that task.
+        for (uri, why) in [
+            ("/v1/hq/bundles/940/..", "dots"),
+            ("/v1/hq/bundles/940/%2e%2e", "encoded dots"),
+            (
+                "/v1/hq/bundles/940/%2e%2e%2f%2e%2e%2ftask-940-fix",
+                "encoded climb",
+            ),
+            ("/v1/hq/bundles/940/%2fetc%2fpasswd", "an absolute path"),
+            (
+                "/v1/hq/bundles/940/task-940-fix%2f..%2fsecret",
+                "a climb after the slug",
+            ),
+            ("/v1/hq/bundles/940/task-941-fix", "another task's slug"),
+            (
+                "/v1/hq/bundles/941/task-940-fix",
+                "the slug of a task asked as another",
+            ),
+            (
+                "/v1/hq/bundles/940/task-940-other",
+                "a branch HQ does not know on the task",
+            ),
+            ("/v1/hq/bundles/940/task-940-", "an empty name"),
+        ] {
+            let (status, bytes) = download(uri).await;
+            assert!(
+                status.is_client_error() && bytes.len() < 400,
+                "{why}: {uri} answered {status} with {} bytes",
+                bytes.len()
+            );
+        }
+        // And the owner's token is still what opens it.
+        let res = app(state.clone())
+            .oneshot(super::super::tests::get("/v1/hq/bundles/940/task-940-fix"))
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
         let _ = std::fs::remove_dir_all(&root);
     }
 

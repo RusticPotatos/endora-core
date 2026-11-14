@@ -258,7 +258,8 @@ and merges nothing; the owner alone pushes an accepted branch, and merges it on 
    thread, which wakes the member, and an audit line; the card's outcome says where the branch
    is. With no key on the node, the card says pushing is not set up and offers the branch's
    bundle to download (`GET /v1/hq/bundles/{task}/{slug}`) for the owner to fetch into their own
-   clone. **HQ never opens a pull request and merges nothing**: the owner merges on GitHub.
+   clone (a branch of a repository outside the lab is kept in that repository's mirror, and the
+   download finds it there: HQ names the repository and the branches it knows on the task). **HQ never opens a pull request and merges nothing**: the owner merges on GitHub.
 7. **Hiring.** The owner hires on the HQ screen (`POST /v1/members`, through the node and its
    audit log: a name, a role, a brain the role may think with, whom the member reports to);
    HQ refuses a second CEO. A lead may **request** a hire (`request_hire`: a role below its own,

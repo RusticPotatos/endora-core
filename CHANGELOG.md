@@ -7,6 +7,18 @@ tagged release.
 
 ## [Unreleased]
 
+### Fixed (a kept branch outside the lab downloads)
+
+- **`GET /v1/hq/bundles/{task}/{slug}` finds a branch of a repository outside the lab.** It looked
+  only in the fork's mirror, so a task done in a repository outside the lab, whose branch the node
+  keeps in that repository's own mirror and never pushes, answered 502 ("not configured") or 404
+  though the bundle was kept. The node now asks HQ which repository the task is done in and which
+  branches it knows on the task (`GET /v1/tasks/{id}` carries `repo` for the whole task), and serves
+  the kept branch from that mirror, without asking GitHub. Nothing else changed: the same sign-in; the
+  slug must now name the task (`task-<id>-<name>`), so a path, a climb or another task's name is
+  refused; a branch HQ does not know on the task is not served. An older HQ that does not say `repo`
+  leaves the download as it was (404).
+
 ### Added (which runner went quiet)
 
 - **Each runner says its name, and HQ names the one that stopped asking.** Runners share one token, so
