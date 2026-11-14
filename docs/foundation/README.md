@@ -102,7 +102,7 @@ Real-executor lines (see "Real executors"):
 
 ```
 claude-code /path/to/claude claude-haiku-5-5 300000 8 180   # binary model max-micro-usd max-turns [max-seconds]
-claude-credential /path/to/access-token-file              # read at call time, owner-only file
+claude-credential /path/to/access-token-file              # read at call time; recommended: an owner-only file
 claude-arg --effort                                       # (repeatable) extra CLI words
 ```
 
@@ -117,7 +117,7 @@ own process is trusted code. Details and the list of known gaps: [TRUST-BOUNDARY
 
 - **Isolation is verified per target.** macOS `sandbox-exec` profile: tested (`agent_attacks.rs`:
   token unreadable, database unopenable). Linux Docker backend: tested on the Linux test host (see below). NAS:
-  to be verified at deployment with the same attack set. A same-user, unconfined process can read the
+  Docker backend tested with the `docker.rs` attack table (secrets, writes outside the job directory, network, no Docker socket, mount and ptrace, fork and memory limits, timeout, hard-kill reaping), plus hand-run checks and a bridged control (see STABILITY.md); `agent_attacks.rs` is macOS only. A same-user, unconfined process can read the
   token and edit the database: documented, not fixed.
 - **Application-level checks are defence in depth against mistakes by trusted code, not a boundary.**
   Actor types, `OwnerProof`, the owner credential and the triggers catch a mistaken call; they do not
@@ -257,9 +257,21 @@ system paths, the `claude` binary file and nothing else of the home. Writable: t
 (`HOME`, `CLAUDE_CONFIG_DIR` and `CLAUDE_CODE_TMPDIR` all point inside it).
 
 **Credentials.** The real runs needed the Claude login's access token to be passed to the
-sandboxed child (the profile hides the login's usual store). That credential hygiene is under
-review by the Director; this README does not describe the path further, and the config line is
-`claude-credential <file>`. The CLI is started with `--restricted --safe-mode --strict-mcp-config
+sandboxed child (the profile hides the login's usual store). What was verified: the login is an
+access token only (no refresh token, no keychain access); on macOS Core reads it from the file named
+by `claude-credential <file>` and passes it only in the child's environment. A scan of the job
+directories, databases, evidence rows, logs and the repository history after the macOS runs found
+no credential. Core does not check the file's mode: keep it outside the repository and the job
+directories, with mode 600 (a recommendation, not enforced behaviour). With the Docker backend the
+job's variables, a credential among them, go through an env file in Core's scratch area,
+a per-call file under `<scratch>/.meta/.logs/` (not the job directory that is mounted into the container; mode 600).
+It is removed only when the call ends normally: a Core killed outright leaves it, credential
+included, until it is removed by hand, because nothing at start-up cleans `.logs`. The macOS scan
+does not cover this path. Running a real agent under the Docker backend
+is therefore **not supported yet**: it needs its own design (no network by default, an egress and
+credential design, for example a one-shot env file in a tmpfs deleted right after the container
+starts). Scan for token shapes before any push or copy.
+The CLI is started with `--restricted --safe-mode --strict-mcp-config
 --disable-slash-commands --no-session-persistence`, only the tools `Read,Edit,Write,Glob,Grep,Bash`,
 `--permission-prompts none`, and an allow list of `sh test.sh`, `cat`, `ls`, `git diff|status`:
 no web tools, no MCP, no user, project or local settings.

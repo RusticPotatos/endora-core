@@ -6,13 +6,13 @@ Honest statement of what Core's security rests on. Nothing here is frozen.
 
 Untrusted executors (an agent, a script an agent wrote) must not be able to read Core's state or
 the owner's credentials. That is done by **process and filesystem isolation**, not by Core's code.
-It is verified per target environment, with the same attack set (`agent_attacks.rs`):
+It is verified per target environment: on macOS with `agent_attacks.rs` (macOS only, it never ran on Linux), on Linux with the `docker.rs` attack table:
 
 | Target | Status |
 |---|---|
 | macOS `sandbox-exec` profile | tested: token unreadable, database unopenable, no network |
-| Linux / Docker backend | being built by another worker; not yet verified |
-| NAS | to be verified at deployment with the same attack set |
+| Linux / Docker backend (Linux test host) | tested with the `docker.rs` attack table (secrets, writes outside the job directory, network, no Docker socket, mount and ptrace, fork and memory limits, timeout, hard-kill reaping); the container runs with `--network none` (a hardened container on the default bridge can reach the host's own services and the LAN) |
+| NAS | Docker backend tested with the same `docker.rs` attack table, plus hand-run checks and a control container on the default bridge; the real backend runs with `--network none` (see STABILITY.md) |
 
 A same-user process that is **not** confined can read the owner token file and edit the database
 file. That is documented, not fixed; no application-level compensation is planned.

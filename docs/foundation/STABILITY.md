@@ -1,13 +1,13 @@
 # Foundation interface stability
 
-**Frozen by the Director at 4f45c80 on 14 Nov 2026 after: two independent authority reviews, a real
+**Frozen by the maintainer at 4f45c80 on 14 Nov 2026 after: two independent authority reviews, a real
 executor (3 runs, macOS), the Docker backend attacked on Linux (Linux test host), the integrated gate (2,587/0
 workspace; 199 Linux).** The EXPERIMENTAL rows are unchanged and can still change.
 
 Statuses are only these two:
 
 - **FROZEN**: additive changes only (new optional fields, new commands). Any breaking change needs a
-  recorded decision and a schema or version bump. **Reversal rule:** a demonstrated gap from the NAS
+  recorded decision and a schema or version bump. **Reversal rule:** a demonstrated gap from a NAS
   run, a real run with the new units, or a new independent review unfreezes the row.
 - **EXPERIMENTAL**: new, covered only by its own tests, or exercised only by scripted stand-ins, or an
   open finding or a known limit says it may change.
@@ -15,11 +15,28 @@ Statuses are only these two:
 A test (`domains/foundation/tests/stability_doc.rs`) fails if a row has any other status.
 
 ### Known limits at freeze
-- The NAS is unverified (nothing has run there).
+- The NAS is verified for the Docker backend (see Verified environments below); the isolation relies on
+  `--network none`: a hardened container on the default bridge can reach the host's own services and the
+  LAN, so a real agent that needs network needs its own egress design.
 - The dollar cap is unproven (no real run reached `--max-budget-usd`).
 - The real executor has not been re-run with micro-USD units.
 - Rootless Docker is untested.
+- A real agent under the Docker backend is not supported: job variables, a credential among them, go
+  through an env file in Core's scratch area (a per-call file under `<scratch>/.meta/.logs/`, not mounted into the
+  container), removed only when the call ends normally: a Core killed outright leaves it, credential
+  included, because nothing at start-up cleans it (README "Credentials"). The container has no
+  network. It needs its own egress and credential design.
 - A same-user, unconfined process can read the owner token and edit the database (the stated boundary).
+
+### Verified environments
+- macOS: the scripted sandbox profile is verified (attack tests on the Mac). The real-agent profile
+  stays EXPERIMENTAL: three real runs, but the agent's own tools never exercised the profile.
+- Docker backend on the Linux test host (Ubuntu 26.04): the foundation crates gave 199 passed, 0 failed,
+  0 skipped on four runs, and the `docker.rs` attack table held.
+- Docker backend on a NAS (Ubuntu 24.04, rootful Docker, cgroup v2, AppArmor `docker-default` and
+  seccomp enforcing): 200 passed, 0 failed, 0 skipped on three runs (the one extra test is
+  `stability_doc`), and the `docker.rs` attack table held, with hand-run checks and a bridged control
+  container (reached host services and the LAN: why `--network none` matters).
 
 Interfaces are documented frozen or experimental here and nowhere else. "What would change it" is the
 evidence that should move a row.
@@ -43,7 +60,7 @@ evidence that should move a row.
 | Confinement profile: macOS scripted agent (`sandbox-exec`) | FROZEN | Tested on the Mac: `slice5b.rs`, `agent_attacks.rs` (token unreadable, database unopenable), the signal tests (finding 9 fixed: no signal to the engine or pid 1, own children and the group kill still work). Exec and mach lookups stay open; Apple marks `sandbox-exec` deprecated | A macOS release that drops `sandbox-exec` |
 | Confinement profile: macOS real-agent | EXPERIMENTAL | Three real runs; fake-CLI tests in `slice6.rs`. The agent's own tools were stopped by the CLI's permission layer before the profile was exercised; the CLI itself was shown confined (`EPERM` on a read of a canary). Outbound port 443 to any host stays open | A real agent that tries to leave the job; a host allow-list |
 | Confinement profile: Linux `bwrap` | EXPERIMENTAL | NOT usable on the Linux test host or the NAS (no binary; AppArmor blocks user namespaces). Argument vector and the probe with the real flags unit-tested only | A host where it can run |
-| Confinement backend: Docker container per call (Linux) | EXPERIMENTAL | Tested on the Linux test host (Docker 29, Ubuntu 26.04): `docker.rs` attack table (secrets, writes, network, pids, memory, daemon socket, timeout kill, SIGKILL clean-up) and the 27 confinement tests run through it. NOT yet tested on the NAS. The daemon is root; a container has no network (no real agent); the Docker tests skip on macOS | The NAS run with the same attack set; rootless Docker; a network design for a real agent |
+| Confinement backend: Docker container per call (Linux) | EXPERIMENTAL | Tested on the Linux test host (Docker 29, Ubuntu 26.04): `docker.rs` attack table (secrets, writes, network, pids, memory, daemon socket, timeout kill, SIGKILL clean-up) and the 27 confinement tests run through it. Also tested on a NAS (Ubuntu 24.04, 200/0/0 on three runs, the same `docker.rs` attack table held). The daemon is root; a container has no network (no real agent); the Docker tests skip on macOS | Rootless Docker; a hardened container on a bridge network; a network design for a real agent |
 | Container recipe and image (`deploy/foundation`) | EXPERIMENTAL | Built on the Linux test host (118 MB, digest-pinned bases), healthcheck and smoke script pass in it; NOT deployed | A deployed run on the target host |
 
 ## Target environments
@@ -51,10 +68,10 @@ evidence that should move a row.
 | Target | Status |
 |---|---|
 | macOS (the Mac) | Tested: scripted profile, real-agent profile (three real runs), the full gate. |
-| Linux, test host | Docker backend tested (attack table, 27 confinement tests, smoke, image). `bwrap` not usable. Not re-run on this integrated branch yet. |
-| Linux, NAS (Ubuntu 24.04, kernel 6.8, Docker 29) | **To verify at deployment** with the same attack set (`docker.rs`, `agent_attacks.rs`, the smoke script). Nothing has run there. |
+| Linux, test host | Docker backend tested (attack table, 27 confinement tests, smoke, image). `bwrap` not usable. Re-run on the integrated head (199 passed, 0 failed, 0 skipped on four runs); the NAS ran 200 on three. |
+| Linux, NAS (Ubuntu 24.04, kernel 6.8, Docker 29) | Docker backend tested (rootful, cgroup v2, AppArmor `docker-default`, seccomp enforcing): 200 passed, 0 failed, 0 skipped on three runs; the `docker.rs` attack table held, plus hand-run checks (`--network none`). The image is not deployed as a service. |
 
-## Freeze gate (Director, 14 Nov 2026)
-Before any row is frozen: (1) the integrated attack script (`agent_attacks.rs`) and `docker.rs` pass on the
-Linux target; (2) a real executor runs through the confinement; (3) only gaps those runs demonstrate are
+## Freeze gate (maintainer, 14 Nov 2026)
+Before any row is frozen: (1) the attack tests pass on the target (macOS: `agent_attacks.rs`; Linux:
+the `docker.rs` attack table); (2) a real executor runs through the confinement; (3) only gaps those runs demonstrate are
 fixed. No new security framework unless one of them shows a concrete need.
