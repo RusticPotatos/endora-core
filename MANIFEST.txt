@@ -1014,6 +1014,7 @@ scripts/collect-crate-licences.sh
 scripts/data-dir.sh
 scripts/demo.sh
 scripts/experiment.py
+scripts/foundation-size.sh
 scripts/foundation-smoke.sh
 scripts/fresh-sources.sh
 scripts/gate.sh

@@ -176,6 +176,24 @@ those widenings.** The first version of the contract was not sufficient for the 
 real needs. This is one capability and one maintainer; it is evidence, not proof, that a third
 capability would need no change.
 
+## How big the foundation is
+
+Measured on 15 Nov 2026 with `sh scripts/foundation-size.sh` (read-only; prints, does not enforce a budget):
+
+| Crate | Lines of Rust in `src/` | Code lines (cloc) | Test lines |
+|---|---|---|---|
+| `endora-foundation` (Core) | 5,142 | 3,851 | 3,968 |
+| `endora-foundation-observe` | 470 | 391 | 688 |
+| `endora-foundation-git` | 2,789 | 2,310 | 2,125 |
+| `endora-foundation-cli` (`app/foundation`) | 1,062 | 966 | 1,107 |
+| **Total** | **9,463** | **7,518** | **7,888** |
+
+Core alone is about 5.1k lines; the four crates together are about 9.5k lines (7.5k code lines), plus the
+two shared crates they link (`endora-kernel`, `endora-persistence`: 4,469 lines, shared with the legacy
+code). The whole repository holds 172,504 Rust code lines (`cloc --vcs=git --include-lang=Rust`), most of them the LEGACY HQ product. "Lines"
+is `wc -l` (comments and blanks included); "code lines" needs `cloc` (`cloc --include-lang=Rust <crate>/src`).
+Nothing watches these numbers yet: growth is not gated.
+
 ## Known deviations
 
 Documented, not fixed (no code change and no new abstraction in this increment):
