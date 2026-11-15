@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # ADOPTED — Amendment to Constitution §9
 
 > **Status: ADOPTED 2026-07-25** by the maintainer (@RusticPotatoes), in force in

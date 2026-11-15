@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Harness reliability on unseen work: set 4 (3 November 2026)
 
 Protocol fixed before any task existed; Phase 1 regression checks below; result as judged.

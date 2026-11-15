@@ -1,5 +1,7 @@
 # Endora sound: the design
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Agreed with the owner on 2026-10-16 in a design interview (Q1–Q46); recorded in
 [ADR 0104](../adr/0104-endora-sound.md). Prepared with AI assistance (Claude). This document
 is the specification the build follows. Where it says *unverified*, nobody has run it yet

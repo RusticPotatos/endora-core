@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../../legacy/README.md)
+
 # Area: context (what a turn is given and can call)
 
 Build 49677595. Evidence window 2026-10-19 to 2026-11-02 (UTC), read-only from HQ's DB:

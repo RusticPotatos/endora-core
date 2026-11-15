@@ -1,5 +1,7 @@
 # Cleanup plan: eight things holding the project back
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Written 2026-10-12. One item at a time; each is finished and verified before the next starts.
 Nothing here includes secrets or personal values; where a step needs one, it says the person
 does it.

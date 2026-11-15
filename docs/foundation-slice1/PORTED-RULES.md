@@ -1,3 +1,5 @@
+Status: LEGACY · the slice 1 report of 12 Nov 2026; parts are superseded (hash chain, caps, evidence recording) · [legacy index](../legacy/README.md)
+
 # Ported rules (foundation slice 1)
 
 The old team crate's rules were read as **specs**; the code and tests here are fresh. Sources are

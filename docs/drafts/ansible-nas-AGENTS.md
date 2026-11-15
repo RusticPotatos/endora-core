@@ -1,5 +1,7 @@
 # Draft: the fork's root AGENTS.md
 
+Status: LEGACY · an internal HQ-era draft, kept for history · [legacy index](../legacy/README.md)
+
 > **A draft, not applied.** This is the text the engineering wing proposes to the owner's
 > ansible-nas fork as its first branch (an `hq/task-N-agents-md` branch, reviewed and checked
 > like any other, pushed and merged only by the owner). Endora keeps the draft in its library

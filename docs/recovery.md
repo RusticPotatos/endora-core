@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](legacy/README.md)
+
 # Rebuilding from nothing
 
 What to do if the machine running Endora is wiped, and what makes it possible. The decisions

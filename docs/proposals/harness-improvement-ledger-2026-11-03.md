@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Harness improvement ledger, 3 November 2026
 
 The record of this cycle's corrections, the hypotheses tested and rejected with their evidence, and

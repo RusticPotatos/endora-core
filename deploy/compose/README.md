@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../docs/legacy/README.md)
+
 # Installing Endora with Docker Compose
 
 - `core/`: Endora Core on its own (node, HQ, and the runner behind the `workers` profile).

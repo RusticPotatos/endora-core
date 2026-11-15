@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: configured isolated pilot
 
 Later status: the owner authorized one diagnostic, which ran and failed before

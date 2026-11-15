@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # The pattern budget
 
 > The closed set of design patterns this codebase uses, each under its canonical

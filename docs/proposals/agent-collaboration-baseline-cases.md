@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: frozen baseline cases
 
 Status: Phase 0 research specification, 2026-10-21. Prepared with AI assistance.

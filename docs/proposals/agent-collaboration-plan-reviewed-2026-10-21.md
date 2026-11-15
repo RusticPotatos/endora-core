@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Endora agent collaboration: reviewed implementation plan
 
 ## Current execution authorization

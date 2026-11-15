@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: isolated diagnostic result
 
 Later status: the owner authorized the 16,384-token follow-up. It avoided

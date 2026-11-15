@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](legacy/README.md)
+
 # Publishing Core's image
 
 Core's image is `ghcr.io/rusticpotatos/endora-node`; `deploy/compose` pins it

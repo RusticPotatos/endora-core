@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: larger-context pilot follow-up
 
 2026-10-22, owner's local date. AI-assisted work on `codex/agent-collaboration`.

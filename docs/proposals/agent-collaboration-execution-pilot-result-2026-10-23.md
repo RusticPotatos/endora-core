@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: execution-only pilot and capability correction
 
 2026-10-23, owner's local date. AI-assisted work on

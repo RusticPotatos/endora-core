@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: Phase 3 integration map
 
 2026-10-22. Source-grounded implementation notes for Phase 3 of the

@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # The Endora Constitution
 
 > Status: foundational. This document guides engineering decisions. It is not

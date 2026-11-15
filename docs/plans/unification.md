@@ -1,5 +1,7 @@
 # One Endora: the handheld, the house and recovery
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Agreed with the owner on 2026-10-16 through a design interview (27 questions, every one
 settled). Each phase is its own branch off `develop`, merged after the full gate, the
 personal-data review and the owner's OK. Prepared with AI assistance (Claude).

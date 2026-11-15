@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # HQ house pages: corrections ready to write, and what waits on the owner (3 November 2026)
 
 Prepared from section 3 of `knowledge-fidelity-2026-11-03.md`, split by what the evidence can

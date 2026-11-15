@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../../legacy/README.md)
+
 # Residual mechanisms: superseded or peripheral designs, and the code they left
 
 Area: `residual`. Build 49677595. Read-only. DB numbers from HQ's

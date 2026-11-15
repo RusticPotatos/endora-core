@@ -1,5 +1,7 @@
 # Next major: durable goal execution
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Status: foundation gate reopened, 2026-09-07. Prepared with AI assistance (Codex).
 Superseded by [the foundation reset plan](assistant-foundation-reset.md).
 The earlier implementation-complete claim is withdrawn. The ten read-only smoke

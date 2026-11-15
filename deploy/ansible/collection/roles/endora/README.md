@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../../../../docs/legacy/README.md)
+
 # Endora
 
 Homepage: [https://github.com/RusticPotatoes/Endora](https://github.com/RusticPotatoes/Endora)

@@ -1,3 +1,5 @@
+Status: LEGACY · the slice 1 report of 12 Nov 2026; parts are superseded (hash chain, caps, evidence recording) · [legacy index](../legacy/README.md)
+
 # Foundation slice 1: report
 
 Branch `feat/foundation-slice1`, from Core e9c7923.

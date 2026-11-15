@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Goal understanding and autonomous execution (3 November 2026)
 
 **The question.** Given a goal instead of a specified task, can Endora's existing worker find what

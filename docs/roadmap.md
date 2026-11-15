@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # Endora Roadmap
 
 > **Superseded in direction, 2026-10-20.** Endora is HQ ([ADR 0136](adr/0136-endora-is-hq.md)):
@@ -108,7 +110,7 @@ What the runs found:
 - **The three `verify:*` cases never rise above 1/3** — the read-back reaches the model
   and the model ignores it. Stable across every measurement, and the finding that
   ADR 0053 answers. See
-  [ADR 0053](adr/0034-evidence-verifies.md#the-answer-came-back-negative-measured-2026-07-25).
+  ADR 0053 (the cited file `0034-evidence-verifies.md` is not in this repository).
 - **The battery was reading the wrong channel.** Sixteen cases scored `capability_use`,
   the pre-[0028](adr/0053-honesty-about-what-it-did.md) field production writes nowhere
   outside tests, and the `WithSkills`/`WithTools` probes left `context.tools` empty so

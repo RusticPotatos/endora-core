@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # Where Endora Core came from
 
 Source repository: RusticPotatos/Endora

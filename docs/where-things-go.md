@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # Where things go
 
 The map of Endora for anyone adding to it, person or agent. Read it **before** adding a screen,

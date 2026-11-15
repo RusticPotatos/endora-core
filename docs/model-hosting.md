@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](legacy/README.md)
+
 # Model hosting — bring your own local model
 
 Endora is **model-agnostic**. It talks to a local, OpenAI-compatible chat endpoint

@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Baseline experiment: HQ against one Claude Code session (2026-10-28)
 
 Status: designed, not yet run. Owner's direction, 2026-10-28: make the system prove it is useful,

@@ -24,7 +24,6 @@ GOVERNANCE.md
 LICENSE
 Makefile
 NOTICE
-README.md
 SECURITY.md
 THIRD-PARTY-NOTICES.md
 app/cli/Cargo.toml
@@ -506,6 +505,8 @@ docs/foundation/TRUST-BOUNDARY.md
 docs/homelab.md
 docs/hosting.md
 docs/install.md
+docs/legacy/README-HQ.md
+docs/legacy/README.md
 docs/model-hosting.md
 docs/patterns.md
 docs/plans/always-on-butler.md

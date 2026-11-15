@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../../legacy/README.md)
+
 # Area: verification (how the system knows work was done)
 
 Build 49677595. DB window: 2026-10-19 00:00 UTC to 2026-11-02 (HQ idle since ~11:45 UTC 2 Nov). Read-only.

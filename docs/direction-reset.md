@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # Endora Direction Reset
 
 > **Superseded, 2026-10-20, by [ADR 0136](adr/0136-endora-is-hq.md).** Endora is HQ, a team of

@@ -1,5 +1,7 @@
 # Always-on butler: the design
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Agreed with the owner in a design interview on 2026-10-16 (questions Q1–Q53). This is the
 plan for Endora to be always working on something for its owner: noticing, deciding, handling
 what it can, and telling them only at the right level. It replaces the background features

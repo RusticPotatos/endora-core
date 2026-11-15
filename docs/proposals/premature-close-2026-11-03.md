@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Why #796's goal closed "done" on an unresolved answer (3 November 2026)
 
 **The question (the owner's).** Why did HQ task 1057 (run 5316, Sol on Claude Haiku, a loop worked

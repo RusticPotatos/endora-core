@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: external source review
 
 Status: research, 2026-10-21. Prepared with AI assistance. No implementation,

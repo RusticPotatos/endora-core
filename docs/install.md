@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](legacy/README.md)
+
 # Installing Endora on one Linux host
 
 How to run Endora on one ordinary Linux machine: **Core** on its own, or the **full system**

@@ -1,5 +1,7 @@
 # Endora foundation reset and OpenClaw benchmark
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Proposed plan, 2026-09-07. Prepared with AI assistance. This is the controlling
 implementation sequence for dependable delegation, superseding completion claims
 and sequencing in `jarvis-next-steps.md` and `durable-goal-loop.md`. It does not

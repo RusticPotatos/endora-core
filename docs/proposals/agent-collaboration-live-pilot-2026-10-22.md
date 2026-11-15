@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: isolated live pilot packet
 
 2026-10-22. Prepared with AI assistance on `codex/agent-collaboration`.

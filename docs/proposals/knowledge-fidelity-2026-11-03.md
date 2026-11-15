@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Discovering and trusting existing information (3 November 2026)
 
 **The question (the owner's).** Can Endora's workers pursue goals on accurate task history,

@@ -1,8 +1,10 @@
+Status: LEGACY · this is the former front page of the repository, moved here unchanged apart from this line and its relative links; it describes Endora HQ (the earlier team-of-agents product), not the foundation · [current README](../../README.md) · [legacy index](README.md)
+
 # Endora
 
 > **This is Endora Core**: the headless brain, HQ's engine, the node, the Ansible collection and
 > the full-system bundle. Its history starts fresh from `RusticPotatos/Endora` at a recorded
-> commit, and what travelled is listed in [docs/core-origin.md](docs/core-origin.md).
+> commit, and what travelled is listed in [docs/core-origin.md](../core-origin.md).
 
 A local-first team of AI agents for your house: **Endora HQ**. A small team (a CEO, leads,
 developers, a reviewer and a tester) takes on work you give it, mostly your home lab's, and you
@@ -29,7 +31,7 @@ happens without you.
 
 ## What it does
 
-- **HQ** (ADR [0102](docs/adr/0102-endora-hq.md)): goals, tasks, a team that claims and does
+- **HQ** (ADR [0102](../adr/0102-endora-hq.md)): goals, tasks, a team that claims and does
   them, reviews them and tests them against criteria written first; outcomes and a desk that
   interrupts only for decisions; the office, with games; and the Holodeck, where the team acts
   in simulated worlds to compare configurations.
@@ -41,14 +43,14 @@ happens without you.
   can export or delete it.
 
 The butler's chat, its brief, its memory of you and its mail reader were retired in
-[ADR 0136](docs/adr/0136-endora-is-hq.md).
+[ADR 0136](../adr/0136-endora-is-hq.md).
 
 ## Quick start
 
 **Installing on a Linux host?** Use Docker Compose alone, no `make` and no checkout-specific
-config: Core on its own from [`deploy/compose/core/`](deploy/compose/core/), or the full system
-(Core, Console in front, and Audio) from [`deploy/compose/`](deploy/compose/). First start,
-`endora-core setup`, ports, backups and upgrades: [docs/install.md](docs/install.md). What
+config: Core on its own from [`deploy/compose/core/`](../../deploy/compose/core), or the full system
+(Core, Console in front, and Audio) from [`deploy/compose/`](../../deploy/compose). First start,
+`endora-core setup`, ports, backups and upgrades: [docs/install.md](../install.md). What
 follows is the developer's path from a checkout.
 
 **Nothing installed yet?** `make bundled` starts Endora with a model runtime beside it —
@@ -73,10 +75,10 @@ make docker-build && make docker-run
 ```
 
 - **Model recommendations, hardware guidance, tested setups, and private-egress /
-  proxy notes:** [docs/model-hosting.md](docs/model-hosting.md).
-- **Always-on and reaching it from your phone:** [docs/hosting.md](docs/hosting.md).
+  proxy notes:** [docs/model-hosting.md](../model-hosting.md).
+- **Always-on and reaching it from your phone:** [docs/hosting.md](../hosting.md).
   The node authenticates `/v1` requests with bearer credentials; keep it on a trusted network — see
-  [SECURITY.md](SECURITY.md).
+  [SECURITY.md](../../SECURITY.md).
 
 ## The safety model
 
@@ -88,13 +90,13 @@ make docker-build && make docker-run
 - **Your data stays home**; Endora's record is exportable and deletable, and egress is guarded
   and minimized.
 
-Full principles: [Constitution](docs/constitution.md). Every design decision is
-recorded as an [ADR](docs/adr/README.md).
+Full principles: [Constitution](../constitution.md). Every design decision is
+recorded as an [ADR](../adr/README.md).
 
 ## How it's built
 
 Rust, a domain-first modular monolith organized **by responsibility**, not by layer —
-Responsibility-Oriented Clean Architecture (ROCA, [ADR 0050](docs/adr/0050-the-shape-of-the-system.md)).
+Responsibility-Oriented Clean Architecture (ROCA, [ADR 0050](../adr/0050-the-shape-of-the-system.md)).
 One authoritative backend (the **node**) holds the authority and the secrets; HQ is a service
 behind it, and clients are thin. The model sits *behind* the policy boundary.
 
@@ -111,7 +113,7 @@ domains/  team · capabilities · platform · sound · mail
 shared/   kernel (ids, time, errors)   persistence (the shared SQLite handle)   protocol
 ```
 
-See [docs/architecture.md](docs/architecture.md). There's also a CLI (`make run-cli
+See [docs/architecture.md](../architecture.md). There's also a CLI (`make run-cli
 ARGS="health"`).
 
 ## Status
@@ -123,9 +125,9 @@ change; there is one tagged release, `v0.1.0` (12 Nov 2026, image
 
 ## Contributing & license
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md), and
-[SECURITY.md](SECURITY.md). **AI-assisted contributions must be flagged as such** in the
+Read [CONTRIBUTING.md](../../CONTRIBUTING.md), the [Code of Conduct](../../CODE_OF_CONDUCT.md), and
+[SECURITY.md](../../SECURITY.md). **AI-assisted contributions must be flagged as such** in the
 PR. Contributors branch from `develop`.
 
-Licensed under [Apache-2.0](LICENSE). Copyright 2026 Endora contributors. See
-[NOTICE](NOTICE).
+Licensed under [Apache-2.0](../../LICENSE). Copyright 2026 Endora contributors. See
+[NOTICE](../../NOTICE).

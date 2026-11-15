@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../../../../docs/legacy/README.md)
+
 # Locked-down Docker networks (docker_egress)
 
 Some containers should reach only a few things: a mail mirror that needs the internet on

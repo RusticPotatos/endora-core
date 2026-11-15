@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Proposal: Endora becomes HQ
 
 Written 2026-10-20 for the owner's decision. Prepared with AI assistance (Claude). The owner

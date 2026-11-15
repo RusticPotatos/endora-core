@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Harness research review: what the literature supports for Endora's worker (3 November 2026)
 
 This is an independent, read-only review. Its question is which research-backed practices would

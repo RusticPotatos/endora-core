@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Care for the team code: long functions, nesting, the store's surface, panics
 
 2026-10-27. After the tidy ([team-code-tidy-2026-10-27.md](team-code-tidy-2026-10-27.md)) the owner

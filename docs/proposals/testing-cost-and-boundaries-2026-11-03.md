@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Testing: what covers the boundaries, what it costs, and a cadence (3 November 2026)
 
 **The question.** Do the current tests cover the critical boundaries between node, worker,

@@ -1,5 +1,7 @@
 # Goal runtime handoff review
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 2026-10-12. Reviewed `c220320` on `codex/foundation-gate`, including the six
 planner/worker changes after checkpoint `ad41823`. AI-assisted review and tests.
 

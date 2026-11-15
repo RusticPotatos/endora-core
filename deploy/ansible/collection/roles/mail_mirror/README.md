@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../../../../docs/legacy/README.md)
+
 # Mail Mirror
 
 A read-only copy of your mail on the NAS, as a Maildir, for a local assistant to read. It

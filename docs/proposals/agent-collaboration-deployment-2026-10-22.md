@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: dormant NAS deployment
 
 2026-10-22. AI-assisted release record on `codex/agent-collaboration`.

@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Tidying the team code: reads, structure and repetition
 
 2026-10-27. The owner asked what else could be optimised, reused or kept DRY, then: "make a

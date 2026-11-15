@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](legacy/README.md)
+
 # Hosting Endora: always-on and reachable
 
 Endora is **local-first and single-user**. The node holds all state and
@@ -21,7 +23,7 @@ is light. Two ways to run it:
 - **The binary** — `cargo build --release -p endora-node`, then run
   `endora-node` with `ENDORA_ADDR` and `ENDORA_DB` set (below).
 - **The container** — `make docker-build` produces the `endora-node` image; it
-  keeps the database on a `/data` volume. See [README](../README.md#running-the-node).
+  keeps the database on a `/data` volume. See the former front page, [README-HQ](legacy/README-HQ.md#quick-start).
 
 Your data lives in one SQLite file (`ENDORA_DB`, default `endora.db`; `/data/endora.db`
 in the container) — your settings and credentials as well as its memory. How to back it

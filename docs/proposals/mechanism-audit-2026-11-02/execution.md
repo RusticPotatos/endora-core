@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../../legacy/README.md)
+
 # Execution: how work is scheduled and carried out
 
 Build audited: `49677595`. Paths are relative to it. DB: `hq.db` read-only, 2026-11-02 ~13:45 UTC.

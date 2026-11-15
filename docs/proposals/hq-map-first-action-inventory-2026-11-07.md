@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # HQ map-first: every owner action and where it goes (7 Nov 2026)
 
 The owner's decision M6 (7 Nov 2026): "Agents map should be the primary view or that was the goal.

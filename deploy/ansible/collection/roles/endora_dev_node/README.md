@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../../../../docs/legacy/README.md)
+
 # Endora dev node (endora_dev_node)
 
 The Raspberry Pi that runs Endora's team runner and each turn's sandbox container: the first of

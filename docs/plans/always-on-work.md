@@ -1,5 +1,7 @@
 # Always-on work: Endora keeps working when nobody asked
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Proposed 2026-10-14; Phases 1–3 accepted by the owner 2026-10-15, recorded in
 [ADR 0094](../adr/0094-work-it-finds-for-itself.md). AI-assisted. This plan
 sequences the work and says what is proven versus assumed; the ADR is the

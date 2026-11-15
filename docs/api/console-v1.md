@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../legacy/README.md)
+
 # Core ↔ Console contract, v1
 
 What Endora Console may ask of Endora Core, and how Core answers. The machine-readable list is

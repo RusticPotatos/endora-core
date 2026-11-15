@@ -1,5 +1,7 @@
 # Endora HQ: the design
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Agreed with the owner in a design interview on 2026-10-16 (questions Q1–Q34), recorded in
 [ADR 0102](../adr/0102-endora-hq.md). Prepared with AI assistance (Claude). This is step 7 of
 [the always-on butler plan](always-on-butler.md). Phases 1, 2 and 4 (section 15) are built: the

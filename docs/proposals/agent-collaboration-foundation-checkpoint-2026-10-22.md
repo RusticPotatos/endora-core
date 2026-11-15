@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Agent collaboration: foundation integration checkpoint
 
 2026-10-22. AI-assisted work on `codex/agent-collaboration`, following

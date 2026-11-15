@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # Testing: the owner's scenarios
 
 The tiers of tests and what each is for are in

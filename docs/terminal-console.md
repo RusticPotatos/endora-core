@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](legacy/README.md)
+
 # Explicit handheld home console
 
 The terminal's Home, Media, NAS and Jobs pages use the capabilities context's

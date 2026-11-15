@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../../docs/legacy/README.md)
+
 # endora.homelab
 
 Endora's Ansible roles, shipped from Endora's own repository and versioned with it

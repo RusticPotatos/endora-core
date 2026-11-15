@@ -1,5 +1,7 @@
 # Jarvis milestone acceptance scenarios
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 These scenarios define the first milestone in [the Jarvis next-steps plan](jarvis-next-steps.md).
 They are synthetic and contain no personal data. The same cases should be exercised
 against the production-composed runner and an isolated live node before the milestone

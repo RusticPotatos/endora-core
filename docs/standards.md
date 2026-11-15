@@ -1,5 +1,7 @@
 # The team's standards
 
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 The base principles every project of the owner's is built by, every day: for the people who
 work on them and for the agents (assistants and HQ's members) alike. Each project's own
 `AGENTS.md` builds on this file; it never repeats it.

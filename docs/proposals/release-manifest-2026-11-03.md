@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Release candidate manifest, 3 November 2026
 
 **Candidate:** branch `rc-2026-11-03` at `9b0e7ce2`, in `$REPOS/Endora-premature-close`.

@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Mechanism retirement audit (2 November 2026)
 
 The owner asked for one answer per substantial mechanism: **what would we lose if this did not

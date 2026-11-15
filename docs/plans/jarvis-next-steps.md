@@ -1,5 +1,7 @@
 # Endora: from conversation to dependable delegation
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Superseded on 2026-09-07 by [the foundation reset plan](assistant-foundation-reset.md).
 The earlier Packet 1 completion claim below is withdrawn: shared leases did not
 provide adaptive execution, fenced checkpoint writes, or step-level scheduling.

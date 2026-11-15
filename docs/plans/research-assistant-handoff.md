@@ -1,5 +1,7 @@
 # Research assistant implementation handoff
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Accepted and implemented 2026-09-06; AI-assisted (Codex/Astra). Planning baseline:
 `6207f9a` on `develop`. No pull request or deployment was created.
 

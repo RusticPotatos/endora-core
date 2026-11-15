@@ -1,5 +1,7 @@
 # Research assistant: five sequential implementation packets
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 The broader product sequence and frozen milestone scenarios now live in
 [`jarvis-next-steps.md`](jarvis-next-steps.md) and
 [`jarvis-acceptance-scenarios.md`](jarvis-acceptance-scenarios.md). This checklist

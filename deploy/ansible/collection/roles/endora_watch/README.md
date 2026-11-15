@@ -1,3 +1,5 @@
+Status: LEGACY · deploys the earlier HQ/node product, not the foundation (for the foundation container see deploy/foundation/README.md) · [legacy index](../../../../../docs/legacy/README.md)
+
 # The house watch (endora_watch)
 
 A small always-on machine outside the NAS (a Raspberry Pi 2 with Raspberry Pi OS Lite is enough)

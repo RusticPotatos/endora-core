@@ -1,3 +1,5 @@
+Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+
 # Endora Domain Map
 
 > What each bounded context owns. Rewritten 2026-10-20 after

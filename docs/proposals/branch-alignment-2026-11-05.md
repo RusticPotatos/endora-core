@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Branch alignment, 5 November 2026
 
 The new architecture is the project's direction (owner, 5 Nov 2026). `develop`, `main` and

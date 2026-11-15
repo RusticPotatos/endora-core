@@ -1,5 +1,7 @@
 # Standing jobs: what Endora keeps doing, not only what it fixes
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Proposed 2026-10-15. AI-assisted. The first job (house rhythms) is built and accepted in
 [ADR 0096](../adr/0096-patterns-it-notices.md). The rest is a proposal that needs the
 owner's decisions, listed at the end. [The always-on plan](always-on-work.md) is about work

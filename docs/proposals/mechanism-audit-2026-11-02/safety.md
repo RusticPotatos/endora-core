@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../../legacy/README.md)
+
 # Safety: boundaries and operations (read-only inventory, build 49677595)
 
 Use window: 2026-10-19 to 2026-11-02 from `hq.db` (read-only) and the node's `endora.db` (read-only, audit log grouped, no values printed). HQ's `events` table only reaches back to 2026-10-30 (pruned), so event counts cover about 3 days. `runs`, `desk`, `ledger`, `nudges` and `closures` cover the full 14 days. "Product lines" means non-test lines (the code before `#[cfg(test)]`), approximate.

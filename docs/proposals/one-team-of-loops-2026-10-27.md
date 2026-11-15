@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # One team of loops: retiring the company structure
 
 2026-10-27. The owner's decision: retire the company structure. One team, with none of a

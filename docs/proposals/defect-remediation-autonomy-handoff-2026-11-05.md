@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Defect remediation and autonomy handoff (2026-11-05)
 
 Status: final. Every disposition below is the researcher's (its round-9 decision).

@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # Harness integrity audit (3 November 2026)
 
 **The question.** Which mechanisms on the minimal coding worker's path still drop, cut, distort,

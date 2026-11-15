@@ -1,5 +1,7 @@
 # Research assistant live acceptance record
 
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 Date: 2026-09-06. AI-assisted (Codex). The run used an isolated temporary
 SQLite database and local models. No personal data or production database was
 used.

@@ -1,3 +1,5 @@
+Status: LEGACY · a working paper from the HQ era, kept as written for history · [legacy index](../legacy/README.md)
+
 # PROPOSED — Amendment to the Constitution's preamble and §9
 
 > **Status: PROPOSED 2026-10-20.** Not in force. Constitution §11: *"A model may draft a
