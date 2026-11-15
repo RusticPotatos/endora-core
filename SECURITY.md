@@ -13,7 +13,7 @@ already known, though a way to make it worse than described is a finding.
 **There are no releases of the foundation yet.** The version number in the workspace manifest is a label
 inherited from the earlier HQ product, not a release of the foundation. Only the current head of the
 foundation branch receives security attention (today the branch `docs/developer-docs-v1`; `main` once the
-foundation is merged into it). Fixes land on that head; nothing is backported, and there is no long-term
+foundation is merged into it). <!-- INTERIM-NOTICE --> Fixes land on that head; nothing is backported, and there is no long-term
 support window. Interfaces are rated FROZEN or EXPERIMENTAL in
 [docs/foundation/STABILITY.md](docs/foundation/STABILITY.md); neither rating is a security guarantee.
 

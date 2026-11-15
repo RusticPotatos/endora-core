@@ -9,7 +9,7 @@ tagged release.
 
 ### Added (the foundation, EXPERIMENTAL)
 
-This entry describes the branch `docs/developer-docs-v1`; `main` does not carry it until it is merged.
+This entry describes the branch `docs/developer-docs-v1`; `main` does not carry it until it is merged. <!-- INTERIM-NOTICE -->
 There is **no release of the foundation**: the workspace version label is inherited from the HQ product.
 
 - **The foundation: a local-first core for autonomous work.** `endora-foundation` (Core) holds goals,
