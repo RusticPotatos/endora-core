@@ -49,7 +49,7 @@ fn skip(test: &str) -> bool {
     true
 }
 
-/// A SKIP that is not about the platform: with `ENDORA_STRICT_TESTS=1` (the gate sets it) the
+/// A SKIP that is not about the platform: with `ENDORA_STRICT_TESTS=1` (`scripts/gate.sh` sets it on macOS) the
 /// test fails instead of passing silently.
 fn cannot_run(test: &str, why: &str) {
     eprintln!("SKIP {test}: {why}");

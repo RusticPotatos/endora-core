@@ -9,6 +9,8 @@ L=.local/gate; mkdir -p $L
 [ -f scripts/prune-builds.sh ] && PRUNE_BUILDS_KEEP="endora-core-gate" sh scripts/prune-builds.sh 15 "$HOME/repos" | tail -1
 cargo fmt --all -- --check >$L/fmt.log 2>&1 && echo fmt-ok || { echo fmt-FAIL; exit 1; }
 cargo clippy --workspace --all-targets --all-features -- -D warnings >$L/clippy.log 2>&1 && echo clippy-ok || { echo clippy-FAIL; tail -30 $L/clippy.log; exit 1; }
+# On macOS a SKIP in the sandbox tests fails the gate (see agent_attacks.rs, macos_profile_hardening.rs).
+[ "$(uname -s)" = Darwin ] && export ENDORA_STRICT_TESTS=1
 cargo test --workspace --all-features -- --test-threads=4 >$L/test.log 2>&1; r=$?
 p=$(grep -o 'test result: [a-zA-Z]*\. [0-9]* passed' $L/test.log | awk '{s+=$4}END{print s}'); f=$(grep -o '[0-9]* failed' $L/test.log | awk '{s+=$1}END{print s}')
 sc=$(grep -E '^[0-9]+ scenarios' $L/test.log | awk '{s+=$1}END{print s}'); st=$(grep -E '^[0-9]+ steps' $L/test.log | awk '{s+=$1}END{print s}')

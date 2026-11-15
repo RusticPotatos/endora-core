@@ -352,11 +352,30 @@ fn the_deny_holds_when_the_paths_are_typed_with_the_data_volume_prefix() {
 /// must not make the git capability refuse to run, and the token stays unreadable.
 #[test]
 fn a_database_typed_with_a_dot_dot_segment_still_runs_the_task_and_stays_denied() {
+    // The token and database live under a readable prefix, so only the by-name deny can stop the
+    // read (under `CARGO_TARGET_TMPDIR` the whole of `/Users` is denied and the test proves nothing).
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let keep = PathBuf::from(format!(
+        "/opt/homebrew/share/sec1-dd-{}-{nanos}",
+        std::process::id()
+    ));
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _clean = Cleanup(keep.clone());
+    if std::fs::create_dir_all(keep.join("x")).is_err() {
+        skip("no writable /opt/homebrew/share on this Mac");
+        return;
+    }
     let lab = Lab::new("dotdot");
-    std::fs::create_dir_all(lab.dir.join("x")).unwrap();
-    std::fs::create_dir_all(lab.dir.join("secret")).unwrap();
-    let token = lab.dir.join("secret/owner.token");
-    let db = PathBuf::from(format!("{}/x/../live.db", lab.dir.display()));
+    std::fs::create_dir_all(keep.join("secret")).unwrap();
+    let token = keep.join("secret/owner.token");
+    let db = PathBuf::from(format!("{}/x/../live.db", keep.display()));
     let tpl = lab.dir.join("template");
     std::fs::create_dir_all(&tpl).unwrap();
     std::fs::write(tpl.join("lib.sh"), "add() { echo $(( $1 - $2 )); }\n").unwrap();
@@ -434,7 +453,7 @@ enum Typed {
     DataVolume,
 }
 
-/// A SKIP is not a pass: with `ENDORA_STRICT_TESTS=1` (the gate sets it) a skipped test fails.
+/// A SKIP is not a pass: with `ENDORA_STRICT_TESTS=1` (`scripts/gate.sh` sets it on macOS) a skipped test fails.
 fn skip(why: &str) {
     eprintln!("SKIP: {why}");
     assert!(
