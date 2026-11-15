@@ -2,6 +2,14 @@ Status: CURRENT · working agreements for assistants and contributors working on
 
 # Working agreements for AI assistants
 
+<!-- INTERIM-NOTICE:BEGIN delete this whole block, and every line marked INTERIM-NOTICE, once the foundation is merged into main -->
+> **Interim notice (15 Nov 2026).** The foundation (Core, its capabilities, the `endora-foundation`
+> command and these pages) currently lives on the branch `docs/developer-docs-v1`. The default branch
+> `main` still holds the earlier HQ product until the foundation is merged, so a clone of `main` does
+> not contain the code these pages describe. **Until then, check out `docs/developer-docs-v1` and
+> branch from it, not from `main`.**
+<!-- INTERIM-NOTICE:END -->
+
 This is the **canonical** instructions file for AI coding assistants working in
 the Endora repository, following the cross-tool `AGENTS.md` convention.
 `CLAUDE.md` is a symlink to this file, so Claude Code reads the same content —
@@ -21,7 +29,8 @@ Endora's own.
   user's other work.**
 - **Inspect existing work first.** Do not assume the repo is empty; preserve valid
   existing files, branches, and history.
-- Branch from `main` (the remote has no `develop` branch; see CONTRIBUTING.md). Do not force-push
+- Branch from `docs/developer-docs-v1` until the foundation is merged into `main` (see the interim notice at the top; the
+  remote has no `develop` branch; see CONTRIBUTING.md). <!-- INTERIM-NOTICE --> Do not force-push
   or rewrite published history.
 - **Foundation work** (Core, capabilities, the `endora-foundation` command): use the placement guide in
   [docs/architecture.md](docs/architecture.md); `docs/where-things-go.md` is a map of the LEGACY HQ console.

@@ -2,6 +2,14 @@ Status: CURRENT · entry points for the foundation; HQ-era material is in docs/l
 
 # Documentation
 
+<!-- INTERIM-NOTICE:BEGIN delete this whole block, and every line marked INTERIM-NOTICE, once the foundation is merged into main -->
+> **Interim notice (15 Nov 2026).** The foundation (Core, its capabilities, the `endora-foundation`
+> command and these pages) currently lives on the branch `docs/developer-docs-v1`. The default branch
+> `main` still holds the earlier HQ product until the foundation is merged, so a clone of `main` does
+> not contain the code these pages describe. **Until then, check out `docs/developer-docs-v1` and
+> branch from it, not from `main`.**
+<!-- INTERIM-NOTICE:END -->
+
 Every page starts with a `Status:` line using one of five labels: **CURRENT** (matches the code),
 **EXPERIMENTAL** (works, may change), **LEGACY** (the earlier HQ product or design, true for its
 time), **UNSUPPORTED** (known not to work or not to be relied on), **PLANNED** (not built). Interface
@@ -43,7 +51,7 @@ There is no published crate, plugin loader, wire protocol, SDK or tutorial for w
 
 | Page | Status | What it gives you |
 |---|---|---|
-| [../CONTRIBUTING.md](../CONTRIBUTING.md) | CURRENT | branch from `main`, tests first, ADRs for architecture changes |
+| [../CONTRIBUTING.md](../CONTRIBUTING.md) | CURRENT | branch from `docs/developer-docs-v1` for now (see the notice above), tests first, ADRs for architecture changes |
 | [architecture.md](architecture.md) | CURRENT | the six responsibilities, the crates as they are, the evidence for the architecture, known deviations |
 | [adr/0150-current-architecture-the-foundation.md](adr/0150-current-architecture-the-foundation.md) | Proposed ADR | what of ADR 0050 is retained, superseded and independent |
 | [adr/README.md](adr/README.md) | LEGACY index (0001 to 0149) | history; 0050 is unedited |

@@ -2,6 +2,14 @@ Status: CURRENT · how to contribute to the foundation (Core, its capabilities a
 
 # Contributing to Endora
 
+<!-- INTERIM-NOTICE:BEGIN delete this whole block, and every line marked INTERIM-NOTICE, once the foundation is merged into main -->
+> **Interim notice (15 Nov 2026).** The foundation (Core, its capabilities, the `endora-foundation`
+> command and these pages) currently lives on the branch `docs/developer-docs-v1`. The default branch
+> `main` still holds the earlier HQ product until the foundation is merged, so a clone of `main` does
+> not contain the code these pages describe. **Until then, check out `docs/developer-docs-v1` and
+> branch from it, not from `main`.**
+<!-- INTERIM-NOTICE:END -->
+
 Thank you for your interest in Endora. This document explains how to contribute
 during the project's **foundation stage** and the standards contributions are
 held to. By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
@@ -47,10 +55,15 @@ The foundation (Core and its capabilities) is the current system; the HQ product
 ## Branching and workflow
 
 ```text
-main      → the only long-lived branch; protected; contributors branch from it
+main                    → the default branch; today it still holds the earlier HQ product
+docs/developer-docs-v1  → carries the foundation and these pages; contributors branch from it
 ```
+<!-- INTERIM-NOTICE: the two lines above are interim; after the merge only `main` remains -->
 
-1. Branch from **`main`** (there is no `develop` branch on the remote). Use a descriptive prefix, e.g.
+`main` is not protected (no branch protection is set), and there is no `develop` branch on the remote.
+
+1. Branch from **`docs/developer-docs-v1`** until the foundation is merged into `main` (see the interim
+   notice at the top; after the merge, branch from `main`). <!-- INTERIM-NOTICE --> Use a descriptive prefix, e.g.
    `feat/…`, `fix/…`, `docs/…`.
 2. Keep changes focused. Prefer a **complete vertical slice** over a broad but
    shallow change.
@@ -66,19 +79,23 @@ We prefer **test-driven development**. Write tests that define new behavior
 
 ### The test tiers, and what each one is for
 
-Fast on purpose — the HQ-era offline suite was **~10s for 460+ tests** (the workspace has far more
-now), and it has to stay quick enough to be run constantly. Tiers are chosen to match how bugs have actually reached
-production here, not to fill in a pyramid.
+Fast on purpose: the suites have to stay quick enough to be run constantly. Measured on 15 Nov 2026 on an
+Apple-silicon Mac: the four foundation crates (`cargo test -p endora-foundation -p endora-foundation-observe -p
+endora-foundation-git -p endora-foundation-cli`) run **213 tests in about 35 s** (warm build; the Docker
+backend's five tests return early on macOS); the whole workspace (`cargo test --workspace --all-features`)
+runs about 2,600 tests in about 90 s warm and about 3 minutes cold. Count them yourself with those
+commands; the figures grow. Tiers are chosen to match how bugs have actually reached production here, not
+to fill in a pyramid.
 
 | tier | what it covers | where | cost |
 | --- | --- | --- | --- |
 | **unit** | pure logic, one thing at a time | `#[cfg(test)]` beside the code | ~10s |
 | **composition** | the stack **production builds**, not test doubles | same, but composing real runners and the real schema | ~0s |
 | **golden** | real captured data from a live system | `tests/` + `fixtures/` | ~0s |
-| **scenario** | behaviour the owner decided, in the owner's words, through public use cases | `features/*.feature` + `tests/scenarios.rs` ([docs/testing.md](docs/testing.md)) | ~1s |
-| **console render** | every screen of the web console, in Node | `scripts/check-console.mjs` | ~0s |
-| **live smoke** | invariants on the **deployed** node | `tests/live_smoke.rs`, `#[ignore]`d | ~2s |
-| **eval battery** | model quality against the real turn machinery | `tests/*_eval.rs`, `#[ignore]`d | minutes |
+| **scenario** (LEGACY) | behaviour the owner decided, in the owner's words, through public use cases | `features/*.feature` + `tests/scenarios.rs` ([docs/testing.md](docs/testing.md)) | ~1s |
+| **console render** (LEGACY) | every screen of the web console, in Node | `scripts/check-console.mjs` | ~0s |
+| **live smoke** (LEGACY) | invariants on the **deployed** node | `tests/live_smoke.rs`, `#[ignore]`d | ~2s |
+| **eval battery** (LEGACY) | model quality against the real turn machinery | `tests/*_eval.rs`, `#[ignore]`d | minutes |
 
 The first four run in `make ci`. The last two need something CI does not have — a deployed
 node, or a live model — so both are `#[ignore]`d and run deliberately.

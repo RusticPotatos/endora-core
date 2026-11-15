@@ -2,6 +2,14 @@ Status: CURRENT · the foundation; its interfaces are rated in docs/foundation/S
 
 # Endora
 
+<!-- INTERIM-NOTICE:BEGIN delete this whole block, and every line marked INTERIM-NOTICE, once the foundation is merged into main -->
+> **Interim notice (15 Nov 2026).** The foundation (Core, its capabilities, the `endora-foundation`
+> command and these pages) currently lives on the branch `docs/developer-docs-v1`. The default branch
+> `main` still holds the earlier HQ product until the foundation is merged, so a clone of `main` does
+> not contain the code these pages describe. **Until then, check out `docs/developer-docs-v1` and
+> branch from it, not from `main`.**
+<!-- INTERIM-NOTICE:END -->
+
 **Endora is a local-first foundation for autonomous work. It holds goals, authorizes execution,
 records evidence, and coordinates replaceable capabilities without tying the system to a particular
 model, vendor or agent framework.**
@@ -120,6 +128,7 @@ foundation: [docs/legacy/](docs/legacy/README.md). The former front page is
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md), the [Code of Conduct](CODE_OF_CONDUCT.md) and
 [SECURITY.md](SECURITY.md). **AI-assisted contributions must be flagged as such** in the PR.
-Branch from `main`. The public history holds the foundation as one squashed commit.
+Branch from `docs/developer-docs-v1` for now (see the interim notice at the top; `main` after the merge). <!-- INTERIM-NOTICE -->
+The public history holds the foundation as one squashed commit.
 
 Licensed under [Apache-2.0](LICENSE). Copyright 2026 Endora contributors. See [NOTICE](NOTICE).
