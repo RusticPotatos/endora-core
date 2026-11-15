@@ -41,8 +41,9 @@ What actually holds for dollars today is Core's own mechanism, which does not de
 
 - **Before** a call, Core reserves the call's declared maximum against the goal's cap and the overall
   cap, in the same transaction that writes the intent (`BEGIN IMMEDIATE`), so two connections to one file
-  cannot both pass (tested with six connections in threads; several processes on one file: see
-  [TRUST-BOUNDARY.md](foundation/TRUST-BOUNDARY.md#d4b-several-processes-on-one-database)).
+  cannot both pass (tested with six connections in threads; across processes it is SQLite's transaction, not tested with
+  processes: [TRUST-BOUNDARY.md D4](foundation/TRUST-BOUNDARY.md#d4-spend). The recovery lease for several
+  processes is a separate matter: [D4b](foundation/TRUST-BOUNDARY.md#d4b-several-processes-on-one-database)).
 - **After** a call, the cost the capability reports is clamped to the declared maximum; a larger report
   is a violation row, the item fails and the goal stops until `resume-goal`.
 - Core **trusts the reported cost**. A failed call that reports 0 is charged 0; an unreadable report or a

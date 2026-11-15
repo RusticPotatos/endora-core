@@ -21,7 +21,7 @@ There is **no release of the foundation**: the workspace version label is inheri
   configured agent, verified on a clean copy, then waits for the owner; `git.publish` is always refused),
   with confinement by macOS `sandbox-exec` or a Docker container per call on Linux. The command line is
   `endora-foundation` (`app/foundation`); a container recipe is in `deploy/foundation/`.
-- **Stability.** Six interfaces are FROZEN (additive changes only) and fourteen EXPERIMENTAL (the macOS sandbox-profile row and a new row for recovery of interrupted work were unfrozen on 15 Nov 2026, see below), rated in
+- **Stability.** Six interfaces are FROZEN (additive changes only) and fourteen EXPERIMENTAL (the macOS sandbox-profile row was unfrozen on 15 Nov 2026 and a new EXPERIMENTAL row for recovery of interrupted work was added, see below), rated in
   [docs/foundation/STABILITY.md](docs/foundation/STABILITY.md). Everything else is EXPERIMENTAL. A real
   agent (the Claude Code CLI) is supported on macOS only, costs real money, and its dollar cap is unverified.
 - **Documentation.** The pages are rewritten around the foundation and every page carries a `Status:`
@@ -88,6 +88,15 @@ Nothing in this list is claimed fixed.
   prints a note when the database or token lies under a readable prefix, escapes paths in the profile
   and refuses control characters (WF-A-25).
 
+### Known issues (as of this branch)
+
+Found by the independent review of this branch (15 Nov 2026); none is fixed here.
+
+- **KNOWN ISSUE (recovery; fix planned: REC-2).** An item that was interrupted once, and whose re-run then meets its criteria, can be recovered again by later `run-due` passes (under `serve` there is one pass per tick: with `--every 2` it failed within three ticks, about 6 seconds). Each pass writes a false `core.recover` row ("interrupted on attempt N"), and the third marks the item `failed` ("interrupted again after 3 attempts") although its criteria were met and it was waiting for the owner. No item is run twice (a met criterion is not checked again) and the evidence chain stays intact, but the work is lost to the owner's decision and the evidence carries the false rows. It is present on `22fe97ac` (the public `docs/developer-docs-v1`) as well; it was found by an independent review of this branch. Workaround, checked on one database: right after the `run-due` that prints `item N: 1/1 criteria met` for a recovered item, run `accept N`; an accepted item is not recovered again. No workaround was tested for a running `serve`: its ticks may reach the item first.
+- **A second `run-due` that overlaps a running one** takes the next open item, and the first process may exit 1 with `corrupt stored data: cannot transition from running to running` when both reach the same open item (a `serve` logs it and carries on). The message does not mean the database is damaged; no double run and no data harm was observed. The message and the exit code are to be improved in a later increment (REC-2).
+- **`<db>.holders/` is not denied by name** in the macOS profiles: a confined agent can list it when the database sits under a readable prefix (it could keep an item held; no way to cause a double run was found).
+- Smaller, checked: `--db x.db/` creates `x.db` with mode 644; a 254-character database name leaves a 0-byte file and exits 1; `scripts/gate.sh` prunes build folders under `$HOME/repos` and needs PyYAML; `/usr/bin/git` cannot run in the macOS profile when Xcode is the active developer directory (reported by the review). Details: [docs/operate.md](docs/operate.md#known-issues).
+
 ### Fixed (recovery liveness, weekly independent review B)
 
 - **A second `run-due`, a `serve` tick or an overlapping cron run recovered an item another live process was
@@ -103,7 +112,7 @@ Nothing in this list is claimed fixed.
   criterion and the acceptance left it running forever).
 - **Upgrading:** stop every running `endora-foundation` process (`serve`, `git-task`, cron runs) before the
   first run of the new binary; a live process of an older build would have its item recovered as dead
-  ([docs/operate.md](docs/operate.md)). The recovery row of STABILITY is EXPERIMENTAL until a new independent
+  ([docs/operate.md](docs/operate.md)). The recovery row of STABILITY is new and EXPERIMENTAL until a new independent
   review; the limits (other hosts, a Docker Desktop bind mount, a hung holder) are listed in TRUST-BOUNDARY D4b.
 
 ### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))

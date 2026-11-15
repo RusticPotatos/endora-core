@@ -52,6 +52,11 @@ contents and listings; metadata such as `stat` stays open):
   paths lies under a prefix the profile can read. A hard link or a copy of the database made by someone
   else is not covered: a confined agent cannot create a hard link to a denied file, but a copy kept under a
   readable prefix is readable.
+- **Not denied by name: the `<db>.holders/` directory** (D4b). When the database sits under a readable prefix,
+  a confined agent can list that directory and open the holder files in it (tested: opening is allowed, the lock
+  stays busy while Core lives). An agent that outlives a killed Core could take a lock and so keep that item
+  held; the independent review found no way for it to make an item run twice. Keep the database outside the
+  readable prefixes (above), which also keeps its holders directory out of reach.
 - Still readable: everything else under the readable prefixes (for example `/usr/local/bin` and the rest
   of `/usr`, `/Library` outside the denied directories, `/opt/homebrew/share`). A backup or other copy
   of the database kept there is readable to a confined agent: keep copies under the home folder or a
@@ -172,16 +177,23 @@ the same observe call twice). After the fix:
 - **Not claimed.** Processes on different hosts or on a network file system; the Docker
   backend and the NAS (not run there; one Linux container is the only Linux run).
   The lease does not hold, and a live holder's items are recovered as if it had died, when: a host process and a container share one database file through a Docker Desktop bind mount (the lock does not cross the VM; reproduced by an independent review); a single holder file is deleted or replaced while its holder lives; or the same database is opened through a hard link or a file-only bind mount (each path gets its own `.holders` directory).
-  Also not claimed: two `run-due` started at the same instant can still collide on the same start (exit 1;
-  seen on the base too, not changed here); a holders directory deleted while a holder
+  Also not claimed: a holders directory deleted while a holder
   lives (its items then read as left by a dead process); a holder that hangs without dying (its items
   stay held until it ends); two threads of one process sharing one `Core` (a process may recover its
   own leftover items); a writer that edits the file (`items.holder` is not covered by the hash chain,
   like every other table). A process killed outright while no running item names its holder file
   leaves that empty file; the next process that starts an item removes free files no item names (once, at its first start of an item), and the directory is safe to delete when nothing runs. One
   runner process remains the design.
-- **Interfaces.** Recovery of interrupted work is EXPERIMENTAL again in [STABILITY.md](STABILITY.md)
-  until a new independent review of this fix.
+- **Overlapping `run-due` processes (measured by the independent review of this branch).** A second `run-due`
+  started while another runs (a second later is enough) takes the next open item. When both reach the same
+  open item, the first process may exit 1 with `corrupt stored data: cannot transition from running to running`
+  (a `serve` logs the same and carries on). That message does **not** mean the database is damaged: the
+  evidence chain verified intact afterwards, no item ran twice and no data harm was observed (16 to 18 of 20
+  staggered processes per wave exited 1 in the review's storms; the base behaves the same). Run one runner
+  anyway. The message and the exit code are to be improved in a later increment (REC-2).
+- **KNOWN ISSUE (recovery; fix planned: REC-2).** An item that was interrupted once, and whose re-run then meets its criteria, can be recovered again by later `run-due` passes (under `serve` there is one pass per tick: with `--every 2` it failed within three ticks, about 6 seconds). Each pass writes a false `core.recover` row ("interrupted on attempt N"), and the third marks the item `failed` ("interrupted again after 3 attempts") although its criteria were met and it was waiting for the owner. No item is run twice (a met criterion is not checked again) and the evidence chain stays intact, but the work is lost to the owner's decision and the evidence carries the false rows. It is present on `22fe97ac` (the public `docs/developer-docs-v1`) as well; it was found by an independent review of this branch. Workaround, checked on one database: right after the `run-due` that prints `item N: 1/1 criteria met` for a recovered item, run `accept N`; an accepted item is not recovered again. No workaround was tested for a running `serve`: its ticks may reach the item first.
+- **Interfaces.** Recovery of interrupted work is a new EXPERIMENTAL row in [STABILITY.md](STABILITY.md) (the
+  freeze table had none; the README had said CURRENT) until a new independent review of this fix.
 
 ## D5. Reading the rest
 

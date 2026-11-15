@@ -81,7 +81,7 @@ We prefer **test-driven development**. Write tests that define new behavior
 
 Fast on purpose: the suites have to stay quick enough to be run constantly. Measured on 15 Nov 2026 on an
 Apple-silicon Mac: the four foundation crates (`cargo test -p endora-foundation -p endora-foundation-observe -p
-endora-foundation-git -p endora-foundation-cli`) run **213 tests in about 35 s** (warm build; the Docker
+endora-foundation-git -p endora-foundation-cli`) run **262 tests in about 45 s** (warm build, measured on 15 Nov 2026; the Docker
 backend's five tests return early on macOS); the whole workspace (`cargo test --workspace --all-features`)
 runs about 2,600 tests in about 90 s warm and about 3 minutes cold. Count them yourself with those
 commands; the figures grow. Tiers are chosen to match how bugs have actually reached production here, not

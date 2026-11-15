@@ -298,6 +298,9 @@ evidence chain intact: 17 rows, head HASH (keep the head elsewhere to catch remo
   attempts: the first has an intent and no result, then `core.recover`, then the second attempt with an
   intent and a result (`[facts] exit=0`). `verify-evidence` says the chain is still intact (17 rows
   here).
+- **Known issue: accept item 2 now.** The item has met its criteria and waits for you. Another `run-due`
+  (or a running `serve`) would recover it again and, on the third pass, fail it with false `core.recover`
+  rows. `endora-foundation accept 2` at once avoids it; see [Known issues](operate.md#known-issues).
 
 ## What you learned, and where next
 

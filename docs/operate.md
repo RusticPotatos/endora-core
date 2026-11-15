@@ -24,8 +24,8 @@ endora-foundation serve --every 60                            # run-due every 60
 - Run **one** `serve` (or one `run-due`) per database: one runner is still the design. Crash recovery
   settles items "a dead process left running" and leaves an item a live process is running alone (each
   running item names the lock file of its process), so a second `run-due`, a `serve` tick or a `git-task`
-  beside it does not take that item over; nothing more is claimed. Two `run-due` started at the same instant
-  can still collide (exit 1). What is and is not claimed:
+  beside it does not take that item over; nothing more is claimed. Overlapping runs can still make one process
+  exit 1 with a misleading message: see [Known issues](#known-issues). What is and is not claimed:
   [TRUST-BOUNDARY.md D4b](foundation/TRUST-BOUNDARY.md#d4b-several-processes-on-one-database).
 - Make the owner credential once with `init --token-out FILE` (the file is written mode 600). Owner
   commands then need `--token-file FILE` or `ENDORA_OWNER_TOKEN_FILE`, and refuse a token file that others
@@ -85,6 +85,18 @@ Stop every running endora-foundation process (serve, git-task, cron runs) before
 1. stop `serve`; make a backup; copy it somewhere the new binary will not touch;
 2. install the new binary and start it on the live file (it migrates once, in one transaction);
 3. to roll back, restore that untouched copy with the old binary.
+
+## Known issues
+
+Found by an independent review of 15 Nov 2026 and checked here; none is fixed in this branch.
+
+- **KNOWN ISSUE (recovery; fix planned: REC-2).** An item that was interrupted once, and whose re-run then meets its criteria, can be recovered again by later `run-due` passes (under `serve` there is one pass per tick: with `--every 2` it failed within three ticks, about 6 seconds). Each pass writes a false `core.recover` row ("interrupted on attempt N"), and the third marks the item `failed` ("interrupted again after 3 attempts") although its criteria were met and it was waiting for the owner. No item is run twice (a met criterion is not checked again) and the evidence chain stays intact, but the work is lost to the owner's decision and the evidence carries the false rows. It is present on `22fe97ac` (the public `docs/developer-docs-v1`) as well; it was found by an independent review of this branch. Workaround, checked on one database: right after the `run-due` that prints `item N: 1/1 criteria met` for a recovered item, run `accept N`; an accepted item is not recovered again. No workaround was tested for a running `serve`: its ticks may reach the item first.
+- **Overlapping `run-due` processes.** A second `run-due` started while another runs (a second later is enough) takes the next open item. When both reach the same open item, the first process may exit 1 with `corrupt stored data: cannot transition from running to running` (a `serve` logs the same and carries on). **That message does not mean the database is damaged**: `verify-evidence` stays intact, no item ran twice and no data harm was observed (checked with three `run-due` started a second apart over six goals: two exited 1, the chain was intact). The message and the exit code are to be improved in a later increment (REC-2). Run one `serve` or one `run-due` at a time.
+- **`--db x.db/` (a trailing slash) creates `x.db` with mode 644**, not 600 as for `--db x.db`. Write the path without the slash.
+- **A 254-character database file name** exits 1 (`unable to open database file`) and leaves a 0-byte file of that name behind.
+- **`scripts/gate.sh` starts by running `scripts/prune-builds.sh 15 "$HOME/repos"`**, which deletes the least recently used `target/` build folders of the worktrees under that folder (it keeps 15). Read it before running the gate on a machine with other work there.
+- **`scripts/gate.sh` needs PyYAML** for its `image-workflow` check (`python3 -c 'import yaml'`; not installed on the Mac this was checked on, where the gate stops at that step).
+- **`/usr/bin/git` inside the macOS profile.** The independent review found that `/usr/bin/git` cannot run inside the confined profile when Xcode in `/Applications` is the active developer directory (a Homebrew `git` works). Reported by the review on one Mac; not reproduced here.
 
 ## Growth
 
