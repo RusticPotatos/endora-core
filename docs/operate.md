@@ -21,8 +21,12 @@ endora-foundation serve --every 60                            # run-due every 60
 - `serve` runs `run-due` in a loop. `SIGTERM` (or `SIGINT`) ends it after the current pass, prints
   `stopping on signal` and exits 0. Run it under whatever supervises processes on your system and have it
   send `SIGTERM` to stop.
-- Run **one** `serve` (or one `run-due`) per database: crash recovery settles items "a dead process left
-  running" and assumes a single runner.
+- Run **one** `serve` (or one `run-due`) per database: one runner is still the design. Crash recovery
+  settles items "a dead process left running" and leaves an item a live process is running alone (each
+  running item names the lock file of its process), so a second `run-due`, a `serve` tick or a `git-task`
+  beside it does not take that item over; nothing more is claimed. Two `run-due` started at the same instant
+  can still collide (exit 1). What is and is not claimed:
+  [TRUST-BOUNDARY.md D4b](foundation/TRUST-BOUNDARY.md#d4b-several-processes-on-one-database).
 - Make the owner credential once with `init --token-out FILE` (the file is written mode 600). Owner
   commands then need `--token-file FILE` or `ENDORA_OWNER_TOKEN_FILE`, and refuse a token file that others
   can read (exit 2, `run chmod 600`). `serve`, `run-due`, `status`, `stop`, `evidence`, `verify-evidence` and
@@ -71,10 +75,12 @@ check for tampering: it exits 1 naming the first broken row.
 backup you only inspect; keep one copy that the newer binary has never opened.**
 
 Every command opens the database read-write first, and opening runs every pending schema migration (the
-current schema is version 7), so `status`, `evidence`, `verify-evidence` and `capabilities` upgrade an older file too.
+current schema is version 8), so `status`, `evidence`, `verify-evidence` and `capabilities` upgrade an older file too.
 There is no downgrade: a binary that finds a file newer than it understands refuses it (`this database
 is schema version N, newer than this program understands ... nothing was changed`), and
-[STABILITY.md](foundation/STABILITY.md) records no downgrade path. So:
+[STABILITY.md](foundation/STABILITY.md) records no downgrade path.
+
+Stop every running endora-foundation process (serve, git-task, cron runs) before the first run of the new binary: a newer binary upgrades the database in place and a live process of the older build would have its item recovered as dead. (Why: since schema 8 a running item names a lock file its process holds; a process of an older build holds none, so a newer binary cannot tell it is alive. See [TRUST-BOUNDARY.md D4b](foundation/TRUST-BOUNDARY.md#d4b-several-processes-on-one-database).) So:
 
 1. stop `serve`; make a backup; copy it somewhere the new binary will not touch;
 2. install the new binary and start it on the live file (it migrates once, in one transaction);

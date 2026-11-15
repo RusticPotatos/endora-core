@@ -103,6 +103,17 @@ They are **defence in depth against mistakes by trusted code**, not a boundary. 
   the process group and survives the group kill (it stays confined, but outlives the call); killing
   Core outright does not stop the agent; there is no limit on disk written or on process count. The
   Docker backend has pids, memory and cpu limits.
+- **Three gaps first named as suspected by weekly independent review A (15 Nov 2026), now tested:**
+  - *Read scope depended on where the database and token were kept* (review A, item 16): **fixed in this
+    branch** for macOS, by the by-name deny and the narrower readable prefixes in D1 (tested end to end in
+    `agent_attacks.rs`); the macOS row stays EXPERIMENTAL until a new independent review (STABILITY.md).
+  - *Paths were written unescaped into the macOS profile* (review A, item 25): **fixed in this branch**:
+    quote and backslash are escaped, control characters and non-UTF-8 are refused (D1, last bullet; tested
+    with a hostile directory name).
+  - *Nothing bounds what an executor writes into its job directory* (review A, item 17): **open**. A runaway
+    or hostile executor can fill the volume that holds the job directories; no limit on disk written exists on
+    macOS (see the backend limits above), and no fix is planned or promised here. Keep the scratch root off the
+    volume that holds the database and its backups.
 - Migrations are part of the trusted setup. They refuse a file whose evidence rows already carry
   hashes under an older `user_version` (finding 3), but whoever can run them can edit the file.
 
@@ -161,7 +172,8 @@ the same observe call twice). After the fix:
 - **Not claimed.** Processes on different hosts or on a network file system; the Docker
   backend and the NAS (not run there; one Linux container is the only Linux run).
   The lease does not hold, and a live holder's items are recovered as if it had died, when: a host process and a container share one database file through a Docker Desktop bind mount (the lock does not cross the VM; reproduced by an independent review); a single holder file is deleted or replaced while its holder lives; or the same database is opened through a hard link or a file-only bind mount (each path gets its own `.holders` directory).
-  Also not claimed: a holders directory deleted while a holder
+  Also not claimed: two `run-due` started at the same instant can still collide on the same start (exit 1;
+  seen on the base too, not changed here); a holders directory deleted while a holder
   lives (its items then read as left by a dead process); a holder that hangs without dying (its items
   stay held until it ends); two threads of one process sharing one `Core` (a process may recover its
   own leftover items); a writer that edits the file (`items.holder` is not covered by the hash chain,

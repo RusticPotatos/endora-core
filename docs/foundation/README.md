@@ -150,7 +150,7 @@ Running it long-term: [../operate.md](../operate.md).
 - **Back up before you upgrade the binary. A newer binary upgrades any database file it opens, including a
   backup you only inspect; keep one copy that the newer binary has never opened.** Every command, the
   read-only ones too (`status`, `evidence`, `verify-evidence`, `capabilities`), opens the file read-write
-  and runs the pending schema migrations (the current schema is version 7). An older binary then refuses
+  and runs the pending schema migrations (the current schema is version 8). An older binary then refuses
   the file, and there is no downgrade path.
 - **No machine-readable output, no `--help`, no `--version`.** See "The command line" above.
 

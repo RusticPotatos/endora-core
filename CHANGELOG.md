@@ -9,19 +9,19 @@ tagged release.
 
 ### Added (the foundation, EXPERIMENTAL)
 
-This entry describes the branch `docs/developer-docs-v1`; `main` does not carry it until it is merged. <!-- INTERIM-NOTICE -->
+This entry describes the branch `docs/developer-docs-v1` and the review fixes stacked on it in this branch (listed below); `main` does not carry any of it until it is merged. <!-- INTERIM-NOTICE -->
 There is **no release of the foundation**: the workspace version label is inherited from the HQ product.
 
 - **The foundation: a local-first core for autonomous work.** `endora-foundation` (Core) holds goals,
   routines, work items and criteria, decides what may run (bands, tiers, default deny, a stop switch, spend
   caps in micro-USD), runs calls through one `Capability` port, writes an intent and a result to an
   append-only evidence table with a supplemental hash chain, requires the owner's acceptance before work
-  counts as done, and settles items a dead process left running. Two capabilities ship: `endora-foundation-observe`
+  counts as done, and settles items a dead process left running (an item a live process is running is left alone). Two capabilities ship: `endora-foundation-observe`
   (tcp, http and command probes from a config file) and `endora-foundation-git` (a code change by a
   configured agent, verified on a clean copy, then waits for the owner; `git.publish` is always refused),
   with confinement by macOS `sandbox-exec` or a Docker container per call on Linux. The command line is
   `endora-foundation` (`app/foundation`); a container recipe is in `deploy/foundation/`.
-- **Stability.** Seven interfaces are FROZEN (additive changes only) and twelve EXPERIMENTAL, rated in
+- **Stability.** Six interfaces are FROZEN (additive changes only) and fourteen EXPERIMENTAL (the macOS sandbox-profile row and a new row for recovery of interrupted work were unfrozen on 15 Nov 2026, see below), rated in
   [docs/foundation/STABILITY.md](docs/foundation/STABILITY.md). Everything else is EXPERIMENTAL. A real
   agent (the Claude Code CLI) is supported on macOS only, costs real money, and its dollar cap is unverified.
 - **Documentation.** The pages are rewritten around the foundation and every page carries a `Status:`
@@ -41,17 +41,29 @@ There is **no release of the foundation**: the workspace version label is inheri
 Fixed in this branch's code (stated in [docs/foundation/TRUST-BOUNDARY.md](docs/foundation/TRUST-BOUNDARY.md)):
 signals to other processes are denied in both macOS sandbox profiles (an earlier independent review's
 finding 9, tested); `init` exits 2 when an owner credential already exists; migrations refuse a file
-whose evidence rows already carry hashes under an older schema version (finding 3).
+whose evidence rows already carry hashes under an older schema version (finding 3). **Also in this branch,
+from the weekly independent reviews of 15 Nov 2026** (each fix has tests; the two rows concerned are
+EXPERIMENTAL until a new independent review): the macOS profile hardening below (LaunchServices, preferences,
+pasteboard and Shortcuts denied; the database and token denied by name in both profiles; the read scope
+no longer depends on where they are kept; profile paths escaped), and the recovery liveness lease (a second
+`run-due`, a `serve` tick or a `git-task` no longer recovers an item a live process is running; schema 8;
+see "Fixed (recovery liveness)" below).
 
-Open in this branch, as documented there and in the independent review of 15 Nov 2026 (reading and
+Open in this branch, as documented there and in the independent reviews of 15 Nov 2026 (reading and
 running, not exploit tests): `OwnerProof` is not bound to a database or process (finding 2);
 `Core::fail` accepts any actor (finding 10); dropped append-only triggers are not detected on open
 (finding 4); a credential-less file can be enrolled by whoever runs `init` first (finding 7); the dollar
-cap of the real-executor path is unverified; **suspected, not yet tested:** on macOS the sandbox's read
-scope depends on where the database and token are kept, nothing bounds how much an executor writes into
-its job directory, and paths are written into the macOS profile without escaping; unknown command-line
-flags are ignored; a goal or routine cannot be retired and a lost owner token cannot be replaced (see
-[Known limits](docs/foundation/README.md#known-limits)). Nothing in this list is claimed fixed.
+cap of the real-executor path is unverified; nothing bounds how much an executor writes into its job
+directory (review A, item 17); unknown command-line flags are ignored; a goal or routine cannot be
+retired and a lost owner token cannot be replaced (see
+[Known limits](docs/foundation/README.md#known-limits)). **Open on macOS** (documented, not fixed): a
+child that calls `setsid` survives the group kill and the agent survives a killed Core (WF-B-03); no limit
+on disk written or on process count (WF-B-05); a symlink to an absolute path or out of the repository is
+not flagged by the verification (WF-08); `launchctl print` shows other launchd jobs' environment
+variables; exec, other mach lookups and metadata stay allowed; the real-agent profile under the stricter
+rules has not been run with a real Claude Code CLI. Recovery has not been run on the NAS or with the
+Docker backend, and a database shared by a host process and a container fails (TRUST-BOUNDARY D4b).
+Nothing in this list is claimed fixed.
 
 ### Security (macOS sandbox profile)
 
@@ -75,6 +87,24 @@ flags are ignored; a goal or routine cannot be retired and a lost owner token ca
   `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`, `/opt/homebrew/etc` and `/Library/Application Support`,
   prints a note when the database or token lies under a readable prefix, escapes paths in the profile
   and refuses control characters (WF-A-25).
+
+### Fixed (recovery liveness, weekly independent review B)
+
+- **A second `run-due`, a `serve` tick or an overlapping cron run recovered an item another live process was
+  still running** (a false `core.recover` row, a probe run twice, a live git task failed mid-agent). Each
+  started item now names a lock file its process holds for its lifetime (`<db>.holders/`, new nullable column
+  `items.holder`, schema version 8); recovery takes over only items whose holder is dead, items with no holder
+  (older rows, recovered as before) and items its own process started. Tested with real processes
+  (`app/foundation/tests/recover_liveness.rs`, six two-process tests, and the library tests), including
+  `kill -9`. The evidence rows, hashes and chain are unchanged. A database path that begins with the
+  lowercase `file:` (a SQLite URI) is refused; write `./file:x` for a plain file of that name. The new
+  dependency is `rustix` (already in the lock file).
+- **`run-due` settles an auto-observe item stranded after its last check** (a kill between the last
+  criterion and the acceptance left it running forever).
+- **Upgrading:** stop every running `endora-foundation` process (`serve`, `git-task`, cron runs) before the
+  first run of the new binary; a live process of an older build would have its item recovered as dead
+  ([docs/operate.md](docs/operate.md)). The recovery row of STABILITY is EXPERIMENTAL until a new independent
+  review; the limits (other hosts, a Docker Desktop bind mount, a hung holder) are listed in TRUST-BOUNDARY D4b.
 
 ### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))
 

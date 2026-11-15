@@ -25,7 +25,7 @@ and recovery; a small capability can be one Rust module; a bounded context is no
 | run | `application/ports.rs` (`Capability`, the one port); `Core::call` is the only path to a capability |
 | record | `domain/evidence.rs`, `infrastructure/chain.rs` (hash chain); an intent before the call, a result after |
 | require | `domain/accept.rs`; `Core::accept`, `decline`, `confirm_criterion`, `settle_by_policy` |
-| recover | `Core::recover_interrupted`, called at the start of `run-due` |
+| recover | `Core::recover_interrupted` and `settle_stranded_auto_observe`, called at the start of `run-due`; an item a live process runs is left alone (`Store::adopt`, `infrastructure/holders.rs`) |
 
 ## The crates as they are
 

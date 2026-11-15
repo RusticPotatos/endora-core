@@ -230,6 +230,7 @@ token file**, which cannot be made again, so keep a second copy of it (see
 **Back up before you upgrade the binary. A newer binary upgrades any database file it opens, including a
 backup you only inspect; keep one copy that the newer binary has never opened.** The `status` command in
 the block above opens the backup like any other file: with a newer binary it would migrate that copy too.
+Stop every running `endora-foundation` process (`serve`, `git-task`, cron runs) before the first run of the new binary: a newer binary upgrades the database in place, and a live process of the older build would have its item recovered as dead.
 More on running it for longer: [operate.md](operate.md).
 
 ## 7. Kill it in the middle of a check
