@@ -278,7 +278,7 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
   directory; reads only there, the system paths and the files the config names; no network. The
   environment is explicit and minimal (`Options::env_allow` lets named variables through). The
   call's process group is killed when it ends (see the macOS limits next).
-- **Known limits of the macOS backend** (a weekly independent review found the first two; not fixed):
+- **Known limits of the macOS backend** (a weekly independent review found these; not fixed):
   a child that calls `setsid` leaves the process group, survives the group kill and outlives the call
   (it stays confined to the job directory); killing Core outright does not stop the agent; there is no
   limit on disk written or on process count (the Docker backend has pids, memory and cpu limits). The
@@ -286,6 +286,8 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
   escape through LaunchServices was found and fixed (it now denies those operations and preference and
   pasteboard access; the fix awaits independent review), and exec and the other mach lookups stay open.
   An allow-list rebuild is the longer-term fix. The stricter denials were not tried with a real CLI.
+  Also open: launchd shows other jobs' environment variables (never put a secret in a launch agent's or a
+  launched app's environment; TRUST-BOUNDARY.md D2).
   The readable prefixes, and what is denied by directory and by name, are listed in TRUST-BOUNDARY.md D1.
 - **Evidence is capped and redacted.** 16 KB per output field with the full length in a marker;
   private-key blocks, `NAME=value` for secret-looking names and well-known token prefixes become

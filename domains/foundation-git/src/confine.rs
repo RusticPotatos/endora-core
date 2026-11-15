@@ -236,6 +236,12 @@ const MAC_ROUTE_DENY: &str = concat!(
     " (global-name \"com.apple.cfprefsd.daemon\")",
     " (global-name \"com.apple.cfprefsd.agent\")",
     " (global-name \"com.apple.pasteboard.1\"))",
+    // The Shortcuts service (shortcuts run outside the sandbox, as the owner).
+    "(deny mach-lookup (global-name-prefix \"com.apple.siri\"))",
+    // A speed bump only, not a boundary: `launchctl print` shows other launchd jobs' environment
+    // variables, and no mach-lookup or other operation deny closed that (tried); a process can
+    // still reach launchd without this binary.
+    "(deny process-exec (literal \"/bin/launchctl\"))",
 );
 
 /// The parts of `/opt/homebrew` a confined command may read.
@@ -275,6 +281,89 @@ fn deny_by_name(paths: &[PathBuf]) -> String {
     }
     out.push(')');
     out
+}
+
+/// Every spelling of each path that the sandbox could be asked to open it by: the canonical path
+/// first (absolute, symlinks resolved, `.`, `..` and `//` gone; a file that does not exist yet
+/// gets its nearest existing ancestor canonicalised), then the lexical absolute path and the path
+/// as typed when they differ. The sandbox matches the canonical path, so the first one is the one
+/// that denies; the others are belt and braces.
+#[must_use]
+pub fn canonical_deny_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut add = |p: PathBuf| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    for typed in paths {
+        let abs = if typed.is_absolute() {
+            typed.clone()
+        } else {
+            cwd.join(typed)
+        };
+        // Lexical normalisation: no `.`, no empty segments, `..` pops a segment.
+        let mut lex = PathBuf::new();
+        for c in abs.components() {
+            match c {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    lex.pop();
+                }
+                other => lex.push(other),
+            }
+        }
+        // Canonical: the whole path if it exists, else the nearest existing ancestor plus the rest.
+        let mut tail = Vec::new();
+        let mut head = abs.clone();
+        let canonical = loop {
+            if let Ok(c) = head.canonicalize() {
+                break Some(
+                    tail.iter()
+                        .rev()
+                        .fold(c, |acc: PathBuf, t: &std::ffi::OsString| acc.join(t)),
+                );
+            }
+            match (head.file_name().map(ToOwned::to_owned), head.parent()) {
+                (Some(n), Some(par)) if n != ".." => {
+                    tail.push(n);
+                    head = par.to_path_buf();
+                }
+                _ => break None,
+            }
+        };
+        if let Some(c) = canonical {
+            add(c);
+        }
+        add(lex);
+        if typed.is_absolute() {
+            add(typed.clone());
+        }
+    }
+    out
+}
+
+/// Rejects a deny path the profile would not match: it must be absolute and have no `.` or `..`
+/// segment (use [`canonical_deny_paths`]).
+///
+/// # Errors
+/// Names the path.
+pub fn check_deny_path(p: &Path) -> Result<(), String> {
+    // `Path::components` hides `.` and `//` inside a path, so the text itself is checked.
+    let text = p.to_string_lossy();
+    let plain = text.strip_prefix('/').is_some_and(|rest| {
+        rest.split('/')
+            .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
+    });
+    if plain {
+        Ok(())
+    } else {
+        Err(format!(
+            "the denied path {} is not absolute and normalised: the sandbox would not match it",
+            p.display()
+        ))
+    }
 }
 
 /// Rejects a path the macOS profile cannot carry safely: not UTF-8, or holding a control
@@ -352,7 +441,6 @@ pub fn mac_profile(dir: &Path, reads: &Reads) -> String {
     if Path::new("/opt/homebrew").exists() {
         let _ = write!(p, "(allow file-read-data (subpath \"{HOMEBREW_OPENSSL}\"))");
     }
-    p.push_str(&deny_by_name(&reads.deny));
     let _ = write!(p, "(allow file-read-data {}", q(dir));
     for d in &reads.dirs {
         let _ = write!(p, " {}", q(d));
@@ -361,6 +449,9 @@ pub fn mac_profile(dir: &Path, reads: &Reads) -> String {
         let _ = write!(p, " (literal \"{}\")", esc(f));
     }
     p.push(')');
+    // Last of all (the last matching rule wins): the owner's database and token stay denied even
+    // when they lie inside the job directory or a named read directory.
+    p.push_str(&deny_by_name(&reads.deny));
     p
 }
 
@@ -410,8 +501,7 @@ pub fn mac_profile_real_agent(dir: &Path, reads: &Reads, deny: &[PathBuf]) -> St
         "(allow network-outbound (remote tcp \"*:443\") (literal \"/private/var/run/mDNSResponder\"))",
     );
     p.push_str("(allow file-read-data (subpath \"/private/etc\"))");
-    let named: Vec<PathBuf> = deny.iter().chain(&reads.deny).cloned().collect();
-    p.push_str(&deny_by_name(&named));
+    p.push_str(&deny_by_name(deny));
     let _ = write!(p, "(allow file-read-data {}", q(dir));
     for d in &reads.dirs {
         let _ = write!(p, " {}", q(d));
@@ -420,6 +510,9 @@ pub fn mac_profile_real_agent(dir: &Path, reads: &Reads, deny: &[PathBuf]) -> St
         let _ = write!(p, " (literal \"{}\")", esc(f));
     }
     p.push(')');
+    // Last of all (the last matching rule wins): the owner's database and token stay denied even
+    // when they lie inside the job directory or a named read directory.
+    p.push_str(&deny_by_name(&reads.deny));
     p
 }
 
@@ -1047,6 +1140,9 @@ pub fn run(j: &Job<'_>) -> Result<Ran, String> {
             all.extend(named.iter().map(PathBuf::as_path));
             for p in all {
                 check_profile_path(p)?;
+            }
+            for p in j.reads.deny.iter().chain(named) {
+                check_deny_path(p)?;
             }
             let mut c = Command::new("sandbox-exec");
             let profile = match j.profile {

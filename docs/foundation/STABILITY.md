@@ -40,10 +40,11 @@ A test (`domains/foundation/tests/stability_doc.rs`) fails if a row has any othe
   process table is shared with the owner's session). The Docker backend has pids, memory and cpu limits.
 - Preference and pasteboard access is denied for both profiles; a real Claude Code CLI under these
   stricter rules is not verified.
-- The database, its sidecars and the token are denied by name in both profiles (the scripted profile
-  took no deny list before); `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`, `/opt/homebrew/etc`
+- The database, its sidecars and the token are denied by their canonical path (and as typed) in both profiles, as the last
+  rule (the scripted profile took no deny list before); `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`, `/opt/homebrew/etc`
   and `/Library/Application Support` are denied whole and `/opt/homebrew` is readable only for `bin`,
   `lib`, `opt`, `Cellar`, `share`. The full list is in TRUST-BOUNDARY.md D1.
+- Open route: `launchctl print` shows other launchd jobs' environment variables (no deny closed it; TRUST-BOUNDARY.md D2).
 - Open findings for a later fix: a symlink the agent makes to an absolute path travels in the patch
   (captured as a link, never followed).
 

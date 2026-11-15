@@ -331,6 +331,17 @@ fn an_agent_cannot_spoof_the_owner_or_accept_its_own_work() {
 /// data) is unreadable by directory. Needs a writable Homebrew prefix; otherwise it says SKIP.
 #[test]
 fn an_agent_cannot_read_a_database_or_token_kept_under_an_allowed_prefix() {
+    a16(false);
+}
+
+/// Review round 2 (R1): the owner reaches the same files through a symlinked directory, so the
+/// path typed on the command line is not the path the sandbox checks.
+#[test]
+fn the_deny_holds_when_the_database_is_reached_through_a_symlinked_directory() {
+    a16(true);
+}
+
+fn a16(through_link: bool) {
     let brew = Path::new("/opt/homebrew");
     let writable = |d: &str| {
         let t = brew
@@ -367,8 +378,25 @@ fn an_agent_cannot_read_a_database_or_token_kept_under_an_allowed_prefix() {
     std::fs::create_dir_all(&var).unwrap();
     let canary = format!("canary-{tag}");
     std::fs::write(var.join("copy.txt"), &canary).unwrap();
-    let db = share.join("live.db");
-    let token = share.join("owner.token");
+    // `db` and `token` are what the owner types (through a link, if asked); the agent is given the
+    // real paths.
+    let (db, token, real_db, real_token) = if through_link {
+        let link = lab.dir.join("link");
+        std::os::unix::fs::symlink(&share, &link).unwrap();
+        (
+            link.join("live.db"),
+            link.join("owner.token"),
+            share.join("live.db"),
+            share.join("owner.token"),
+        )
+    } else {
+        (
+            share.join("live.db"),
+            share.join("owner.token"),
+            share.join("live.db"),
+            share.join("owner.token"),
+        )
+    };
     let tpl = lab.dir.join("template");
     std::fs::create_dir_all(&tpl).unwrap();
     std::fs::write(tpl.join("lib.sh"), "add() { echo $(( $1 - $2 )); }\n").unwrap();
@@ -385,8 +413,8 @@ fn an_agent_cannot_read_a_database_or_token_kept_under_an_allowed_prefix() {
              cat '{t}' > t.out 2> t.err; echo $? > t.exit\n\
              /usr/bin/sqlite3 '{d}' 'select count(*) from owner_credential' > d.out 2>&1; echo $? > d.exit\n\
              cat '{c}' > c.out 2> c.err; echo $? > c.exit\n",
-            t = token.display(),
-            d = db.display(),
+            t = real_token.display(),
+            d = real_db.display(),
             c = var.join("copy.txt").display()
         ),
     )

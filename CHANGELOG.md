@@ -55,6 +55,10 @@ flags are ignored; a goal or routine cannot be retired and a lost owner token ca
 
 ### Security (macOS sandbox profile)
 
+- **Round 2 of the independent review of the above.** The by-name deny is built from the canonical path (relative,
+  `.`/`..`/`//` and symlinked spellings did not match before), is the last rule of the profile, and the Shortcuts service is
+  denied. `launchctl print` still shows other launchd jobs' environment variables: documented as an open route.
+
 - **A confined process could ask LaunchServices to start an unconfined helper** (weekly independent review B,
   15 Nov 2026). Both macOS profiles now deny `lsopen`, `appleevent-send` and the LaunchServices lookup,
   preference reads and writes, and the preferences and pasteboard lookups, each with a test

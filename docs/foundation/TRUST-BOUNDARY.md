@@ -30,12 +30,21 @@ contents and listings; metadata such as `stat` stays open):
   `/Library/Application Support`, `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`,
   `/opt/homebrew/etc` (except the OpenSSL directory above), the home folders (`/Users`), the temporary
   folders (`/private/tmp`, `/tmp`, `/private/var/folders`), `/private/var/root`, `/var/root`, `/Volumes`.
-- Denied by name, in both profiles, wherever they lie: the database, its `-journal`, `-wal` and `-shm`
-  files and the owner token file (the command line passes them whenever it runs a git capability). Before
-  15 Nov 2026 only the real-agent profile did this, and only with a `claude-code` line; a database or
+- Denied by name, in both profiles: the database, its `-journal`, `-wal` and `-shm` files and the owner
+  token file, whenever the command line runs a git capability. The sandbox matches canonical paths, so
+  the command line first makes each of these paths absolute (against the directory it was started in)
+  and canonical (symlinks resolved, `.`, `..` and `//` removed; for a file that does not exist yet, its
+  directory is resolved), denies that canonical path, and also denies the path as typed when it differs
+  (the sidecars are derived from each). The deny is the last rule of the profile, so it also holds for a
+  file inside the job directory or inside a named read directory. A caller that builds a profile itself
+  must pass absolute, normalised paths: the profile builder refuses others. Before 15 Nov 2026 only the
+  real-agent profile did this, only with a `claude-code` line, and with the path as typed; a database or
   token kept under a readable prefix such as `/usr/local/var` or `/opt/homebrew/share` was readable to a
-  scripted agent (writes stayed denied). The command line prints a note when one of these paths lies
-  under a prefix the profile can read.
+  scripted agent (writes stayed denied), and a relative or symlinked spelling of the path never matched.
+  The command line prints a note, using the canonical path, when one of these paths lies under a prefix
+  the profile can read. A hard link or a copy of the database made by someone else is not covered: a
+  confined agent cannot create a hard link to a denied file, but a copy kept under a readable prefix is
+  readable.
 - Still readable: everything else under the readable prefixes (for example `/usr/local/bin` and the rest
   of `/usr`, `/Library` outside the denied directories, `/opt/homebrew/share`). A backup or other copy
   of the database kept there is readable to a confined agent: keep copies under the home folder or a
@@ -65,12 +74,21 @@ They are **defence in depth against mistakes by trusted code**, not a boundary. 
   outside the sandbox act for the caller. A confined process could ask LaunchServices to start an
   unconfined helper, which ran as the owner's user, so the token and the database were reachable.
   Impact: the isolation above did not hold on macOS against a hostile scripted agent. Fix: both
-  profiles now deny those operations (`lsopen`, `appleevent-send`, the LaunchServices lookup), and
+  profiles now deny those operations (`lsopen`, `appleevent-send`, the LaunchServices lookup, the
+  Shortcuts mach services, whose names start with `com.apple.siri`: a shortcut runs outside the sandbox), and
   also preference reads and writes (a persistent write outside the job directory, and reading another
   app's settings, through the preferences daemon) and the pasteboard lookup (the owner's clipboard).
   Each denial has a test. Why the row is EXPERIMENTAL: STABILITY.md.
 - **What stays open on macOS:** exec; every mach lookup not named above (other system helpers stay
-  reachable); under the real-agent profile outbound TCP port 443 to any host. The longer-term fix is
+  reachable; for example notifications can still be posted); metadata (`stat`) everywhere; directory
+  service and launchd listings; under the real-agent profile outbound TCP port 443 to any host.
+- **Known open route: launchd job environments are readable.** `launchctl print gui/<uid>/<job>` run
+  from either profile prints other launchd jobs' environment variables. By experiment, no deny of a
+  mach lookup or of another operation closed it (the request travels over the bootstrap port the
+  process already holds); the profile denies running `/bin/launchctl`, which is a speed bump only, not
+  a boundary. Mitigation: never put a secret in the environment of a launch agent or of an app started
+  by launchd, and restart long-lived apps that hold one from a clean environment. The real fix belongs
+  with the allow-list rebuild. The longer-term fix is
   to rebuild the profile from `(deny default)` with an allow-list (exec, the system read paths, the job
   directory); that is not done. The preference and pasteboard denials were not tried with a real
   Claude Code CLI.

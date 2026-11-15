@@ -15,7 +15,10 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use endora_foundation_git::{Reads, check_profile_path, mac_profile, mac_profile_real_agent};
+use endora_foundation_git::{
+    Reads, canonical_deny_paths, check_deny_path, check_profile_path, mac_profile,
+    mac_profile_real_agent,
+};
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/\
 LaunchServices.framework/Support/lsregister";
@@ -23,7 +26,7 @@ LaunchServices.framework/Support/lsregister";
 static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 /// A job directory name that is only text (nothing is created there).
-const JOB: &str = concat!("/private", "/tmp/job");
+const JOB: &str = "/srv/sandbox-job";
 
 /// Both profiles, by name: the real-agent one derives from the scripted one.
 fn profiles(job: &Path) -> [(&'static str, String); 2] {
@@ -121,6 +124,19 @@ impl Lab {
         let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
         text.push_str(&String::from_utf8_lossy(&o.stderr));
         (status.code().unwrap_or(-1), text)
+    }
+
+    /// The same script with no sandbox (the control: it must succeed, so a held result is the
+    /// profile and not a broken tool). Returns (exit code, combined output).
+    fn unconfined(&self, script: &str) -> (i32, String) {
+        let o = Command::new("/bin/sh")
+            .args(["-c", script])
+            .current_dir(&self.job)
+            .output()
+            .unwrap();
+        let mut text = String::from_utf8_lossy(&o.stdout).into_owned();
+        text.push_str(&String::from_utf8_lossy(&o.stderr));
+        (o.status.code().unwrap_or(-1), text)
     }
 
     /// Wait up to `secs` for `marker` to appear.
@@ -281,15 +297,26 @@ fn a_confined_process_cannot_write_or_read_user_preference_domains() {
             "defaults write {write_domain} k 1 >/dev/null 2>&1\n\
              defaults read {read_domain} k 2>/dev/null > read.txt\n"
         );
+        // Control: unconfined, the same script writes the domain and reads the canary.
+        let plist = PathBuf::from(std::env::var("HOME").unwrap())
+            .join("Library/Preferences")
+            .join(format!("{write_domain}.plist"));
+        lab.unconfined(&script);
+        let control = std::fs::read_to_string(lab.job.join("read.txt")).unwrap_or_default();
+        assert!(
+            control.contains(&canary),
+            "control: the unconfined read failed"
+        );
+        assert!(plist.exists(), "control: the unconfined write failed");
+        let _ = Lab::plain(&["defaults", "delete", &write_domain]);
+        let _ = std::fs::remove_file(&plist);
+        let _ = std::fs::remove_file(lab.job.join("read.txt"));
         let _ = lab.confined(&profile, &script);
         let read = std::fs::read_to_string(lab.job.join("read.txt")).unwrap_or_default();
         assert!(
             !read.contains(&canary),
             "{name}: the confined process read another app's preference value"
         );
-        let plist = PathBuf::from(std::env::var("HOME").unwrap())
-            .join("Library/Preferences")
-            .join(format!("{write_domain}.plist"));
         assert!(
             !plist.exists(),
             "{name}: the confined process wrote a preference domain outside the job directory"
@@ -315,6 +342,14 @@ fn a_confined_process_cannot_reach_the_pasteboard_service() {
              \"roundtrip=\" + ObjC.unwrap(pb.stringForType($.NSPasteboardTypeString))' \
              > pb.txt 2>&1\n"
         );
+        // Control: unconfined, the same script round-trips on its private pasteboard.
+        lab.unconfined(&script);
+        let control = std::fs::read_to_string(lab.job.join("pb.txt")).unwrap_or_default();
+        assert!(
+            control.contains(&format!("roundtrip={word}")),
+            "control: the unconfined pasteboard script failed: {control}"
+        );
+        let _ = std::fs::remove_file(lab.job.join("pb.txt"));
         let _ = lab.confined(&profile, &script);
         let out = std::fs::read_to_string(lab.job.join("pb.txt")).unwrap_or_default();
         assert!(
@@ -358,8 +393,8 @@ fn both_profiles_deny_the_database_and_token_by_name_and_the_service_data_prefix
                 .rfind(&format!("(subpath \"{f}\")"))
                 .unwrap_or_else(|| panic!("{name}: no deny for {f}"));
             assert!(
-                after_system < at && at < job_allow,
-                "{name}: {f} is not denied between the system allow and the job allow"
+                after_system < at && at > job_allow,
+                "{name}: {f} is not denied after the system allow and after the final job allow (the last rule wins)"
             );
         }
         for d in [
@@ -458,6 +493,261 @@ fn the_startup_note_names_a_readable_prefix_and_stays_quiet_for_denied_ones() {
     assert!(mac_profile_can_read(Path::new("/usr/local/bin/x")).is_some());
     assert!(mac_profile_can_read(Path::new("/opt/homebrew/var/c.db")).is_none());
     assert!(mac_profile_can_read(Path::new("/usr/local/var/c.db")).is_none());
-    assert!(mac_profile_can_read(Path::new(concat!("/Us", "ers/x/c.db"))).is_none());
+    let home = std::env::var("HOME").unwrap_or_default();
+    assert!(mac_profile_can_read(&Path::new(&home).join("c.db")).is_none());
     assert!(mac_profile_can_read(Path::new("/srv/c.db")).is_none());
+}
+
+// ---- round 2: review findings R1 (canonical paths), the order of the by-name deny, R2, R3 ----
+
+/// R1: the sandbox matches canonical paths, so the by-name deny must be built from them. Every
+/// spelling of a path (relative, `.`, `..`, `//`, a symlinked directory or file) gives the same
+/// canonical path first, and keeps the other spellings after it.
+#[test]
+fn deny_paths_are_made_absolute_and_canonical_before_the_profile_sees_them() {
+    let lab = Lab::new("canon");
+    let real = lab.root.join("real");
+    std::fs::create_dir_all(&real).unwrap();
+    let db = real.join("core.db");
+    std::fs::write(&db, "dummy").unwrap();
+    let want = db.canonicalize().unwrap();
+    let first = |typed: PathBuf| canonical_deny_paths(&[typed]).remove(0);
+    // dot, dot-dot and double slash
+    let root = lab.root.display();
+    assert_eq!(
+        first(PathBuf::from(format!("{root}/./real/../real//core.db"))),
+        want
+    );
+    assert_eq!(
+        first(PathBuf::from(format!("{root}//real/./core.db"))),
+        want
+    );
+    // a symlinked directory and a symlinked file
+    let dir_link = lab.root.join("dirlink");
+    std::os::unix::fs::symlink(&real, &dir_link).unwrap();
+    assert_eq!(first(dir_link.join("core.db")), want);
+    let file_link = lab.root.join("filelink.db");
+    std::os::unix::fs::symlink(&db, &file_link).unwrap();
+    assert_eq!(first(file_link.clone()), want);
+    let spellings = canonical_deny_paths(&[file_link.clone()]);
+    assert!(
+        spellings.contains(&file_link),
+        "the typed spelling is kept: {spellings:?}"
+    );
+    // a file that does not exist yet: its directory is canonicalised, the name is kept
+    assert_eq!(
+        first(dir_link.join("new.db")),
+        real.canonicalize().unwrap().join("new.db")
+    );
+    // a relative path is made absolute against the current directory
+    let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+    assert_eq!(
+        first(PathBuf::from("relative-name.db")),
+        cwd.join("relative-name.db")
+    );
+    // the profile builder refuses what it could not match
+    assert!(check_deny_path(Path::new("relative-name.db")).is_err());
+    assert!(check_deny_path(Path::new("/a/./b")).is_err());
+    assert!(check_deny_path(Path::new("/a/../b")).is_err());
+    assert!(check_deny_path(Path::new("/a//b")).is_err());
+    assert!(check_deny_path(&want).is_ok());
+}
+
+/// R1 end to end: a file under a prefix the profile can read (Homebrew's `share`) stays unreadable
+/// when the owner typed its path in any of the odd ways, because the deny is built from the
+/// canonical path. The control shows that the typed path alone would not have matched.
+#[test]
+fn a_database_typed_by_a_non_canonical_path_is_still_denied_by_name() {
+    if skip("non-canonical deny paths") {
+        return;
+    }
+    let share = Path::new("/opt/homebrew/share");
+    let probe = share.join(format!("sec1-probe-{}", std::process::id()));
+    if std::fs::create_dir(&probe).is_err() {
+        eprintln!("SKIP non-canonical deny paths: /opt/homebrew/share is not writable here");
+        return;
+    }
+    let _ = std::fs::remove_dir(&probe);
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    for pi in 0..2 {
+        let lab = Lab::new("noncanon");
+        let (name, _) = profiles(&lab.job).into_iter().nth(pi).unwrap();
+        let dir = share.join(format!("sec1-r1-{}", lab.tag));
+        let _clean = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("core.db");
+        std::fs::write(&db, format!("dummy-{}", lab.tag)).unwrap();
+        let dir_link = lab.root.join("dirlink");
+        std::os::unix::fs::symlink(&dir, &dir_link).unwrap();
+        let file_link = lab.root.join("filelink.db");
+        std::os::unix::fs::symlink(&db, &file_link).unwrap();
+        let cwd = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let up = "../".repeat(cwd.components().count() - 1);
+        let relative = PathBuf::from(format!(
+            "{up}opt/homebrew/share/sec1-r1-{}/core.db",
+            lab.tag
+        ));
+        let odd = PathBuf::from(format!("{}/./x/..//core.db", dir.display()));
+        let cat = format!(
+            "cat '{}' > got.txt 2> got.err; echo $? > got.exit\n",
+            db.display()
+        );
+        // Control: unconfined, the file is readable.
+        assert_eq!(lab.unconfined(&cat).0, 0);
+        let _ = std::fs::remove_file(lab.job.join("got.txt"));
+        for (what, typed) in [
+            ("relative", relative),
+            ("dot, dot-dot and double slash", odd),
+            ("symlinked directory", dir_link.join("core.db")),
+            ("symlinked file", file_link),
+        ] {
+            let run = |deny: Vec<PathBuf>| {
+                let reads = Reads {
+                    deny,
+                    ..Reads::default()
+                };
+                let profile = if pi == 0 {
+                    mac_profile(&lab.job, &reads)
+                } else {
+                    mac_profile_real_agent(&lab.job, &reads, &[])
+                };
+                let _ = std::fs::remove_file(lab.job.join("got.exit"));
+                lab.confined(&profile, &cat);
+                std::fs::read_to_string(lab.job.join("got.exit")).unwrap_or_default()
+            };
+            let canonical = run(canonical_deny_paths(std::slice::from_ref(&typed)));
+            assert_ne!(
+                canonical.trim(),
+                "0",
+                "{name}/{what}: the database was readable"
+            );
+            // The typed spelling alone (what the code did before): only absolute spellings can
+            // even be written into a profile, and the symlinked ones do not match.
+            if what.starts_with("symlinked") {
+                let alone = run(vec![typed]);
+                assert_eq!(
+                    alone.trim(),
+                    "0",
+                    "{name}/{what}: control: the typed path alone was expected to leak"
+                );
+            }
+        }
+    }
+}
+
+/// The by-name deny is the last rule: a database inside the job directory or inside a named read
+/// directory stays unreadable, while the job can still write and read its own other files.
+#[test]
+fn the_by_name_deny_wins_inside_the_job_and_inside_a_read_directory() {
+    if skip("deny order") {
+        return;
+    }
+    for pi in 0..2 {
+        let lab = Lab::new("order");
+        let (name, _) = profiles(&lab.job).into_iter().nth(pi).unwrap();
+        let readdir = lab.root.join("readdir");
+        std::fs::create_dir_all(&readdir).unwrap();
+        let job_db = lab.job.join("core.db");
+        let read_db = readdir.join("core.db");
+        let read_other = readdir.join("other.txt");
+        std::fs::write(&job_db, "dummy").unwrap();
+        std::fs::write(&read_db, "dummy").unwrap();
+        std::fs::write(&read_other, "dummy-other").unwrap();
+        let reads = Reads {
+            dirs: vec![readdir.canonicalize().unwrap()],
+            deny: canonical_deny_paths(&[job_db.clone(), read_db.clone()]),
+            ..Reads::default()
+        };
+        let profile = if pi == 0 {
+            mac_profile(&lab.job, &reads)
+        } else {
+            mac_profile_real_agent(&lab.job, &reads, &[])
+        };
+        let script = format!(
+            "cat '{j}' > /dev/null 2>&1; echo $? > job.exit\n\
+             cat '{r}' > /dev/null 2>&1; echo $? > read.exit\n\
+             cat '{o}' > other.txt 2>&1; echo $? > other.exit\n\
+             echo mine > own.txt; echo $? > write.exit\n\
+             cat own.txt > own.copy 2>&1; echo $? > own.exit\n",
+            j = job_db.display(),
+            r = read_db.display(),
+            o = read_other.display()
+        );
+        lab.confined(&profile, &script);
+        let n = |f: &str| std::fs::read_to_string(lab.job.join(f)).unwrap_or_default();
+        assert_ne!(
+            n("job.exit").trim(),
+            "0",
+            "{name}: a database inside the job directory was readable"
+        );
+        assert_ne!(
+            n("read.exit").trim(),
+            "0",
+            "{name}: a database inside a read directory was readable"
+        );
+        assert_eq!(
+            n("other.exit").trim(),
+            "0",
+            "{name}: another file in the read directory must stay readable"
+        );
+        assert_eq!(
+            n("write.exit").trim(),
+            "0",
+            "{name}: the job could not write its own file"
+        );
+        assert_eq!(
+            n("own.exit").trim(),
+            "0",
+            "{name}: the job could not read its own file"
+        );
+    }
+}
+
+/// R3: the Shortcuts service is unreachable (shortcuts run outside the sandbox, as the owner).
+/// Lists only; no shortcut is ever run. Needs at least one shortcut, so the control can see a
+/// difference; otherwise it says SKIP.
+#[test]
+fn a_confined_process_cannot_list_the_owners_shortcuts() {
+    if skip("shortcuts") {
+        return;
+    }
+    for pi in 0..2 {
+        let lab = Lab::new("shortcuts");
+        let (name, profile) = profiles(&lab.job).into_iter().nth(pi).unwrap();
+        let (code, listed) = lab.unconfined("shortcuts list");
+        if code != 0 || listed.trim().is_empty() {
+            eprintln!("SKIP shortcuts: `shortcuts list` gives nothing unconfined, nothing to hide");
+            return;
+        }
+        let (_, confined) = lab.confined(&profile, "shortcuts list 2>/dev/null");
+        assert!(
+            confined.trim().is_empty(),
+            "{name}: a confined process listed the owner's shortcuts"
+        );
+    }
+}
+
+/// R2 speed bump: `launchctl` itself cannot be run. This is NOT a boundary (see TRUST-BOUNDARY.md:
+/// launchd job environments stay readable by other routes); the test only pins the deny line.
+#[test]
+fn launchctl_cannot_be_run_from_the_profile_but_it_runs_unconfined() {
+    if skip("launchctl") {
+        return;
+    }
+    for pi in 0..2 {
+        let lab = Lab::new("launchctl");
+        let (name, profile) = profiles(&lab.job).into_iter().nth(pi).unwrap();
+        let script = "/bin/launchctl print-disabled gui/$(id -u) > /dev/null 2>&1";
+        assert_eq!(
+            lab.unconfined(script).0,
+            0,
+            "control: launchctl failed unconfined"
+        );
+        assert_ne!(lab.confined(&profile, script).0, 0, "{name}: launchctl ran");
+    }
 }

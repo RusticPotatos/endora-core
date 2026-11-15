@@ -23,7 +23,7 @@ use endora_foundation::domain::{
 use endora_foundation::infrastructure::SystemClock;
 use endora_foundation_git::{
     AgentExecutor, ClaudeCode, ClaudeLimits, Config as GitConfig, Confinement, GitChange, Options,
-    mac_profile_can_read,
+    canonical_deny_paths, mac_profile_can_read,
 };
 use endora_kernel::{Clock, Reversibility, Tier};
 
@@ -967,20 +967,25 @@ fn run() -> Out {
         }
         // No confined agent, scripted or real, may read the owner's token file or the database,
         // by name (the profile adds the database's -journal, -wal and -shm files).
-        options.deny_paths = [a.token_file.clone(), Some(db.clone())]
+        // The sandbox matches canonical paths: make each one absolute and canonical (symlinks
+        // resolved; a file that does not exist yet gets its parent resolved), and keep the other
+        // spellings too. The note uses the canonical path.
+        let typed: Vec<PathBuf> = [a.token_file.clone(), Some(db.clone())]
             .into_iter()
             .flatten()
             .chain(std::env::var_os("ENDORA_OWNER_TOKEN_FILE").map(PathBuf::from))
             .collect();
-        for p in &options.deny_paths {
-            if let Some(prefix) = mac_profile_can_read(p) {
+        for t in &typed {
+            let spellings = canonical_deny_paths(std::slice::from_ref(t));
+            if let Some(prefix) = spellings.first().and_then(|c| mac_profile_can_read(c)) {
                 eprintln!(
                     "note: {} lies under {prefix}, which the macOS sandbox profile can read; it is \
                      denied by name for confined agents, but a copy kept under that prefix would be readable",
-                    p.display()
+                    spellings[0].display()
                 );
             }
         }
+        options.deny_paths = canonical_deny_paths(&typed);
         core.register(Arc::new(GitChange::with_options(cfg, options)))
             .map_err(err)?;
     }
