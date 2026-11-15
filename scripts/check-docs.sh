@@ -6,7 +6,7 @@
 # Not wired into CI on purpose (a workflow change is a separate decision).
 #
 # What it checks
-#   1. status    every non-ADR doc (README.md, docs/**, examples/**, deploy/**) starts with
+#   1. status    every non-ADR doc (README.md, AGENTS.md, CONTRIBUTING.md, docs/**, examples/**, deploy/**) starts with
 #                "Status: <CURRENT|EXPERIMENTAL|LEGACY|UNSUPPORTED|PLANNED>"
 #                (for the files HQ embeds in its binary, docs/standards.md and the top level of
 #                docs/plans and docs/drafts, the line after the title: an app/hq test needs "# " first)
@@ -51,7 +51,7 @@ status_line() { # status_line FILE: the line that must be the Status line
 find . -name '*.md' -not -path './target/*' -not -path './.git/*' -not -path './node_modules/*' |
     sed 's#^\./##' | LC_ALL=C sort > "$TMP/all"
 # Scopes
-grep -E '^(README\.md|docs/|examples/|deploy/)' "$TMP/all" | grep -v '^docs/adr/' > "$TMP/status_scope"
+grep -E '^(README\.md|AGENTS\.md|CONTRIBUTING\.md|docs/|examples/|deploy/)' "$TMP/all" | grep -v '^docs/adr/' > "$TMP/status_scope"
 { cat "$TMP/status_scope"; grep -E '^(AGENTS|CONTRIBUTING|SECURITY|GOVERNANCE|CODE_OF_CONDUCT|CHANGELOG|CLAUDE)\.md$' "$TMP/all"; } |
     grep -vE '^docs/(proposals|plans)/' | LC_ALL=C sort -u > "$TMP/link_scope"
 : > "$TMP/current_scope"
@@ -118,8 +118,9 @@ if [ -s "$TMP/cited.out" ]; then cat "$TMP/cited.out"; FAILS=$((FAILS + $(wc -l 
 #   spend: README said "no shipped capability declares Enforced" and, 90 lines later, that the Claude
 #     Code executor does; trust: "the declaration is the trust boundary" vs "the boundary is isolation";
 #     stale deploy line "written but not built"; "branch from develop" (the remote has no develop);
-#     Fact::word takes &'static str (it takes &str); dangling REVIEW2/REVIEW3 and "the Director".
-{ cat "$TMP/current_scope"; echo README.md; echo AGENTS.md; echo CONTRIBUTING.md; } | LC_ALL=C sort -u > "$TMP/phrase_scope"
+#     Fact::word takes &'static str (it takes &str); "one crate per integration" and "without a database"
+#     (review round 1); dangling REVIEW2/REVIEW3 and "the Director".
+{ cat "$TMP/current_scope"; echo README.md; echo AGENTS.md; echo CONTRIBUTING.md; echo docs/adr/0150-current-architecture-the-foundation.md; } | LC_ALL=C sort -u > "$TMP/phrase_scope"
 forbid() { # forbid REGEX WHY: no file in phrase_scope may match (case-insensitive)
     while IFS= read -r f; do
         grep -inE -- "$1" "$f" | sed "s#^#FAIL phrases: $f:#; s#\$#   <- forbidden: $2#"
@@ -132,6 +133,8 @@ forbid 'written but not built' 'the container recipe was built on a Linux host'
 forbid 'Pin both base images by digest first' 'the Dockerfile already pins both'
 forbid 'branch from [*]*.?develop' 'the remote has no develop branch; branch from main'
 forbid "Fact::word.{0,40}'static str" 'Fact::word takes &str; a word fact must be in the spec closed list'
+forbid 'a separate crate behind one trait|one crate per integration' 'a capability can be a config line, one module, an adapter or a crate (placement rule)'
+forbid 'without a database or a model' 'Core::in_memory opens an in-memory SQLite database; say "without a database file"'
 forbid 'REVIEW[0-9]' 'dangling reference: no such document is in the tree'
 forbid '(^|[^a-z])the Director([^a-z]|$)' 'dangling reference to a private role'
 required() { # required FILE FIXED-PHRASE

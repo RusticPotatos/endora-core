@@ -1,3 +1,5 @@
+Status: CURRENT · how to contribute; the foundation is the current system, HQ-era material is LEGACY
+
 # Contributing to Endora
 
 Thank you for your interest in Endora. This document explains how to contribute

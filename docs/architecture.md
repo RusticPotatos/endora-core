@@ -21,7 +21,7 @@ and recovery; a small capability can be one Rust module; a bounded context is no
 | Verb | Code |
 |---|---|
 | hold | `domain/hold.rs` (goals, items, `Fact`, `FactValue`); `Core::add_goal`, `add_item`, `add_routine`, `fire_due` |
-| decide | `domain/decide.rs` (`PolicyRow`, the decision table), `domain/contract.rs` (`CallSpec`, `Budget`); `Core::grant`, `stop`, `call` |
+| decide | `domain/decide.rs` (`PolicyRow`, `CallSpec`, the decision table), `domain/contract.rs` (`Budget`, `BudgetMode`, `Field`); `Core::grant`, `stop`, `call` |
 | run | `application/ports.rs` (`Capability`, the one port); `Core::call` is the only path to a capability |
 | record | `domain/evidence.rs`, `infrastructure/chain.rs` (hash chain); an intent before the call, a result after |
 | require | `domain/accept.rs`; `Core::accept`, `decline`, `confirm_criterion`, `settle_by_policy` |
@@ -59,6 +59,7 @@ flowchart BT
   cli --> git
   cli --> observe
   cli --> persistence
+  cli --> kernel
   linkStyle 5 stroke:#d00,stroke-width:2px,stroke-dasharray:4 3
 ```
 
@@ -143,11 +144,16 @@ stand-ins (`registration.rs`, `budget.rs`, `micro_usd.rs`). One test file, `call
 stand-in the call name `probe.run` to test routing; that is a name, not a dependency.
 
 **Holds (from commit history, not checkable in the public repository).** Adding the capability changed
-files only under `domains/foundation-git` (5 files; Core source 0, Core tests 0, CLI 0). Ten later commits
-that hardened it changed only that directory plus three one-line command-line config edits; none changed
-a Core source file for the capability's own logic. The commits are in the project's private history. **The
-public history has one squashed commit** holding the foundation, so these counts cannot be reproduced
-from it.
+5 files under `domains/foundation-git`, plus the workspace member line in the root `Cargo.toml` and
+`Cargo.lock` (files under `domains/foundation`, Core's source and tests: 0; the command-line crate: 0). The
+ten later commits that hardened it (fresh-copy acceptance and environment scrub, a symlink test, the
+Claude Code executor and real-agent profile, the Docker backend and a real `bwrap` probe, signal denial)
+changed no file under `domains/foundation` either. Besides `domains/foundation-git` they touched only the
+command line's wiring and config grammar (`app/foundation/src/main.rs`, +66/-8 over two commits), one
+command-line test (`app/foundation/tests/cli.rs`, +19), one `Cargo.lock` line and documentation. So the
+claim that holds is exactly: **zero changes to Core's source and tests for the capability's own logic**; it
+is not "only one directory changed". The commits are in the project's private history. **The public
+history has one squashed commit** holding the foundation, so these counts cannot be reproduced from it.
 
 **Does not hold: the contract did not stay still.** The *capability contract* that Core exposes was
 widened six times while the git capability was built, in commits that also touched the git crate:

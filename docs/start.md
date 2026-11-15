@@ -26,7 +26,7 @@ in step 2 and the `$ kill -9 <run-due>` line in step 7 (by hand you type `sleep 
 ```sh
 cargo build -p endora-foundation-cli       # the binary is target/debug/endora-foundation
 export PATH="$PWD/target/debug:$PATH"      # so the commands below work as written
-mkdir "${TMPDIR:-/tmp}/endora-demo" && cd "${TMPDIR:-/tmp}/endora-demo"
+mkdir -p "${TMPDIR:-/tmp}/endora-demo" && cd "${TMPDIR:-/tmp}/endora-demo"
 ```
 
 Core reads three settings from flags or from the environment. Set them once; each holds a **path**
@@ -43,6 +43,8 @@ export ENDORA_FOUNDATION_DB="$PWD/foundation.db"
 export ENDORA_FOUNDATION_CONFIG="$PWD/foundation.conf"
 export ENDORA_OWNER_TOKEN_FILE="$PWD/owner.token"
 ```
+
+To start over, delete that directory first (`rm -rf`) and repeat: `init` refuses to run twice on one database.
 
 Start something for Core to look at, in a **second terminal** (it only needs to accept connections):
 
@@ -234,6 +236,9 @@ endora-foundation run-due &          # starts item 2 and begins the three-second
 sleep 1; kill -9 $!                  # SIGKILL: no clean-up code runs
 endora-foundation status | grep '\['
 endora-foundation run-due
+endora-foundation status | grep '\['
+endora-foundation evidence --item 2
+endora-foundation verify-evidence
 ```
 
 <!-- example-a: 7 -->
@@ -278,8 +283,10 @@ evidence chain intact: 17 rows, head HASH (keep the head elsewhere to catch remo
   resumed from its recorded evidence`. Core read the file, saw an item left running by a dead process,
   recorded `core.recover`, put the item back to `open`, and ran it again (`attempts 2`). Recovery
   works from the database alone; it needs no log and no memory of the dead process.
-- The evidence shows both attempts: the first has an intent and no result; the second has both. The
-  chain still verifies.
+- The second `status | grep '\['` shows `criteria 1/1` and `attempts 2`. `evidence --item 2` shows both
+  attempts: the first has an intent and no result, then `core.recover`, then the second attempt with an
+  intent and a result (`[facts] exit=0`). `verify-evidence` says the chain is still intact (17 rows
+  here).
 
 ## What you learned, and where next
 
@@ -296,7 +303,7 @@ accept) and **recover** (the restart). Next:
 
 - **`no database: pass --db <path> or set ENDORA_FOUNDATION_DB`**: the settings in step 0 are missing.
   There is no `--help`: an unknown command prints a one-line usage and exits 1, and with `--db` it also
-  creates an empty database file.
+  creates a database file (the schema, no rows).
 - **`this command needs the owner token`** (exit 2): pass `--token-file`, or set
   `ENDORA_OWNER_TOKEN_FILE` to the path `init` wrote.
 - **`run-due` prints nothing**: no routine exists, or none is due. The routine's slot is 300 seconds.

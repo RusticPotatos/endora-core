@@ -1,3 +1,5 @@
+Status: CURRENT · working agreements for assistants and contributors; the parts about HQ, the node and the console describe the LEGACY product
+
 # Working agreements for AI assistants
 
 This is the **canonical** instructions file for AI coding assistants working in

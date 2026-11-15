@@ -26,7 +26,7 @@ work or not to be relied on), `PLANNED` (not built; never described as if it wer
 | Goals, routines, work items, criteria, owner acceptance | CURRENT (interfaces FROZEN) | `docs/start.md` walks through it |
 | Authority: bands, tiers, default deny, stop switch, spend caps in micro-USD | CURRENT (owner decision commands EXPERIMENTAL) | [trust and spend](docs/trust-and-spend.md) |
 | Evidence: an intent before each call and a result after, append-only through the engine | CURRENT; the hash chain on top is EXPERIMENTAL | detects edits; not proof of whole-database integrity |
-| Crash recovery: items a dead process left running are settled from the file | CURRENT | single runner process only |
+| Crash recovery: items a dead process left running are settled from the database file | CURRENT | single runner process only |
 | Observe capability: tcp, http and command probes you write in a config file | CURRENT | no code needed |
 | Git capability: a code change by a configured agent, verified on a clean copy, then waits for you | EXPERIMENTAL | `git.publish` is always refused: nothing here publishes |
 | Claude Code CLI as the agent of the git capability | EXPERIMENTAL | macOS only; costs real money; the dollar cap is unverified |
@@ -99,6 +99,7 @@ flowchart BT
   cli --> git
   cli --> observe
   cli --> persistence
+  cli --> kernel
   linkStyle 5 stroke:#d00,stroke-width:2px,stroke-dasharray:4 3
 ```
 

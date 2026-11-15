@@ -6,7 +6,7 @@ New here? Start with [docs/start.md](../start.md) (a ten-minute first run). This
 
 Core holds goals, decides what may run, runs it through one port, records what happened, asks the
 owner before work counts as done, and picks up after a crash. It knows no model, no vendor and no
-project. Everything it touches the world with is a **capability**, a separate crate behind one trait.
+project. Everything it touches the world with is a **capability**, a Rust type behind one trait (today both shipped capabilities are their own crates).
 
 State is **one SQLite file**. Evidence in it is append-only **through the engine and on connections
 that carry its triggers**; a hash chain makes any other change detectable. Read "Trust and what is

@@ -20,23 +20,33 @@ Architecture, not a framework of its own.
 **Retained principles** (each checked against the code in [the architecture page](../architecture.md)):
 
 - *Responsibility-based modularity.* Code is organised by what it is responsible for (Core:
-  hold, decide, run, record, require, recover; capabilities: one crate per integration), not by
-  technical layer across the whole system.
+  hold, decide, run, record, require, recover; capabilities: one per integration, as a module or a
+  crate), not by technical layer across the whole system.
 - *Dependencies point inward.* Core's `domain` imports only `endora-kernel`. Capability crates depend
   on Core; Core never names a capability.
-- *Domain isolation.* The foundation's rules run without a database or a model in tests
-  (`Core::in_memory`).
+- *Domain isolation.* The foundation's rules run without a database file or a model in tests
+  (`Core::in_memory` opens an in-memory SQLite database); `domain/` itself imports no SQLite.
 - *Deliberate interface boundaries.* `Capability` is the one port Core calls the world through.
+- *Rust, `unsafe` forbidden* ("Rust, and no unsafe" in 0050), unchanged.
 
-**Superseded decisions** (0050):
+**Superseded decisions** (each is a section of 0050, checked against its text):
 
-- The node as the single authority and trust boundary. The trust boundary is now process and
-  filesystem isolation of untrusted executors (`docs/foundation/TRUST-BOUNDARY.md`).
-- Versioned HTTP + JSON with SSE as the application protocol. The foundation has none: a command line
-  over one file, and a config file.
-- The embedded console, and the single container image that serves it.
-- The list of five bounded contexts (platform, capabilities, team, sound, mail); the foundation is
-  not one of them.
+- *"HTTP + JSON, versioned, with SSE for liveness"* as the application protocol. The foundation has
+  none: a command line over one file, and a config file.
+- *"One container, serving its own console"*: the console embedded in the binary and the one image that
+  ships it. The foundation has no console; its container recipe runs the command line.
+- *The per-context layout*: "each context owns its own `domain` / `application` / `infrastructure`", and
+  its list of contexts (`platform`, `capabilities`, `understanding`, `conversation`, `scheduling`). The
+  foundation crates under `domains/` are not among them, and the three layers apply to Core only (below).
+- *"SQLite, behind ports"* is kept as to SQLite and not carried out as to ports: see Known deviations.
+
+0050's "MCP is not the application protocol" and "read projections rather than new tables" concern HQ's
+clients and feeds; the foundation has neither, so they are neither retained nor contradicted.
+
+**Not an 0050 decision, also superseded.** The earlier HQ architecture page ([architecture.md](../architecture.md),
+its LEGACY section) frames the node as the single authority and trust boundary. In the foundation the
+trust boundary is process and filesystem isolation of untrusted executors
+(`docs/foundation/TRUST-BOUNDARY.md`).
 
 **Independent choices** (implementation choices, not requirements of the principles; each can change
 without changing them): Rust; SQLite in one file; the command line and the config file as the
