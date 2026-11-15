@@ -1343,10 +1343,15 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             // Publishing is refused by authority: there is no row, and the call is outward-reversible.
             // Always exit 2, also for an item that does not exist (the refusal does not depend on it).
             let id = item(1)?;
-            if need_item(core, id).is_err() {
+            if let Err(Fail::Error(m)) = need_item(core, id) {
+                // Only an absent item is "no item"; damaged data says so (still a refusal: exit 2).
+                let why = if m.starts_with("no item") {
+                    format!("there is no item {}", id.0)
+                } else {
+                    format!("item {} cannot be read: {m}", id.0)
+                };
                 return Err(Fail::Refused(format!(
-                    "refused: nothing here publishes (and there is no item {})",
-                    id.0
+                    "refused: nothing here publishes (and {why})"
                 )));
             }
             let it = core.store().item(id).map_err(err)?;

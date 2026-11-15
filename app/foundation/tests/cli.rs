@@ -2000,3 +2000,27 @@ fn confirm_on_a_done_or_failed_item_is_refused_and_writes_no_row() {
     assert_eq!(before, raw_rows(&db), "a refused confirm wrote a row");
     assert_eq!(status, text(&run(&["status"])));
 }
+
+#[test]
+fn publish_on_an_unreadable_item_says_corruption_not_missing_and_writes_nothing() {
+    let (lab, cfg, db) = owner_lab("publish-corrupt");
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            "PRAGMA ignore_check_constraints=1; UPDATE items SET state='zzz' WHERE id=1;",
+        )
+        .unwrap();
+    }
+    let before = raw_rows(&db);
+    let o = lab.run_on(&db, &cfg, &["publish", "1"]);
+    let t = text(&o);
+    // `publish` is documented as always refused (exit 2) for any item number, so it stays 2.
+    assert_eq!(code(&o), 2, "{t}");
+    assert!(t.starts_with("refused: "), "{t}");
+    assert!(
+        t.contains("corrupt stored data") && t.contains("zzz"),
+        "{t}"
+    );
+    assert!(!t.contains("no item"), "{t}");
+    assert_eq!(before, raw_rows(&db), "publish wrote a row");
+}

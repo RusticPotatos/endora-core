@@ -80,7 +80,7 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
   `output closed: the change may have been applied` to stderr before exit 1.
 - **Known issues (not fixed here):** a malformed or out of range number or id (`publish abc`, `overall-cap -1`,
   `serve --every 0`) is still checked after the database is opened, so it creates an empty database file when the path
-  did not exist. The two `*-status` helper binaries create
+  did not exist. A routine whose open item has an unreadable stored state may start a new item (`run-due` exits 0 and writes around the damaged row; run `verify-evidence` and `status` after any suspected corruption; fix: a later Core increment). The two `*-status` helper binaries create
   or migrate a database and print a subset of `status`; the README now says so.
 - **Docs:** the STABILITY Docker row now says the Docker tests are ignored off Linux, not counted as passed; the stale
   `claude.rs` comment deviation (ADR 0150 item 4) is marked fixed.
@@ -148,7 +148,13 @@ Nothing in this list is claimed fixed.
 - **A stored item row whose state cannot be read is now an error, not a `failed` item.** Core read an unknown
   state as `failed`, so `status` and `accept` showed corruption as a normal failed item. It now fails with
   `corrupt stored data: item N has an unreadable state "..."`, and `status`, `accept`, `decline` and
-  `confirm-criterion` exit 1 with that message and change nothing. `verify-evidence` still runs on such a file.
+  `confirm-criterion` exit 1 with that message and change nothing; `publish N` says it too (still exit 2, as it always
+  refuses) instead of `there is no item N`. `verify-evidence` still runs on such a file.
+- **The same now holds for two more stored values:** an evidence row whose `decision` is neither `allow` nor `deny` was
+  shown as `DENY` with exit 0 (`status`, `evidence`); it is now `corrupt stored data: evidence row N has an unreadable
+  decision "..."`. A routine whose `paused` or `auto_accept` is neither 0 nor 1 was read as true (`auto_accept` = 2 meant
+  auto-accept); it is now `corrupt stored data: routine N has an unreadable ... flag`. `verify-evidence` is still the
+  check that names an edited evidence row.
 - **`confirm-criterion` (and `confirm`) on a `done` or `failed` item is refused by Core**, not only by the command line:
   `item N is already done` (an `AppError::Conflict` with the new code `item-finished`), with no evidence row and no
   change to the item. The check and the write are one statement, so an item finishing meanwhile cannot slip through.

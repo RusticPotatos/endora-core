@@ -415,17 +415,17 @@ impl Store {
     /// A routine by id.
     ///
     /// # Errors
-    /// [`RepositoryError::Backend`].
+    /// [`RepositoryError::Backend`]; `Corrupt` when a stored flag is neither 0 nor 1.
     pub fn routine(&self, id: RoutineId) -> Res<Routine> {
         let c = self.db.lock()?;
         c.query_row("SELECT id, goal_id, title, every_ms, next_due_ms, auto_accept, max_failures, consecutive_failures, paused FROM routines WHERE id=?1", [id.0], routine_row)
-            .map_err(backend)
+            .map_err(backend)?
     }
 
     /// Every routine.
     ///
     /// # Errors
-    /// [`RepositoryError::Backend`].
+    /// [`RepositoryError::Backend`]; `Corrupt` when a stored flag is neither 0 nor 1.
     pub fn routines(&self) -> Res<Vec<Routine>> {
         let c = self.db.lock()?;
         col(
@@ -433,7 +433,9 @@ impl Store {
             "SELECT id, goal_id, title, every_ms, next_due_ms, auto_accept, max_failures, consecutive_failures, paused FROM routines ORDER BY id",
             [],
             routine_row,
-        )
+        )?
+        .into_iter()
+        .collect()
     }
 
     /// Applies a routine's plan in ONE transaction: records every missed slot, creates the one
@@ -1136,7 +1138,15 @@ impl Store {
                         actor_kind: ActorKind::from_name(&actor_kind)
                             .ok_or_else(|| corrupt(format!("actor kind {actor_kind}")))?,
                         band: band_from(&band)?,
-                        allowed: dec == "allow",
+                        allowed: match dec.as_str() {
+                            "allow" => true,
+                            "deny" => false,
+                            _ => {
+                                return Err(corrupt(format!(
+                                    "evidence row {id} has an unreadable decision {dec:?}"
+                                )));
+                            }
+                        },
                         kind: Kind::from_name(&kind)
                             .ok_or_else(|| corrupt(format!("kind {kind}")))?,
                         intent_id,
@@ -1330,18 +1340,36 @@ fn col<T, P: rusqlite::Params>(
     rows.collect::<Result<Vec<_>, _>>().map_err(backend)
 }
 
-fn routine_row(r: &Row<'_>) -> rusqlite::Result<Routine> {
-    Ok(Routine {
-        id: RoutineId(r.get(0)?),
-        goal: GoalId(r.get(1)?),
-        title: r.get(2)?,
-        every_ms: r.get(3)?,
-        next_due_ms: r.get(4)?,
-        auto_accept: r.get::<_, i64>(5)? != 0,
-        max_failures: u32_of(r.get(6)?),
-        consecutive_failures: u32_of(r.get(7)?),
-        paused: r.get::<_, i64>(8)? != 0,
-    })
+/// A stored flag is 0 or 1; anything else is damage, not `true`.
+fn flag(id: i64, what: &str, n: i64) -> Res<bool> {
+    match n {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(corrupt(format!(
+            "routine {id} has an unreadable {what} flag {n}"
+        ))),
+    }
+}
+
+fn routine_row(r: &Row<'_>) -> rusqlite::Result<Res<Routine>> {
+    let id: i64 = r.get(0)?;
+    let (goal, title, every_ms, next_due_ms) = (GoalId(r.get(1)?), r.get(2)?, r.get(3)?, r.get(4)?);
+    let (auto, max, run, paused): (i64, i64, i64, i64) =
+        (r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?);
+    let built = || -> Res<Routine> {
+        Ok(Routine {
+            id: RoutineId(id),
+            goal,
+            title,
+            every_ms,
+            next_due_ms,
+            auto_accept: flag(id, "auto_accept", auto)?,
+            max_failures: u32_of(max),
+            consecutive_failures: u32_of(run),
+            paused: flag(id, "paused", paused)?,
+        })
+    };
+    Ok(built())
 }
 
 /// An unreadable stored state names the item and the value; it is never read as a valid state.

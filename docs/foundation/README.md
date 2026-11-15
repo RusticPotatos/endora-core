@@ -173,7 +173,7 @@ Running it long-term: [../operate.md](../operate.md).
   (foundation-git) are the runners the process tests start and kill (`CARGO_BIN_EXE_...` in `slice1.rs`,
   `slice2.rs`, `slice5b.rs`); they are test harnesses, not tools to run. They are left where they are
   because moving or fixing them means editing the Core and capability crates, which the command-line
-  change does not do (a read-only open belongs to the planned Core change CORE-2); **use
+  change does not do (a read-only open is a later Core increment); **use
   `endora-foundation`**.
 
 - **A closed stdout can hide a committed change.** If stdout is closed before the command prints its result

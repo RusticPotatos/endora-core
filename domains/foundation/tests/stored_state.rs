@@ -136,3 +136,72 @@ fn confirming_a_criterion_of_a_done_or_failed_item_is_refused_and_writes_nothing
     assert!(core.verify_evidence().unwrap().broken.is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn an_unreadable_evidence_decision_or_routine_flag_is_an_error_never_a_valid_value() {
+    let (core, path, dir) = file_core("decision");
+    let (a, _) = two_running(&core);
+    let o = owner(&core);
+    core.add_routine(
+        &o,
+        core.store().item(a).unwrap().goal,
+        "r",
+        60_000,
+        false,
+        1_000,
+    )
+    .unwrap();
+    drop(core);
+    let flip = |sql: &str| {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "PRAGMA ignore_check_constraints=1; DROP TRIGGER evidence_no_change; {sql}"
+        ))
+        .unwrap();
+    };
+    let row: i64 = rusqlite::Connection::open(&path)
+        .unwrap()
+        .query_row("SELECT MIN(id) FROM evidence WHERE item_id=1", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    flip(&format!(
+        "UPDATE evidence SET decision='maybe' WHERE id={row}; UPDATE routines SET paused=2, auto_accept=2;"
+    ));
+    let core = Core::open(path.to_str().unwrap(), Arc::new(ManualClock::new(6_000))).unwrap();
+    let says = |e: String, what: &str| {
+        assert!(e.contains("corrupt stored data"), "{e}");
+        assert!(e.contains(what), "{e}");
+    };
+    says(
+        core.store().evidence_all().unwrap_err().to_string(),
+        &format!("evidence row {row} has an unreadable decision \"maybe\""),
+    );
+    says(
+        core.store()
+            .evidence_for(a)
+            .map(|_| ())
+            .unwrap_err()
+            .to_string(),
+        "decision",
+    );
+    says(
+        core.store().evidence_tail(10).unwrap_err().to_string(),
+        "decision",
+    );
+    says(core.status_text(5).unwrap_err().to_string(), "decision");
+    says(
+        core.store().routines().unwrap_err().to_string(),
+        "routine 1 has an unreadable",
+    );
+    says(
+        core.store()
+            .routine(endora_foundation::domain::RoutineId(1))
+            .unwrap_err()
+            .to_string(),
+        "routine 1 has an unreadable",
+    );
+    // The integrity check still runs, and it is the one that names the edited row.
+    assert!(core.verify_evidence().unwrap().broken.is_some());
+    let _ = std::fs::remove_dir_all(&dir);
+}

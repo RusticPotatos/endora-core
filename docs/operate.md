@@ -92,6 +92,10 @@ Stop every running endora-foundation process (serve, git-task, cron runs) before
 
 Found by an independent review of 15 Nov 2026 and checked here. The recovery and overlapping-`run-due` findings are fixed (see the changelog); the rest are not.
 
+- **A routine whose open item is unreadable may start a new item.** With an item's stored state damaged (hand-edited or
+  corrupted) and its routine due, `run-due` exits 0 and starts a new item next to the damaged one: the SQL filters that
+  find open work skip a row they cannot read. Run `verify-evidence` and `status` after any suspected corruption (`status`
+  and `accept` name an unreadable row). Fix: a later Core increment.
 - **A closed stdout after a change exits 1 although the change was applied.** If stdout is closed before the
   command prints its result (`... | head -0`), the change may already be committed and the exit code is 1
   (a line on stderr says `output closed: the change may have been applied`). Check with `status` before retrying;
