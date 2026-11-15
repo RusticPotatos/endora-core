@@ -83,13 +83,15 @@ fn plain(name: &str) -> bool {
 }
 
 impl Holders {
-    /// Refuses a SQLite URI (`file:...`) spelling of the database path. Core never documented URI
-    /// support, and a URI is a second spelling the holders directory cannot be derived from: the
-    /// lease would be off for that process in both directions. Call it BEFORE the file is opened.
+    /// Refuses a SQLite URI (`file:...`) spelling of the database path, exactly as SQLite decides
+    /// it: a name is a URI only when its first five BYTES are the lowercase `file:` (so `FILE:x`,
+    /// `./file:x` and every non-ASCII name are plain files). Core never documented URI support,
+    /// and a URI is a second spelling the holders directory cannot be derived from: the lease
+    /// would be off for that process in both directions. Call it BEFORE the file is opened.
     pub(super) fn refuse_uri(path: &str) -> Res<()> {
-        if path.len() >= 5 && path[..5].eq_ignore_ascii_case("file:") {
+        if path.as_bytes().starts_with(b"file:") {
             return Err(backend(format!(
-                "database path `{path}` is a SQLite URI, which this program does not support: give a plain file path (nothing was opened)"
+                "database path `{path}` is a SQLite URI, which this program does not support: give a plain file path, or write `./{path}` for a file of that name (nothing was opened)"
             )));
         }
         Ok(())
@@ -245,4 +247,34 @@ fn make_own(dir: &std::path::Path) -> Res<Own> {
 #[cfg(not(unix))]
 fn make_own(_dir: &std::path::Path) -> Res<Own> {
     Err(backend("holder locks need a Unix system"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Holders;
+
+    #[test]
+    fn only_the_lowercase_bytes_file_colon_make_a_uri_and_no_path_panics() {
+        for uri in ["file:x", "file:", "file:///x?mode=rwc", "file::memory:"] {
+            assert!(Holders::refuse_uri(uri).is_err(), "{uri}");
+        }
+        // Multi-byte characters around byte 5 (a slice there would panic), and other cases.
+        for plain in [
+            "日本.db",
+            "ÄÖé.db",
+            "fileé.db",
+            "日本日本日本.db",
+            "fil",
+            "",
+            ":memory:",
+            "FILE:x",
+            "File:x",
+            "./file:x",
+            "/a/file:x",
+            "éfile:x",
+            "filé:x",
+        ] {
+            assert!(Holders::refuse_uri(plain).is_ok(), "{plain}");
+        }
+    }
 }

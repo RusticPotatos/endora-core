@@ -365,7 +365,6 @@ fn a_sqlite_uri_path_is_refused_not_opened_with_the_lease_off() {
     for uri in [
         format!("file:{}", db.display()),
         format!("file://{}?mode=rwc", db.display()),
-        format!("FILE:{}", db.display()),
         "file::memory:".to_owned(),
         "file:x.db?cache=shared".to_owned(),
     ] {
@@ -376,7 +375,7 @@ fn a_sqlite_uri_path_is_refused_not_opened_with_the_lease_off() {
         assert!(said.contains("URI"), "{uri}: {said}");
     }
     assert!(!db.exists(), "a refused path created nothing");
-    // The plain path, the in-memory name and a relative spelling still open.
+    // The plain path and the in-memory name still open.
     drop(open(&db));
     assert!(Core::in_memory(Arc::new(ManualClock::new(1))).is_ok());
 }
@@ -502,4 +501,16 @@ fn an_unusable_holders_directory_fails_closed_and_the_error_names_the_path() {
         ItemState::Open,
         "fail closed: nothing started"
     );
+}
+
+#[test]
+fn a_database_in_a_non_ascii_directory_opens_and_its_lease_works() {
+    let db = lab("日本ÄÖé").parent().unwrap().join("fileé.db");
+    let a = open(&db);
+    let item = running_cut_off(&a);
+    let b = open(&db);
+    assert!(b.recover_interrupted().unwrap().is_empty());
+    assert_eq!(state(&b, item), ItemState::Running);
+    drop(a);
+    assert_eq!(b.recover_interrupted().unwrap().len(), 1);
 }

@@ -376,9 +376,10 @@ future work.
   evidence rows, their hashes and the chain are untouched; a file at schema 7 migrates by adding the
   column. A holders directory sits beside the database file (`live.db.holders/`, mode 700). A process
   killed outright can leave an empty file in it: the recovery that settles an item naming it removes
-  it, and any process that starts an item removes the free files no item names (once, when it makes
-  its own); the directory is safe to delete when nothing runs. `--db` takes a plain file path: a
-  `file:` URI is refused. **Upgrading: stop every running `endora-foundation` process (`serve`,
+  it, and any process that starts an item removes the free files no item names (once, at its first
+  start of an item); the directory is safe to delete when nothing runs. `--db` takes a plain file path:
+  a name that begins with the lowercase `file:` is a SQLite URI and is refused (write `./file:x` for a
+  file of that name). **Upgrading: stop every running `endora-foundation` process (`serve`,
   `git-task`, cron `run-due`) before the first run of the new binary**, or an item the old process is
   running is recovered as if it had died.
 - **What `Enforced` means.** It is the capability's claim that its executor limits its own spend; Core

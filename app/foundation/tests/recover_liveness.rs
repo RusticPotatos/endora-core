@@ -14,6 +14,8 @@ struct Lab {
     dir: PathBuf,
     db: PathBuf,
     cfg: PathBuf,
+    /// When set, `--db` is this RELATIVE name and the commands run with `dir` as their directory.
+    rel: Option<String>,
 }
 
 impl Lab {
@@ -25,14 +27,25 @@ impl Lab {
             db: dir.join("live.db"),
             dir,
             cfg,
+            rel: None,
         }
+    }
+    /// The database is `name` relative to the lab directory, as `--db name` from inside it.
+    fn relative(mut self, name: &str) -> Self {
+        self.db = self.dir.join(name);
+        self.rel = Some(name.to_owned());
+        self
     }
     fn token(&self) -> PathBuf {
         self.dir.join("owner.token")
     }
     fn command(&self, args: &[&str]) -> Command {
         let mut c = Command::new(BIN);
-        c.arg("--db").arg(&self.db).arg("--config").arg(&self.cfg);
+        match &self.rel {
+            Some(name) => c.arg("--db").arg(name).current_dir(&self.dir),
+            None => c.arg("--db").arg(&self.db),
+        };
+        c.arg("--config").arg(&self.cfg);
         if self.token().exists() {
             c.arg("--token-file").arg(self.token());
         }
@@ -132,6 +145,11 @@ fn starts(log: &Path) -> usize {
 /// A probe command that logs its start, then waits for the `release` file (or 60 s), then logs
 /// its end. Nothing here sleeps for a time the test must out-wait.
 fn slow_lab(name: &str) -> (Lab, PathBuf, PathBuf) {
+    slow_lab_db(name, None)
+}
+
+/// As [`slow_lab`]; with `Some(file)` the database is that RELATIVE name (`--db file`).
+fn slow_lab_db(name: &str, rel: Option<&str>) -> (Lab, PathBuf, PathBuf) {
     let dir = fresh_dir(name);
     let log = dir.join("probe.log");
     let release = dir.join("release");
@@ -145,10 +163,13 @@ fn slow_lab(name: &str) -> (Lab, PathBuf, PathBuf) {
         ),
     )
     .unwrap();
-    let lab = Lab::at(
+    let mut lab = Lab::at(
         dir,
         &format!("probe slow command sh {} 60\n", script.display()),
     );
+    if let Some(file) = rel {
+        lab = lab.relative(file);
+    }
     lab.init();
     let o = lab.run(&[
         "goal",
@@ -470,4 +491,67 @@ fn a_uri_spelling_of_the_database_is_refused_with_a_clear_error() {
     let said = text(&o);
     assert_eq!(o.status.code(), Some(1), "{said}");
     assert!(said.contains("URI"), "{said}");
+}
+
+// ---- round 3: non-ASCII relative paths and the exact URI rule ------------------------------------
+
+#[test]
+fn a_non_ascii_relative_database_path_opens_and_the_lease_works() {
+    // Round 2 sliced the path at byte 5 and panicked (exit 101) when that fell inside a character.
+    for (i, file) in ["日本.db", "ÄÖé.db", "fileé.db", "日本日本日本.db"]
+        .iter()
+        .enumerate()
+    {
+        let (lab, log, release) = slow_lab_db(&format!("nonascii{i}"), Some(file));
+        let a = lab.spawn(&["run-due"]);
+        wait_until("the probe to start", || starts(&log) == 1);
+        let b = lab.spawn(&["run-due"]);
+        let b_out = finish_within(b, Duration::from_secs(20));
+        std::fs::write(&release, b"go").unwrap();
+        let (a_code, a_out) = finish(a);
+        let (b_code, b_said) = b_out.expect("the second run-due must not wait on the live item");
+        assert_eq!(a_code, Some(0), "{file}: {a_out}");
+        assert_eq!(b_code, Some(0), "{file}: {b_said}");
+        assert!(!b_said.contains("recovered"), "{file}: {b_said}");
+        assert!(!b_said.contains("panicked"), "{file}: {b_said}");
+        assert_eq!(starts(&log), 1, "{file}: the probe ran twice");
+        assert!(
+            lab.dir.join(format!("{file}.holders")).is_dir(),
+            "{file}: the lease was on"
+        );
+    }
+}
+
+#[test]
+fn only_a_lowercase_file_colon_prefix_is_a_uri_and_a_plain_file_of_that_name_opens() {
+    // SQLite treats a name as a URI only when it begins with the lowercase bytes `file:`.
+    let lab = Lab::at(fresh_dir("uri-rule"), "probe web tcp 127.0.0.1:1 60\n");
+    let at = |name: &str, args: &[&str]| {
+        Command::new(BIN)
+            .current_dir(&lab.dir)
+            .args(["--db", name, "--config"])
+            .arg(&lab.cfg)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    for uri in ["file:x.db", "file:./x.db?mode=rwc", "file:"] {
+        let o = at(uri, &["status"]);
+        let said = text(&o);
+        assert_eq!(o.status.code(), Some(1), "{uri}: {said}");
+        assert!(
+            said.contains("URI") && !said.contains("panicked"),
+            "{uri}: {said}"
+        );
+    }
+    assert!(
+        !lab.dir.join("x.db").exists(),
+        "a refused URI created nothing"
+    );
+    // Other spellings are plain file names: `./file:x.db` (the workaround), `FILE:x.db`, `File:x.db`.
+    for plain in ["./file:x.db", "FILE:x.db", "File:x.db", "fil", "file"] {
+        let o = at(plain, &["status"]);
+        assert_eq!(o.status.code(), Some(0), "{plain}: {}", text(&o));
+    }
+    assert!(lab.dir.join("FILE:x.db").exists() || lab.dir.join("File:x.db").exists());
 }

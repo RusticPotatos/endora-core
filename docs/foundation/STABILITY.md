@@ -29,9 +29,7 @@ A test (`domains/foundation/tests/stability_doc.rs`) fails if a row has any othe
   system** and that the directory is not deleted while a process lives. Verified with real processes on macOS
   (all six two-process tests) and in one Linux container (aarch64, Docker Desktop's VM; four of the six passed,
   and the two git-task tests were skipped there: no confinement backend). Not run: the NAS, a Linux host with
-  the Docker backend. Known to fail (independent review): a database shared between a host process and a
-  container on a Docker Desktop bind mount; and a deleted or replaced holder file, or a hard link to the
-  database, bypasses the lease. See TRUST-BOUNDARY.md D4b.
+  the Docker backend. The lease does not hold, and a live holder's items are recovered as if it had died, when: a host process and a container share one database file through a Docker Desktop bind mount (the lock does not cross the VM; reproduced by an independent review); a single holder file is deleted or replaced while its holder lives; or the same database is opened through a hard link or a file-only bind mount (each path gets its own `.holders` directory). See TRUST-BOUNDARY.md D4b.
 - The NAS is verified for the Docker backend (see Verified environments below); the isolation relies on
   `--network none`: a hardened container on the default bridge can reach the host's own services and the
   LAN, so a real agent that needs network needs its own egress design.
