@@ -125,8 +125,40 @@ removal of the last rows, a chain re-forged by a writer who knows the format, an
   to the call's declared maximum; a larger report writes a `core.violation` row and stops the goal.
 - A failed call that reports a cost of 0 is charged 0 (an unknown cost is charged the maximum).
 - Check and intent are one `BEGIN IMMEDIATE` transaction: the reserved maximum counts against both
-  caps until the actual cost replaces it, so two processes cannot both pass (`spend_race.rs`).
+  caps until the actual cost replaces it, so two connections cannot both pass (`spend_race.rs`: six
+  connections in threads of one test process; the transaction is SQLite's, so it holds across
+  processes, but that claim is not tested with processes).
 - `Enforced` means something only when an executor really limits its own spend; Core cannot tell.
+
+## D4b. Several processes on one database
+
+Until 15 Nov 2026 these docs said two processes on one database were supported; for recovery that
+was **wrong** (an independent review reproduced it: a second `run-due` "recovered" an item a live
+process was still running, wrote a false `core.recover` row, failed a live git task mid-agent, or ran
+the same observe call twice). After the fix:
+
+- **How it works.** A process that starts an item takes an exclusive `flock` on its own file in
+  `<db>.holders/` for as long as it lives and writes the file's name on the item (`items.holder`,
+  schema version 8). `recover`, `recover_interrupted` and the stuck-watch check take over only an item
+  whose holder file they can lock (the holder is dead: the OS drops the lock when a process exits, is
+  killed with `kill -9` or crashes, and children of the process do not inherit it), an item with no
+  holder (written by an older build: recovered exactly as before) and an item the same process started.
+  A live holder's items are left alone and nothing waits or fails. The name is `<pid>-<time>` and
+  never reused, so a new process with a dead holder's pid does not keep its items alive.
+- **Safe, and tested with real processes** (macOS: all of it; one Linux container: all but the git-task
+  case, which needs a confinement backend): a `run-due`, a `serve` tick or a `git-task` while
+  another `run-due`, `serve` or `git-task` runs on the same file: the live item is neither recovered
+  nor run twice, no false `core.recover` row is written, and after the holder is killed the next
+  `run-due` recovers its item as before.
+- **Not claimed.** Processes on different hosts or on a network file system; the Docker
+  backend and the NAS (not run there; one Linux container is the only Linux run), and a database file
+  shared between a host and a container; a holders directory deleted while a holder
+  lives (its items then read as left by a dead process); a holder that hangs without dying (its items
+  stay held until it ends); two threads of one process sharing one `Core` (a process may recover its
+  own leftover items); a writer that edits the file (`items.holder` is not covered by the hash chain,
+  like every other table). One runner process remains the design.
+- **Interfaces.** Recovery of interrupted work is EXPERIMENTAL again in [STABILITY.md](STABILITY.md)
+  until a new independent review of this fix.
 
 ## D5. Reading the rest
 

@@ -290,7 +290,9 @@ evidence chain intact: 17 rows, head HASH (keep the head elsewhere to catch remo
 - The next `run-due` begins with **recovery**: `recovered item 2 -> open: interrupted on attempt 1:
   resumed from its recorded evidence`. Core read the file, saw an item left running by a dead process,
   recorded `core.recover`, put the item back to `open`, and ran it again (`attempts 2`). Recovery
-  works from the database alone; it needs no log and no memory of the dead process.
+  works from the database alone; it needs no log and no memory of the dead process. (Had that first
+  `run-due` still been alive, the second would have left item 2 alone: each running item names the process
+  running it, and recovery takes over only a dead process's items.)
 - The second `status | grep '\['` shows `criteria 1/1` and `attempts 2`. `evidence --item 2` shows both
   attempts: the first has an intent and no result, then `core.recover`, then the second attempt with an
   intent and a result (`[facts] exit=0`). `verify-evidence` says the chain is still intact (17 rows

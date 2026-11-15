@@ -21,7 +21,7 @@ enforced" below before relying on either; interfaces are rated in [STABILITY.md]
 | run | makes the call through `Capability::call`, nothing else |
 | record | writes an intent before the call and a result after it |
 | require | marks an item done only when its criteria are met and an authorised actor accepts |
-| recover | settles items a dead process left running, from the file alone |
+| recover | settles items a dead process left running, from the file alone; leaves an item a live process is running alone (EXPERIMENTAL) |
 
 ## Two levels
 
@@ -191,8 +191,9 @@ own process is trusted code. Details and the list of known gaps: [TRUST-BOUNDARY
   What holds for dollars today is Core's own: it **trusts the cost a capability reports**, clamped to
   the call's declared maximum (a report above it is a violation row, the item fails, the goal
   stops). A failed call that reports 0 is charged 0. Before a call Core reserves the maximum against
-  the goal and overall caps in the same transaction that writes the intent, so two processes on one
-  file cannot both pass the check. See "Spend: what is enforced".
+  the goal and overall caps in the same transaction that writes the intent, so two connections to one
+  file cannot both pass the check (tested with threads; for processes see
+  [TRUST-BOUNDARY.md](TRUST-BOUNDARY.md#d4b-several-processes-on-one-database)). See "Spend: what is enforced".
 - **Known gap:** a per-call owner approval (`approve-call`) does not exist; an outward-reversible
   call is refused, not asked about. It would be an additive command.
 
@@ -368,6 +369,13 @@ future work.
 - **Units.** Micro-USD everywhere (`u64`, checked arithmetic). Files written in cents are migrated
   (schema 6): caps are multiplied by 10,000; evidence rows are never rewritten, an old row keeps its
   cents and its hash and is read as cents times 10,000.
+- **Schema 8 (15 Nov 2026).** One nullable column, `items.holder`: the name of the lock file of the
+  process running a started item (`<db>.holders/<pid>-<time>`, see
+  [TRUST-BOUNDARY.md](TRUST-BOUNDARY.md#d4b-several-processes-on-one-database)). It is NULL for every
+  older item and for an item that is not running, in which case recovery behaves as it always did. The
+  evidence rows, their hashes and the chain are untouched; a file at schema 7 migrates by adding the
+  column. A holders directory sits beside the database file (`live.db.holders/`, mode 700); a process
+  killed outright can leave an empty file in it, which the next recovery that meets its name removes.
 - **What `Enforced` means.** It is the capability's claim that its executor limits its own spend; Core
   checks the call's maximum against it and does not verify it (see [trust and spend](../trust-and-spend.md)).
   Core's clamp and violation row are the second line, and they only see what the capability reports.
