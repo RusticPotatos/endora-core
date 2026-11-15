@@ -397,6 +397,7 @@ fn both_profiles_deny_the_database_and_token_by_name_and_the_service_data_prefix
             "/usr/local/var/endora/core.db-journal",
             "/usr/local/var/endora/core.db-wal",
             "/usr/local/var/endora/core.db-shm",
+            "/usr/local/var/endora/core.db.holders",
             "/Library/Application Support/endora/owner.token",
         ] {
             let at = p
@@ -790,6 +791,8 @@ fn both_volume_spellings_are_denied_and_every_spelling_is_acceptable_to_the_prof
         plain.display().to_string(),
         format!("{}-wal", data.display()),
         format!("{}-journal", plain.display()),
+        format!("{}.holders", plain.display()),
+        format!("{}.holders", data.display()),
     ] {
         assert!(p.contains(&format!("(subpath \"{f}\")")), "no deny for {f}");
     }
@@ -897,5 +900,145 @@ fn launchctl_cannot_be_run_from_the_profile_but_it_runs_unconfined() {
             "control: launchctl failed unconfined"
         );
         assert_ne!(lab.confined(&profile, script).0, 0, "{name}: launchctl ran");
+    }
+}
+
+/// Review of the integrated branch, N1: the lease's holder files (`<db>.holders/`) are denied by
+/// name like the database's other sidecars. With the database under a readable prefix, a confined
+/// agent can neither list the directory nor open a holder file (both spellings, both profiles),
+/// while the Core process (unconfined) still keeps the lease: a second process leaves the live
+/// item alone, and takes it over once the holder is gone. Control: unconfined it lists and opens.
+#[test]
+fn a_confined_agent_cannot_list_or_open_the_holders_directory_and_the_lease_still_works() {
+    use endora_foundation::application::{Core, NewGoal};
+    use endora_foundation::domain::{Actor, Criterion};
+    use endora_foundation::infrastructure::ManualClock;
+    use std::sync::Arc;
+    const TOKEN: &str = concat!(
+        "0123456789abcdef",
+        "0123456789abcdef",
+        "0123456789abcdef",
+        "0123456789abcdef"
+    );
+    if skip("holders directory") {
+        return;
+    }
+    let share = Path::new("/opt/homebrew/share");
+    if std::fs::create_dir(share.join(format!("rec2-probe-{}", std::process::id()))).is_err() {
+        cannot_run(
+            "holders directory",
+            "/opt/homebrew/share is not writable here",
+        );
+        return;
+    }
+    let _ = std::fs::remove_dir(share.join(format!("rec2-probe-{}", std::process::id())));
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    for pi in 0..2 {
+        let lab = Lab::new("holders");
+        let dir = share.join(format!("rec2-holders-{}", lab.tag));
+        let _clean = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("core.db");
+        let open = || Core::open(db.to_str().unwrap(), Arc::new(ManualClock::new(1))).unwrap();
+        let a = open();
+        a.enroll_owner(TOKEN).unwrap();
+        let owner = a.authenticate_owner(TOKEN).unwrap();
+        let g = a
+            .add_goal(
+                &owner,
+                NewGoal {
+                    title: "t".into(),
+                    why: "w".into(),
+                    criteria: vec![Criterion {
+                        text: "c".into(),
+                        check: None,
+                    }],
+                    scope: vec![],
+                    tier: endora_kernel::Tier::Internal,
+                    spend_cap_micros: 0,
+                },
+            )
+            .unwrap();
+        let item = a.add_item(g, "held").unwrap();
+        a.start(&Actor::capability("runner").unwrap(), item)
+            .unwrap();
+        let holders = dir.join("core.db.holders");
+        let holder_file = std::fs::read_dir(&holders)
+            .unwrap()
+            .flatten()
+            .next()
+            .expect("the live item's holder file")
+            .path();
+        let data = |p: &Path| PathBuf::from(format!("/System/Volumes/Data{}", p.display()));
+        let script = |d: &Path, f: &Path| {
+            format!(
+                "ls '{d}' > got.ls 2>&1; echo $? > got.lsexit; cat '{f}' > /dev/null 2>&1; echo $? > got.catexit\n",
+                d = d.display(),
+                f = f.display()
+            )
+        };
+        // Control: unconfined, both work (so a denial below is the profile, not a broken tool).
+        let (_, _) = lab.unconfined(&script(&holders, &holder_file));
+        let exit = |n: &str| std::fs::read_to_string(lab.job.join(n)).unwrap_or_default();
+        assert_eq!(exit("got.lsexit").trim(), "0", "control: ls");
+        assert!(
+            std::fs::read_to_string(lab.job.join("got.ls"))
+                .unwrap()
+                .contains(holder_file.file_name().unwrap().to_str().unwrap()),
+            "control: ls shows the holder file"
+        );
+        assert_eq!(exit("got.catexit").trim(), "0", "control: open");
+        let reads = Reads {
+            deny: canonical_deny_paths(&[db.clone()]),
+            ..Reads::default()
+        };
+        let (name, profile) = if pi == 0 {
+            ("scripted", mac_profile(&lab.job, &reads))
+        } else {
+            ("real-agent", mac_profile_real_agent(&lab.job, &reads, &[]))
+        };
+        for (what, d, f) in [
+            ("plain", holders.clone(), holder_file.clone()),
+            ("data volume", data(&holders), data(&holder_file)),
+        ] {
+            for n in ["got.ls", "got.lsexit", "got.catexit"] {
+                let _ = std::fs::remove_file(lab.job.join(n));
+            }
+            lab.confined(&profile, &script(&d, &f));
+            assert_ne!(
+                exit("got.lsexit").trim(),
+                "0",
+                "{name}: the {what} holders directory was listable"
+            );
+            assert!(
+                !std::fs::read_to_string(lab.job.join("got.ls"))
+                    .unwrap_or_default()
+                    .contains(holder_file.file_name().unwrap().to_str().unwrap()),
+                "{name}: the {what} listing showed the holder file"
+            );
+            assert_ne!(
+                exit("got.catexit").trim(),
+                "0",
+                "{name}: the {what} holder file was openable"
+            );
+        }
+        // The lease is untouched: while `a` lives a second process leaves the item alone; once
+        // `a` is gone it takes the item over.
+        let b = open();
+        assert!(
+            b.recover().unwrap().is_empty(),
+            "{name}: the live holder's item was recovered"
+        );
+        drop(a);
+        assert_eq!(
+            b.recover().unwrap().len(),
+            1,
+            "{name}: the dead holder's item was not recovered"
+        );
     }
 }

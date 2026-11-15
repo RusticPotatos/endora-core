@@ -184,8 +184,8 @@ pub struct Reads {
     /// Single files (for example the agent script named in the config).
     pub files: Vec<PathBuf>,
     /// Paths denied by name after the system allow, whatever prefix they lie under (the owner's
-    /// database and token file; the macOS profile adds the `-journal`, `-wal` and `-shm` files of
-    /// each). The scripted and the real-agent profile both honour it.
+    /// database and token file; the macOS profile adds the `-journal`, `-wal` and `-shm` files and
+    /// the `.holders` directory of each). The scripted and the real-agent profile both honour it.
     pub deny: Vec<PathBuf>,
 }
 
@@ -264,7 +264,8 @@ fn q(p: &Path) -> String {
 }
 
 /// `(deny file-read-data ...)` for paths named by the owner, each with its SQLite sidecar files
-/// (`-journal`, `-wal`, `-shm`); empty when there is nothing to deny.
+/// (`-journal`, `-wal`, `-shm`) and the lease's `<path>.holders` directory (a `subpath`, so the
+/// listing and every holder file in it are denied); empty when there is nothing to deny.
 fn deny_by_name(paths: &[PathBuf]) -> String {
     use std::fmt::Write as _;
     if paths.is_empty() {
@@ -273,7 +274,7 @@ fn deny_by_name(paths: &[PathBuf]) -> String {
     let mut out = String::from("(deny file-read-data");
     for d in paths {
         let _ = write!(out, " {}", q(d));
-        for side in ["-journal", "-wal", "-shm"] {
+        for side in ["-journal", "-wal", "-shm", ".holders"] {
             let mut n = d.clone().into_os_string();
             n.push(side);
             let _ = write!(out, " {}", q(Path::new(&n)));

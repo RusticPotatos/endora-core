@@ -113,7 +113,7 @@ pub struct Options {
     /// a file inside the job). Default: none.
     pub credential_file: Option<PathBuf>,
     /// Paths both macOS profiles deny reading by name (the token file, the database; the profile
-    /// adds each one's `-journal`, `-wal` and `-shm` files), whatever prefix they lie under.
+    /// adds each one's `-journal`, `-wal` and `-shm` files and `.holders` directory), whatever prefix they lie under.
     pub deny_paths: Vec<PathBuf>,
 }
 
