@@ -401,3 +401,53 @@ fn after_a_git_task_is_killed_the_next_run_due_fails_it_as_before() {
         "{said}"
     );
 }
+
+// ---- WF-06: an auto-observe item killed between its last check and settling ---------------------
+
+#[test]
+fn run_due_settles_an_auto_observe_item_stranded_after_its_last_check() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let lab = Lab::at(
+        fresh_dir("stranded"),
+        &format!("probe web tcp 127.0.0.1:{port} 60\n"),
+    );
+    lab.init();
+    let o = lab.run(&[
+        "goal",
+        "add",
+        "--title",
+        "web answers",
+        "--probe",
+        "web",
+        "--acceptance",
+        "auto-observe",
+    ]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let o = lab.run(&["routine", "add", "--goal", "1", "--every", "3600"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    let o = lab.run(&["run-due"]);
+    assert!(
+        text(&o).contains("item 1 accepted by policy:auto-observe"),
+        "{}",
+        text(&o)
+    );
+    // Put item 1 back into the state a kill leaves it in: probe result and met criterion are
+    // recorded, acceptance never happened.
+    rusqlite::Connection::open(&lab.db)
+        .unwrap()
+        .execute(
+            "UPDATE items SET state='running', accepted_by=NULL, accepted_ms=NULL WHERE id=1",
+            [],
+        )
+        .unwrap();
+    assert!(lab.status().contains("#1 [running]"));
+    let o = lab.run(&["run-due"]);
+    let said = text(&o);
+    assert_eq!(o.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("item 1 accepted by policy:auto-observe"),
+        "{said}"
+    );
+    assert!(lab.status().contains("#1 [done]"), "{}", lab.status());
+}

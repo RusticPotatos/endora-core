@@ -1197,6 +1197,46 @@ impl Core {
         self.accept_as(&Actor::policy(AUTO_ACCEPT), item)
     }
 
+    /// Settles the items of `auto-observe` goals that a dead process left `running` after their
+    /// last check was met and before [`Core::settle_by_policy`] ran (a kill between the two
+    /// strands them as an open decision for the owner for ever). Only an item the policy would
+    /// accept is touched, so nothing is refused or recorded per run: every criterion met by a
+    /// structured check, no call above the observe band, no call still unsettled (that is
+    /// [`Core::recover_interrupted`]'s), and no live process running it. Returns what each
+    /// settling did.
+    ///
+    /// # Errors
+    /// [`AppError::Repository`].
+    pub fn settle_stranded_auto_observe(&self) -> Res<Vec<(ItemId, Acceptance)>> {
+        let mut out = Vec::new();
+        for it in self.store.items_in(ItemState::Running)? {
+            if self.store.goal(it.goal)?.acceptance != AcceptancePolicy::AutoObserve {
+                continue;
+            }
+            let criteria = self.store.criteria(it.id)?;
+            let by_check = !criteria.is_empty()
+                && criteria
+                    .iter()
+                    .all(|k| k.met_by.as_deref() == Some("check"));
+            let observe_only = self
+                .store
+                .bands_used(it.id)?
+                .into_iter()
+                .all(|b| b <= Reversibility::Observe);
+            if !by_check
+                || !observe_only
+                || !self.store.unsettled_intents(it.id)?.is_empty()
+                || !self.store.adopt(it.id)?
+            {
+                continue;
+            }
+            if let Some(got) = self.settle_by_policy(it.id)? {
+                out.push((it.id, got));
+            }
+        }
+        Ok(out)
+    }
+
     /// Recomputes the evidence hash chain from the rows as they stand. This is DETECTION, not
     /// prevention: it finds an edited, removed or spliced row after the append-only triggers
     /// were dropped, but it does not stop anyone writing the file, and it cannot see the

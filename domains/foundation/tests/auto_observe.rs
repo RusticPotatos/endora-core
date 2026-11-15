@@ -380,3 +380,89 @@ fn a_file_from_before_slice_4_gains_the_column_and_every_goal_stays_owner() {
     assert_eq!(g[0].acceptance, AcceptancePolicy::Owner);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- an item killed between its last check and settling (weekly review B, WF-06) -------------
+
+fn evidence_rows(core: &Core) -> usize {
+    core.store().evidence_all().unwrap().len()
+}
+
+#[test]
+fn an_item_left_running_with_every_check_met_is_settled_by_the_sweep() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let (core, _) = setup(AcceptancePolicy::AutoObserve, "svc", &clock);
+    // The kill point: the probe result and the met criterion are recorded, `settle_by_policy` never ran.
+    let item = fire_and_verify(&core);
+    assert_eq!(core.store().item(item).unwrap().state, ItemState::Running);
+    let got = core.settle_stranded_auto_observe().unwrap();
+    assert_eq!(
+        got,
+        vec![(
+            item,
+            Acceptance::Accepted {
+                by: "policy:auto-observe".into()
+            }
+        )]
+    );
+    assert_eq!(core.store().item(item).unwrap().state, ItemState::Done);
+    assert!(
+        core.settle_stranded_auto_observe().unwrap().is_empty(),
+        "nothing is left to settle"
+    );
+}
+
+#[test]
+fn the_sweep_leaves_alone_what_the_policy_would_refuse_and_records_nothing() {
+    // An owner goal: the policy does not apply.
+    let clock = Arc::new(ManualClock::new(1_000));
+    let (core, _) = setup(AcceptancePolicy::Owner, "svc", &clock);
+    let item = fire_and_verify(&core);
+    let rows = evidence_rows(&core);
+    assert!(core.settle_stranded_auto_observe().unwrap().is_empty());
+    assert_eq!(core.store().item(item).unwrap().state, ItemState::Running);
+    // An unmet check: still the watch's to fail, not the sweep's to refuse.
+    let (core2, _) = setup(AcceptancePolicy::AutoObserve, "down", &clock);
+    let item2 = fire_and_verify(&core2);
+    let rows2 = evidence_rows(&core2);
+    assert!(core2.settle_stranded_auto_observe().unwrap().is_empty());
+    assert_eq!(core2.store().item(item2).unwrap().state, ItemState::Running);
+    // A reversible call was made: the owner decides, and no refusal row is written per run.
+    let (core3, _) = setup(AcceptancePolicy::AutoObserve, "svc", &clock);
+    let item3 = fire_and_verify(&core3);
+    assert!(matches!(
+        core3
+            .call(&actor_named("tester"), item3, "w.fix", "x")
+            .unwrap(),
+        Outcome::Done(_)
+    ));
+    let rows3 = evidence_rows(&core3);
+    assert!(core3.settle_stranded_auto_observe().unwrap().is_empty());
+    assert_eq!(core3.store().item(item3).unwrap().state, ItemState::Running);
+    assert_eq!(
+        (rows, rows2, rows3),
+        (
+            evidence_rows(&core),
+            evidence_rows(&core2),
+            evidence_rows(&core3)
+        ),
+        "the sweep wrote nothing"
+    );
+}
+
+#[test]
+fn the_sweep_leaves_an_item_with_a_call_still_unsettled_to_recovery() {
+    let clock = Arc::new(ManualClock::new(1_000));
+    let (core, _) = setup(AcceptancePolicy::AutoObserve, "svc", &clock);
+    let item = fire_and_verify(&core);
+    core.store()
+        .db()
+        .lock()
+        .unwrap()
+        .execute(
+            "INSERT INTO evidence (item_id, call, actor, band, decision, kind, inputs_hash, output, at_ms) VALUES (?1,'w.look','core','observe','allow','intent','h','',1)",
+            [item.0],
+        )
+        .unwrap();
+    assert!(core.settle_stranded_auto_observe().unwrap().is_empty());
+    assert_eq!(core.store().item(item).unwrap().state, ItemState::Running);
+}

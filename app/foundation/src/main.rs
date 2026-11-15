@@ -531,6 +531,16 @@ fn run_due(core: &Core) -> Out {
     for r in core.recover_interrupted().map_err(err)? {
         println!("recovered item {} -> {}: {}", r.item.0, r.now.name(), r.why);
     }
+    // An auto-observe item a killed process left after its last check and before its
+    // acceptance is settled now, not left for the owner for ever.
+    for (id, got) in core.settle_stranded_auto_observe().map_err(err)? {
+        match got {
+            Acceptance::Accepted { by } => println!("item {} accepted by {by}", id.0),
+            Acceptance::Refused(why) => {
+                println!("item {} stays for the owner: {}", id.0, why.said());
+            }
+        }
+    }
     for f in core.fire_due().map_err(err)? {
         println!(
             "routine {}: item {} missed {} skipped_open {}",
