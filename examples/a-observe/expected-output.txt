@@ -1,0 +1,89 @@
+# 1. the owner credential
+$ endora-foundation init --token-out owner.token
+owner credential created; the token is in owner.token
+# 2. a goal alone does nothing
+$ endora-foundation goal add --title "Web answers" --why "the local web port must accept connections" --probe web --acceptance owner
+goal 1
+$ endora-foundation run-due
+(no output: the goal has no routine, so there is no item)
+# 3. a routine gives the goal a rhythm
+$ endora-foundation routine add --goal 1 --every 300 --title "check web"
+routine 1
+$ endora-foundation run-due
+routine 1: item 1 missed 0 skipped_open false
+item 1: 1/1 criteria met
+# 4. the item waits for the owner
+$ endora-foundation status
+STOP SWITCH: off
+
+GOALS
+  #1 Web answers (why: the local web port must accept connections) scope: probe.run
+
+ITEMS
+  #1 [running] goal #1 check web criteria 1/1 attempts 1 missed 0
+
+EVIDENCE (tail)
+  e1 t=TIME item=- core core.owner-enrolled observe allow control: an owner credential was created
+  e2 t=TIME item=- owner core.goal observe allow control: goal 1 created (acceptance: owner)
+  e3 t=TIME item=- owner core.grant observe allow control: core may call probe.run up to observe
+  e4 t=TIME item=- owner core.routine observe allow control: routine 1 declared (pauses after 5 failures)
+  e5 t=TIME item=1 runner core.start observe allow control: item started
+  e6 t=TIME item=1 core probe.run observe allow intent:
+  e7 t=TIME item=1 core probe.run observe allow result: tcp 127.0.0.1:PORT up=true
+
+ROUTINES
+  routine 1 goal #1 every 300 s: running, failures 0/5
+
+OPEN DECISIONS
+  item 1: every criterion met. accept 1 | decline 1
+# 5. accept, then read the evidence
+$ endora-foundation accept 1
+item 1 accepted by owner
+$ endora-foundation evidence --item 1
+e5 t=TIME runner core.start observe allow control:
+item started
+e6 t=TIME core probe.run observe allow intent:
+
+e7 t=TIME core probe.run observe allow result:
+tcp 127.0.0.1:PORT up=true
+[facts] up=true
+e8 t=TIME owner core.accept observe allow control:
+accepted by owner
+$ endora-foundation verify-evidence
+evidence chain intact: 8 rows, head HASH (keep the head elsewhere to catch removal of the last rows)
+# 6. backup
+$ endora-foundation backup --to backup.db
+backup written to backup.db (restore: point --db at it)
+$ endora-foundation --db backup.db status | grep '\['
+  #1 [done] goal #1 check web criteria 1/1 attempts 1 missed 0 accepted_by owner
+# 7. crash recovery: kill -9 in the middle of a check
+$ endora-foundation goal add --title "Slow check" --why "a probe that takes three seconds" --probe slow
+goal 2
+$ endora-foundation routine add --goal 2 --every 300 --title "slow check"
+routine 2
+$ kill -9 <run-due>        # the process dies while item 2 is checking
+$ endora-foundation status | grep '\['
+  #1 [done] goal #1 check web criteria 1/1 attempts 1 missed 0 accepted_by owner
+  #2 [running] goal #2 slow check criteria 0/1 attempts 1 missed 0
+$ endora-foundation run-due
+recovered item 2 -> open: interrupted on attempt 1: resumed from its recorded evidence
+item 2: 1/1 criteria met
+$ endora-foundation status | grep '\['
+  #1 [done] goal #1 check web criteria 1/1 attempts 1 missed 0 accepted_by owner
+  #2 [running] goal #2 slow check criteria 1/1 attempts 2 missed 0
+$ endora-foundation evidence --item 2
+e12 t=TIME runner core.start observe allow control:
+item started
+e13 t=TIME core probe.run observe allow intent:
+
+e14 t=TIME core core.recover observe allow control:
+interrupted on attempt 1: resumed from its recorded evidence
+e15 t=TIME runner core.start observe allow control:
+item started
+e16 t=TIME core probe.run observe allow intent:
+
+e17 t=TIME core probe.run observe allow result:
+command sleep
+[facts] exit=0
+$ endora-foundation verify-evidence
+evidence chain intact: 17 rows, head HASH (keep the head elsewhere to catch removal of the last rows)

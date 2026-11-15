@@ -1,0 +1,3 @@
+# Example A config. run.sh replaces PORT with a free local port. Format: probe NAME KIND TARGET SECONDS
+probe web tcp 127.0.0.1:PORT 300
+probe slow command sleep 3 300

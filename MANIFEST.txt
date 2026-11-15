@@ -571,6 +571,7 @@ docs/recovery.md
 docs/releasing-core-image.md
 docs/roadmap.md
 docs/standards.md
+docs/start.md
 docs/terminal-console.md
 docs/testing.md
 docs/where-things-go.md
@@ -986,6 +987,9 @@ domains/team/tests/scenarios/reviews.rs
 domains/team/tests/scenarios/setup.rs
 domains/team/tests/scenarios/team_map.rs
 domains/team/tests/scenarios/world.rs
+examples/a-observe/config
+examples/a-observe/expected-output.txt
+examples/a-observe/run.sh
 rust-toolchain.toml
 scripts/agent-collaboration-baseline.py
 scripts/bench-cases.json
