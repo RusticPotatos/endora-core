@@ -1763,9 +1763,8 @@ fn confirm_on_a_finished_item_is_refused_and_real_corruption_still_says_corrupti
         text(&run(&["status"])),
         "a refused confirm changed the item"
     );
-    // A row whose state is unreadable is real corruption: the engine's words stay for it where it
-    // reads the state itself (`decline`). (`accept` and `status` show such a row as `failed`: a
-    // known limit, root cause in the Core reader, planned fix CORE-2; not pinned here.)
+    // A row whose state is unreadable is real corruption: the engine's words stay for it (see
+    // `an_unreadable_item_state_is_named_and_never_shown_as_failed` for every command).
     let (lab2, cfg2, db2) = owner_lab("corrupt");
     {
         let c = rusqlite::Connection::open(&db2).unwrap();
@@ -1898,4 +1897,106 @@ fn a_closed_stdout_never_panics() {
             );
         }
     }
+}
+
+/// The item rows and the evidence row count as stored, read straight from the file.
+type RawRows = (Vec<(i64, String, Option<String>, i64)>, i64, i64);
+
+fn raw_rows(db: &Path) -> RawRows {
+    let c = rusqlite::Connection::open(db).unwrap();
+    let mut q = c
+        .prepare("SELECT id, state, reason, attempts FROM items ORDER BY id")
+        .unwrap();
+    let items = q
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let ev = c
+        .query_row("SELECT COUNT(*) FROM evidence", [], |r| r.get(0))
+        .unwrap();
+    let met = c
+        .query_row("SELECT COUNT(*) FROM item_met", [], |r| r.get(0))
+        .unwrap();
+    (items, ev, met)
+}
+
+#[test]
+fn an_unreadable_item_state_is_named_and_never_shown_as_failed() {
+    let (lab, cfg, db) = owner_lab("corrupt-all");
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch(
+            "PRAGMA ignore_check_constraints=1; UPDATE items SET state='zzz' WHERE id=1;",
+        )
+        .unwrap();
+    }
+    let before = raw_rows(&db);
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    for args in [
+        vec!["status"],
+        vec!["status", "--short"],
+        vec!["accept", "1"],
+        vec!["decline", "1"],
+        vec!["confirm-criterion", "1", "1"],
+        vec!["confirm", "1", "1"],
+    ] {
+        let o = run(&args);
+        let t = text(&o);
+        // A data error is an error (1), never a refusal by authority (2) and never a success.
+        assert_eq!(code(&o), 1, "{args:?}: {t}");
+        assert!(t.contains("corrupt stored data"), "{args:?}: {t}");
+        assert!(t.contains("item 1") && t.contains("zzz"), "{args:?}: {t}");
+        assert!(
+            !t.contains("is failed") && !t.contains("[failed]") && !t.contains("declined"),
+            "{args:?}: {t}"
+        );
+    }
+    assert_eq!(before, raw_rows(&db), "a command changed the damaged file");
+    // verify-evidence is the integrity check: it still runs and says the chain is intact.
+    let v = run(&["verify-evidence"]);
+    assert_eq!(code(&v), 0, "{}", text(&v));
+    assert!(!text(&v).contains("panicked"), "{}", text(&v));
+}
+
+#[test]
+fn confirm_on_a_done_or_failed_item_is_refused_and_writes_no_row() {
+    let (lab, cfg, db) = owner_lab("finished-rows");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    // Item 1 ends failed (declined); item 2 ends done (auto-observe, confirmed, accepted).
+    assert_eq!(code(&run(&["decline", "1"])), 0);
+    let g = run(&[
+        "goal",
+        "add",
+        "--title",
+        "t2",
+        "--criteria",
+        "c2",
+        "--acceptance",
+        "auto-observe",
+    ]);
+    assert_eq!(code(&g), 0, "{}", text(&g));
+    assert_eq!(
+        code(&run(&["routine", "add", "--goal", "2", "--every", "60"])),
+        0
+    );
+    assert_eq!(code(&run(&["run-due"])), 0);
+    assert_eq!(code(&run(&["confirm-criterion", "2", "1"])), 0);
+    assert_eq!(code(&run(&["accept", "2"])), 0);
+    let before = raw_rows(&db);
+    let status = text(&run(&["status"]));
+    for (item, state) in [("1", "failed"), ("2", "done")] {
+        for verb in ["confirm-criterion", "confirm"] {
+            let o = run(&[verb, item, "1"]);
+            assert_eq!(code(&o), 1, "{verb} {item}: {}", text(&o));
+            assert!(
+                text(&o).contains(&format!("item {item} is already {state}")),
+                "{verb} {item}: {}",
+                text(&o)
+            );
+            assert!(!text(&o).contains("corrupt"), "{}", text(&o));
+        }
+    }
+    assert_eq!(before, raw_rows(&db), "a refused confirm wrote a row");
+    assert_eq!(status, text(&run(&["status"])));
 }

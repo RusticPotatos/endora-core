@@ -591,20 +591,22 @@ impl Store {
     /// An item by id.
     ///
     /// # Errors
-    /// [`RepositoryError::Backend`].
+    /// [`RepositoryError::Backend`]; `Corrupt` when the stored state is unreadable.
     pub fn item(&self, id: ItemId) -> Res<WorkItem> {
         let c = self.db.lock()?;
         c.query_row(&format!("{ITEM_SELECT} WHERE id=?1"), [id.0], item_row)
-            .map_err(backend)
+            .map_err(backend)?
     }
 
     /// Every item, oldest first.
     ///
     /// # Errors
-    /// [`RepositoryError::Backend`].
+    /// [`RepositoryError::Backend`]; `Corrupt` when a stored state is unreadable.
     pub fn items(&self) -> Res<Vec<WorkItem>> {
         let c = self.db.lock()?;
-        col(&c, &format!("{ITEM_SELECT} ORDER BY id"), [], item_row)
+        col(&c, &format!("{ITEM_SELECT} ORDER BY id"), [], item_row)?
+            .into_iter()
+            .collect()
     }
 
     /// Items in `state`.
@@ -618,7 +620,9 @@ impl Store {
             &format!("{ITEM_SELECT} WHERE state=?1 ORDER BY id"),
             [state.name()],
             item_row,
-        )
+        )?
+        .into_iter()
+        .collect()
     }
 
     /// Moves an item to `to` (the transition table decides), recording `reason`. Moving to
@@ -768,6 +772,19 @@ impl Store {
         c.execute("INSERT OR REPLACE INTO item_met (item_id, idx, met_by, met_evidence_id) VALUES (?3,?4,?1,?2)",
             params![by, evidence_id, id.0, i64::try_from(idx).unwrap_or(i64::MAX)]).map_err(backend)?;
         Ok(())
+    }
+
+    /// The owner marks a criterion met, but only while the item is `open`, `running` or `blocked`
+    /// (one statement, so an item finishing meanwhile cannot slip through). `false`, and nothing
+    /// written, when it is finished, unreadable or absent.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn confirm_unfinished(&self, id: ItemId, idx: usize) -> Res<bool> {
+        let n = self.db.lock()?.execute(
+            "INSERT OR REPLACE INTO item_met (item_id, idx, met_by, met_evidence_id) SELECT ?1, ?2, 'owner', NULL WHERE EXISTS (SELECT 1 FROM items WHERE id=?1 AND state IN ('open','running','blocked'))",
+            params![id.0, i64::try_from(idx).unwrap_or(i64::MAX)]).map_err(backend)?;
+        Ok(n == 1)
     }
 
     // ---- policy and control -----------------------------------------------------------------
@@ -1327,28 +1344,36 @@ fn routine_row(r: &Row<'_>) -> rusqlite::Result<Routine> {
     })
 }
 
-fn item_row(r: &Row<'_>) -> rusqlite::Result<WorkItem> {
+/// An unreadable stored state names the item and the value; it is never read as a valid state.
+fn bad_state(id: i64, state: &str) -> RepositoryError {
+    corrupt(format!("item {id} has an unreadable state {state:?}"))
+}
+
+fn item_row(r: &Row<'_>) -> rusqlite::Result<Res<WorkItem>> {
     let state: String = r.get(4)?;
-    Ok(WorkItem {
+    let Some(state) = ItemState::from_name(&state) else {
+        return Ok(Err(bad_state(r.get(0)?, &state)));
+    };
+    Ok(Ok(WorkItem {
         id: ItemId(r.get(0)?),
         goal: GoalId(r.get(1)?),
         routine: r.get::<_, Option<i64>>(2)?.map(RoutineId),
         title: r.get(3)?,
-        state: ItemState::from_name(&state).unwrap_or(ItemState::Failed),
+        state,
         attempts: u32_of(r.get(5)?),
         due_ms: r.get(6)?,
         missed: u32_of(r.get(7)?),
         reason: r.get(8)?,
         accepted_by: r.get(9)?,
         subject: r.get(10)?,
-    })
+    }))
 }
 
 fn read_state(c: &Connection, id: i64) -> Res<ItemState> {
     let s: String = c
         .query_row("SELECT state FROM items WHERE id=?1", [id], |r| r.get(0))
         .map_err(backend)?;
-    ItemState::from_name(&s).ok_or_else(|| corrupt(format!("state {s}")))
+    ItemState::from_name(&s).ok_or_else(|| bad_state(id, &s))
 }
 
 fn put_criteria(c: &Connection, kind: &str, id: i64, list: &[Criterion]) -> Res<()> {

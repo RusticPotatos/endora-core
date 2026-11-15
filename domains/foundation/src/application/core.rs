@@ -25,6 +25,10 @@ pub const MAX_ATTEMPTS: u32 = 3;
 /// The [`AppError::Conflict`] code of [`Core::start`] when another process took the item first.
 pub const ITEM_TAKEN: &str = "item-taken";
 
+/// The [`AppError::Conflict`] code of [`Core::confirm_criterion`] on an item that is already
+/// `done` or `failed`.
+pub const ITEM_FINISHED: &str = "item-finished";
+
 type Res<T> = Result<T, AppError>;
 
 /// A goal to create.
@@ -1099,9 +1103,17 @@ impl Core {
     /// The owner confirms a criterion that has no deterministic check.
     ///
     /// # Errors
-    /// [`AppError::BadRequest`] for anyone else.
+    /// [`AppError::Conflict`] with code [`ITEM_FINISHED`] when the item is already `done` or
+    /// `failed` (nothing is written); [`AppError::Repository`] otherwise, `Corrupt` for an
+    /// unreadable stored state.
     pub fn confirm_criterion(&self, proof: &OwnerProof, item: ItemId, idx: usize) -> Res<()> {
-        self.store.mark_met(item, idx, "owner", None)?;
+        if !self.store.confirm_unfinished(item, idx)? {
+            let state = self.store.item(item)?.state;
+            return Err(AppError::Conflict {
+                code: ITEM_FINISHED,
+                message: format!("item {} is already {}", item.0, state.name()),
+            });
+        }
         self.note(
             Some(item),
             "core.confirm",

@@ -722,6 +722,7 @@ domains/foundation/tests/schema_version.rs
 domains/foundation/tests/spend.rs
 domains/foundation/tests/spend_race.rs
 domains/foundation/tests/stability_doc.rs
+domains/foundation/tests/stored_state.rs
 domains/foundation/tests/structured_check.rs
 domains/foundation/tests/typed_actor.rs
 domains/foundation/tests/watch_bounds.rs
