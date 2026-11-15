@@ -175,15 +175,6 @@ Running it long-term: [../operate.md](../operate.md).
   because moving or fixing them means editing the Core and capability crates, which the command-line
   change does not do (a read-only open belongs to the planned Core change CORE-2); **use
   `endora-foundation`**.
-- **A database row whose item state cannot be read is shown as `failed`** by `status` and `accept` (the
-  Core reader maps an unknown state to `failed`; it does not report corruption there). Commands that read the
-  state themselves, such as `decline`, still say `corrupt stored data`. `verify-evidence` is the integrity
-  check (it covers the evidence chain, not the item rows). Not fixed: the root cause is in Core; the fix is
-  planned as CORE-2.
-- **One owner command (`confirm-criterion`, and its deprecated alias `confirm`) acts on a finished item at the engine level.** The command line refuses
-  `confirm-criterion` on a `done` or `failed` item (`item N is already failed: its criteria cannot be
-  changed`), but Core itself would still change it; a second process racing the command, or a program using
-  Core directly, is not stopped. Planned with CORE-2.
 
 - **A closed stdout can hide a committed change.** If stdout is closed before the command prints its result
   (`... | head -0`), the command's change may already be committed and the exit code is 1; one line goes to

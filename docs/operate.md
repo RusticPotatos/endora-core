@@ -92,12 +92,6 @@ Stop every running endora-foundation process (serve, git-task, cron runs) before
 
 Found by an independent review of 15 Nov 2026 and checked here. The recovery and overlapping-`run-due` findings are fixed (see the changelog); the rest are not.
 
-- **A database row with an unreadable item state is shown as `failed`** (by `status`, and by `accept`, which then
-  says `item N is failed, not running`). `decline` and other commands that read the state themselves still say
-  `corrupt stored data`. `verify-evidence` is the integrity check for the evidence chain. The root cause is in
-  Core; the fix is planned (CORE-2).
-- **Core itself still lets `confirm-criterion` change a finished item**; the command line refuses it, a racing
-  process or a program using Core directly is not stopped (CORE-2).
 - **A closed stdout after a change exits 1 although the change was applied.** If stdout is closed before the
   command prints its result (`... | head -0`), the change may already be committed and the exit code is 1
   (a line on stderr says `output closed: the change may have been applied`). Check with `status` before retrying;

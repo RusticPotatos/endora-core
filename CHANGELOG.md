@@ -80,9 +80,7 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
   `output closed: the change may have been applied` to stderr before exit 1.
 - **Known issues (not fixed here):** a malformed or out of range number or id (`publish abc`, `overall-cap -1`,
   `serve --every 0`) is still checked after the database is opened, so it creates an empty database file when the path
-  did not exist; a database row with an unreadable item state is shown as `failed` by `status` and
-  `accept` (root cause in the Core reader; `verify-evidence` is the integrity check; fix planned CORE-2). Core itself still
-  lets `confirm-criterion` change a finished item (the command line now refuses). The two `*-status` helper binaries create
+  did not exist. The two `*-status` helper binaries create
   or migrate a database and print a subset of `status`; the README now says so.
 - **Docs:** the STABILITY Docker row now says the Docker tests are ignored off Linux, not counted as passed; the stale
   `claude.rs` comment deviation (ADR 0150 item 4) is marked fixed.
@@ -144,6 +142,17 @@ Nothing in this list is claimed fixed.
   `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`, `/opt/homebrew/etc` and `/Library/Application Support`,
   prints a note when the database or token lies under a readable prefix, escapes paths in the profile
   and refuses control characters (WF-A-25).
+
+### Fixed (stored item state and finished items, CLI-1 review findings D1 and D3)
+
+- **A stored item row whose state cannot be read is now an error, not a `failed` item.** Core read an unknown
+  state as `failed`, so `status` and `accept` showed corruption as a normal failed item. It now fails with
+  `corrupt stored data: item N has an unreadable state "..."`, and `status`, `accept`, `decline` and
+  `confirm-criterion` exit 1 with that message and change nothing. `verify-evidence` still runs on such a file.
+- **`confirm-criterion` (and `confirm`) on a `done` or `failed` item is refused by Core**, not only by the command line:
+  `item N is already done` (an `AppError::Conflict` with the new code `item-finished`), with no evidence row and no
+  change to the item. The check and the write are one statement, so an item finishing meanwhile cannot slip through.
+  Before this, Core changed the criteria of a finished item; no documented behaviour relied on that.
 
 ### Known issues (as of this branch)
 
