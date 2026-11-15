@@ -8,6 +8,36 @@
 
 mod probes;
 
+/// Set when a write to stdout failed (a closed pipe, a full disk): the exit code then says so.
+static OUT_FAILED: AtomicBool = AtomicBool::new(false);
+
+// `println!` and `print!` panic when stdout is closed (`endora-foundation status | head -0`).
+// These versions never panic: a failed write is remembered and ends the run with exit 1 (nothing
+// more to say on a stream that is gone). `eprint!`/`eprintln!` ignore a failed write.
+macro_rules! println {
+    () => { println!("") };
+    ($($a:tt)*) => {{
+        use std::io::Write as _;
+        if writeln!(std::io::stdout(), $($a)*).is_err() {
+            OUT_FAILED.store(true, Ordering::Relaxed);
+        }
+    }};
+}
+macro_rules! print {
+    ($($a:tt)*) => {{
+        use std::io::Write as _;
+        if write!(std::io::stdout(), $($a)*).is_err() {
+            OUT_FAILED.store(true, Ordering::Relaxed);
+        }
+    }};
+}
+macro_rules! eprintln {
+    ($($a:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stderr(), $($a)*);
+    }};
+}
+
 use std::path::{Path, PathBuf};
 use std::process::exit;
 use std::sync::Arc;
@@ -140,35 +170,62 @@ struct Args {
     config: Option<PathBuf>,
     token_file: Option<PathBuf>,
     token_out: Option<PathBuf>,
+    /// The first thing wrong with the arguments themselves (a global option without its value or
+    /// given twice, an argument that is not UTF-8). Reported after help and version, which must
+    /// work whatever else is on the line.
+    problem: Option<String>,
 }
 
-fn parse_args() -> Result<Args, Fail> {
+/// Reads the arguments as `OsString` (never panics on bytes that are not UTF-8): a word that is
+/// not UTF-8 is kept lossily, so it can never equal a command or an option, and is reported.
+fn parse_args() -> Args {
     let mut a = Args {
         words: Vec::new(),
         db: None,
         config: None,
         token_file: None,
         token_out: None,
+        problem: None,
     };
-    let mut it = std::env::args().skip(1);
-    while let Some(w) = it.next() {
-        let slot = match w.as_str() {
+    let note = |a: &mut Args, m: String| {
+        a.problem.get_or_insert(m);
+    };
+    let mut it = std::env::args_os().skip(1).enumerate();
+    let text = |a: &mut Args, n: usize, raw: std::ffi::OsString| -> String {
+        raw.into_string().unwrap_or_else(|raw| {
+            let shown = raw.to_string_lossy().into_owned();
+            a.problem.get_or_insert(format!(
+                "argument {} is not valid UTF-8 (shown as {shown:?}): every argument must be UTF-8 text",
+                n + 1
+            ));
+            shown
+        })
+    };
+    while let Some((n, raw)) = it.next() {
+        let w = text(&mut a, n, raw);
+        let name = w.as_str();
+        if !matches!(name, "--db" | "--config" | "--token-file" | "--token-out") {
+            a.words.push(w);
+            continue;
+        }
+        let Some((m, value)) = it.next() else {
+            note(&mut a, format!("{name} needs a value (a path)"));
+            continue;
+        };
+        let value = PathBuf::from(text(&mut a, m, value));
+        let slot = match name {
             "--db" => &mut a.db,
             "--config" => &mut a.config,
             "--token-file" => &mut a.token_file,
-            "--token-out" => &mut a.token_out,
-            _ => {
-                a.words.push(w);
-                continue;
-            }
+            _ => &mut a.token_out,
         };
-        *slot = Some(
-            it.next()
-                .map(PathBuf::from)
-                .ok_or_else(|| Fail::Error(format!("{w} needs a value (a path)")))?,
-        );
+        if slot.is_some() {
+            note(&mut a, format!("{name} given twice"));
+        } else {
+            *slot = Some(value);
+        }
     }
-    Ok(a)
+    a
 }
 
 /// One command's accepted words: its name (one or two words), each option with the number of
@@ -177,28 +234,52 @@ fn parse_args() -> Result<Args, Fail> {
 struct Spec {
     name: &'static str,
     options: &'static [(&'static str, usize)],
-    plain: usize,
+    /// The options that must be there.
+    required: &'static [&'static str],
+    /// The plain words (ids, amounts) the command takes, all required, in order.
+    plain: &'static [&'static str],
+    /// The options that may be given more than once.
+    repeat: &'static [&'static str],
+}
+
+const fn spec(
+    name: &'static str,
+    options: &'static [(&'static str, usize)],
+    required: &'static [&'static str],
+    plain: &'static [&'static str],
+) -> Spec {
+    Spec {
+        name,
+        options,
+        required,
+        plain,
+        repeat: &[],
+    }
 }
 
 const SPECS: &[Spec] = &[
     Spec {
-        name: "goal add",
-        options: &[
-            ("--title", 1),
-            ("--why", 1),
-            ("--criteria", 1),
-            ("--check", 4),
-            ("--probe", 1),
-            ("--scope", 1),
-            ("--tier", 1),
-            ("--cap", 1),
-            ("--acceptance", 1),
-        ],
-        plain: 0,
+        repeat: &["--criteria", "--check", "--probe"],
+        ..spec(
+            "goal add",
+            &[
+                ("--title", 1),
+                ("--why", 1),
+                ("--criteria", 1),
+                ("--check", 4),
+                ("--probe", 1),
+                ("--scope", 1),
+                ("--tier", 1),
+                ("--cap", 1),
+                ("--acceptance", 1),
+            ],
+            &["--title"],
+            &[],
+        )
     },
-    Spec {
-        name: "routine add",
-        options: &[
+    spec(
+        "routine add",
+        &[
             ("--goal", 1),
             ("--every", 1),
             ("--probe", 1),
@@ -206,109 +287,39 @@ const SPECS: &[Spec] = &[
             ("--max-failures", 1),
             ("--auto-accept", 0),
         ],
-        plain: 0,
-    },
-    Spec {
-        name: "routine resume",
-        options: &[],
-        plain: 1,
-    },
-    Spec {
-        name: "git-task",
-        options: &[
+        &["--goal"],
+        &[],
+    ),
+    spec("routine resume", &[], &[], &["ROUTINE"]),
+    spec(
+        "git-task",
+        &[
             ("--goal", 1),
             ("--repo", 1),
             ("--instruction", 1),
             ("--test-cmd", 1),
             ("--cap", 1),
         ],
-        plain: 0,
-    },
-    Spec {
-        name: "publish",
-        options: &[],
-        plain: 1,
-    },
-    Spec {
-        name: "run-due",
-        options: &[],
-        plain: 0,
-    },
-    Spec {
-        name: "serve",
-        options: &[("--every", 1)],
-        plain: 0,
-    },
-    Spec {
-        name: "status",
-        options: &[("--short", 0)],
-        plain: 0,
-    },
-    Spec {
-        name: "init",
-        options: &[],
-        plain: 0,
-    },
-    Spec {
-        name: "accept",
-        options: &[],
-        plain: 1,
-    },
-    Spec {
-        name: "decline",
-        options: &[],
-        plain: 1,
-    },
-    Spec {
-        name: "confirm-criterion",
-        options: &[],
-        plain: 2,
-    },
-    Spec {
-        name: "confirm",
-        options: &[],
-        plain: 2,
-    },
-    Spec {
-        name: "stop",
-        options: &[],
-        plain: 0,
-    },
-    Spec {
-        name: "resume",
-        options: &[],
-        plain: 0,
-    },
-    Spec {
-        name: "overall-cap",
-        options: &[],
-        plain: 1,
-    },
-    Spec {
-        name: "resume-goal",
-        options: &[],
-        plain: 1,
-    },
-    Spec {
-        name: "verify-evidence",
-        options: &[],
-        plain: 0,
-    },
-    Spec {
-        name: "evidence",
-        options: &[("--item", 1)],
-        plain: 0,
-    },
-    Spec {
-        name: "backup",
-        options: &[("--to", 1)],
-        plain: 0,
-    },
-    Spec {
-        name: "capabilities",
-        options: &[],
-        plain: 0,
-    },
+        &["--instruction", "--test-cmd"],
+        &[],
+    ),
+    spec("publish", &[], &[], &["ITEM"]),
+    spec("run-due", &[], &[], &[]),
+    spec("serve", &[("--every", 1)], &["--every"], &[]),
+    spec("status", &[("--short", 0)], &[], &[]),
+    spec("init", &[], &[], &[]),
+    spec("accept", &[], &[], &["ITEM"]),
+    spec("decline", &[], &[], &["ITEM"]),
+    spec("confirm-criterion", &[], &[], &["ITEM", "N"]),
+    spec("confirm", &[], &[], &["ITEM", "N"]),
+    spec("stop", &[], &[], &[]),
+    spec("resume", &[], &[], &[]),
+    spec("overall-cap", &[], &[], &["MICRO_USD"]),
+    spec("resume-goal", &[], &[], &["GOAL"]),
+    spec("verify-evidence", &[], &[], &[]),
+    spec("evidence", &[("--item", 1)], &["--item"], &[]),
+    spec("backup", &[("--to", 1)], &["--to"], &[]),
+    spec("capabilities", &[], &[], &[]),
 ];
 
 /// The one-line usage an unknown command is answered with.
@@ -338,7 +349,7 @@ commands (OWNER = needs the owner token file; without it, or with a wrong one: e
   git-task --instruction T --test-cmd CMD [--goal ID] [--repo PATH] [--cap MICRO_USD]   OWNER
                       prepare, change (the configured agent), verify; waits for the owner
   run-due             fire due routines, start new items, run their checks
-  serve --every SECONDS   run-due in a loop; SIGTERM ends it cleanly
+  serve --every SECONDS   run-due in a loop; SIGTERM ends it cleanly (SECONDS: 1 to 31622400, as for routine add)
   status [--short]    goals, items, evidence tail (--short: without the tail), open decisions
   init --token-out FILE   once: make the owner credential
   accept ITEM         the owner accepts an item whose criteria are all met        OWNER
@@ -349,7 +360,8 @@ commands (OWNER = needs the owner token file; without it, or with a wrong one: e
   resume              stop switch off                                            OWNER
   resume-goal GOAL    lift the stop a cost violation put on a goal               OWNER
   overall-cap MICRO_USD   the most all goals may spend together (starts at 0)    OWNER
-  publish ITEM        always refused (exit 2): nothing here publishes
+  publish ITEM        refused (exit 2): nothing here publishes; a missing or non-numeric ITEM
+                      is a usage error (exit 1)
   evidence --item ID  every record about an item, in full
   verify-evidence     recompute the evidence hash chain; exit 1 naming the first broken row
   backup --to FILE    consistent copy (mode 600; an existing FILE is never overwritten)
@@ -365,7 +377,8 @@ environment:
 
 exit codes: 0 ok, 1 error (a mistake in the command line, an unknown id, a failed run),
             2 refused by authority (the reason is printed).
-An unknown command, option or extra word is refused with exit 1 and named; nothing is opened.
+An unknown command, option, repeated option, extra or missing word, or an argument that is not
+UTF-8 is refused with exit 1 and named; nothing is opened.
 ";
 
 /// The command's [`Spec`], by its first (and for `goal` and `routine` second) word.
@@ -379,37 +392,62 @@ fn spec_of(w: &[String]) -> Option<&'static Spec> {
     })
 }
 
-/// Checks a command line against its [`Spec`] before anything is opened. `Ok(true)` when help was
-/// asked for; an unknown command, an unknown option, an option without its value or an extra
-/// word is an error (exit 1) that names the offender.
-fn check_words(w: &[String]) -> Result<bool, Fail> {
-    if w.first().is_some_and(|x| x == "help") {
-        return Ok(true);
+/// True when help was asked for: `help` or a help flag as the first word, or a help flag anywhere
+/// on the line of a command that exists (never as the value of an option). `bogus --help` is not
+/// help: it is an unknown command.
+fn wants_help(w: &[String]) -> bool {
+    let is_help = |x: &str| x == "--help" || x == "-h";
+    if w.first().is_some_and(|x| x == "help" || is_help(x)) {
+        return true;
     }
-    let spec = spec_of(w);
-    let skip = spec.map_or(0, |s| s.name.split(' ').count());
-    let takes = |o: &str| {
-        spec.and_then(|s| s.options.iter().find(|(n, _)| *n == o))
-            .map(|(_, n)| *n)
+    let Some(spec) = spec_of(w) else {
+        // `goal --help` and `routine -h`: the first word of a two-word command.
+        return matches!(w.first().map(String::as_str), Some("goal" | "routine"))
+            && w.len() == 2
+            && is_help(&w[1]);
     };
-    // Help first, wherever it stands (but never a value of an option).
-    let mut i = skip;
+    let mut i = spec.name.split(' ').count();
     while i < w.len() {
-        if w[i] == "--help" || w[i] == "-h" {
-            return Ok(true);
+        if is_help(&w[i]) {
+            return true;
         }
-        i += 1 + takes(&w[i]).unwrap_or(0);
+        i += 1 + spec
+            .options
+            .iter()
+            .find(|(n, _)| *n == w[i])
+            .map_or(0, |(_, n)| *n);
     }
-    let Some(spec) = spec else {
+    false
+}
+
+/// Checks a command line against its [`Spec`] before anything is opened. An unknown command, an
+/// unknown option, an option without its value or given twice, an extra word or a missing one is
+/// an error (exit 1) that names the offender.
+fn check_words(w: &[String]) -> Result<(), Fail> {
+    let Some(spec) = spec_of(w) else {
         return Err(Fail::Error(match w.first() {
             None => format!("no command given; {USAGE_LINE}"),
             Some(_) => format!(
                 "unknown command `{}`; {USAGE_LINE}",
-                w.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+                w.iter()
+                    .take(
+                        if matches!(w[0].as_str(), "goal" | "routine")
+                            && !w[1..].is_empty()
+                            && !w[1].starts_with('-')
+                        {
+                            2
+                        } else {
+                            1
+                        }
+                    )
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" ")
             ),
         }));
     };
-    let (mut plain, mut i) = (0, skip);
+    let takes = |o: &str| spec.options.iter().find(|(n, _)| *n == o).map(|(_, n)| *n);
+    let (mut plain, mut seen, mut i) = (0, Vec::new(), spec.name.split(' ').count());
     while i < w.len() {
         let x = w[i].as_str();
         if x.starts_with("--") {
@@ -425,10 +463,17 @@ fn check_words(w: &[String]) -> Result<bool, Fail> {
                     format!("{x} needs {n} values")
                 }));
             }
+            if seen.contains(&x) && !spec.repeat.contains(&x) {
+                return Err(Fail::Error(format!(
+                    "{x} given twice for {} (see --help)",
+                    spec.name
+                )));
+            }
+            seen.push(x);
             i += 1 + n;
         } else {
             plain += 1;
-            if plain > spec.plain {
+            if plain > spec.plain.len() {
                 return Err(Fail::Error(format!(
                     "unexpected argument `{x}` for {} (see --help)",
                     spec.name
@@ -437,7 +482,13 @@ fn check_words(w: &[String]) -> Result<bool, Fail> {
             i += 1;
         }
     }
-    Ok(false)
+    if let Some(name) = spec.plain.get(plain) {
+        return Err(Fail::Error(format!("missing {name} for {}", spec.name)));
+    }
+    if let Some(name) = spec.required.iter().find(|r| !seen.contains(r)) {
+        return Err(Fail::Error(format!("missing {name} for {}", spec.name)));
+    }
+    Ok(())
 }
 
 /// `rusqlite` says `Query returned no rows` for an id that is not there.
@@ -521,6 +572,21 @@ fn flag<'a>(w: &'a [String], name: &str) -> Option<&'a str> {
 
 fn need<'a>(w: &'a [String], name: &str) -> Result<&'a str, Fail> {
     flag(w, name).ok_or_else(|| Fail::Error(format!("missing {name}")))
+}
+
+/// The longest rhythm a routine or a `serve` loop may have: 366 days, the engine's own limit.
+const MOST_SECONDS: i64 = 366 * 24 * 3600;
+
+/// A rhythm in seconds: a whole number from 1 to [`MOST_SECONDS`].
+fn seconds(s: &str, what: &str) -> Result<i64, Fail> {
+    let n = num(s, what)?;
+    if (1..=MOST_SECONDS).contains(&n) {
+        Ok(n)
+    } else {
+        Err(Fail::Error(format!(
+            "{what} must be between 1 and {MOST_SECONDS} seconds (366 days), not {n}"
+        )))
+    }
 }
 
 fn num(s: &str, what: &str) -> Result<i64, Fail> {
@@ -838,13 +904,19 @@ fn routine_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> O
     let goal = GoalId(num(need(w, "--goal")?, "--goal")?);
     need_goal(core, goal)?;
     let secs = match (flag(w, "--every"), flag(w, "--probe")) {
-        (Some(v), _) => num(v, "--every")?,
-        (None, Some(name)) => s
-            .probes
-            .iter()
-            .find(|p| p.name == name)
-            .map(|p| p.interval_secs)
-            .ok_or_else(|| Fail::Error(format!("`{name}` is not a probe in the config")))?,
+        (Some(v), _) => seconds(v, "--every")?,
+        (None, Some(name)) => {
+            let found = s
+                .probes
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.interval_secs)
+                .ok_or_else(|| Fail::Error(format!("`{name}` is not a probe in the config")))?;
+            seconds(
+                &found.to_string(),
+                &format!("the interval of probe `{name}`"),
+            )?
+        }
         (None, None) => {
             return Err(Fail::Error(
                 "routine add needs --every <seconds> or --probe <name>".into(),
@@ -860,14 +932,19 @@ fn routine_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> O
         .map_or(Ok(i64::from(DEFAULT_MAX_FAILURES)), |v| {
             num(v, "--max-failures")
         })?;
-    let max_failures = u32::try_from(max_failures)
-        .map_err(|_| Fail::Error("--max-failures must not be negative".into()))?;
+    let max_failures = u32::try_from(max_failures).map_err(|_| {
+        Fail::Error(if max_failures < 0 {
+            "--max-failures must not be negative".into()
+        } else {
+            format!("--max-failures is too large (at most {})", u32::MAX)
+        })
+    })?;
     let id = core
         .add_routine_limited(
             proof,
             goal,
             &title,
-            secs.saturating_mul(1000),
+            secs * 1000,
             w.iter().any(|x| x == "--auto-accept"),
             now,
             max_failures,
@@ -988,7 +1065,31 @@ fn run_due_command(core: &Core) -> Out {
         if n == 0 {
             println!("no routines: a goal needs a routine to make items");
         } else {
-            println!("nothing due ({n} routine{})", if n == 1 { "" } else { "s" });
+            let routines = core.store().routines().map_err(err)?;
+            let paused: Vec<String> = routines
+                .iter()
+                .filter(|r| r.paused)
+                .map(|r| r.id.0.to_string())
+                .collect();
+            let waiting = core
+                .store()
+                .items_in(ItemState::Running)
+                .map_err(err)?
+                .len();
+            let mut said = format!("nothing due ({n} routine{})", if n == 1 { "" } else { "s" });
+            if !paused.is_empty() {
+                said.push_str(&format!(
+                    "; PAUSED: routine {} (routine resume ID)",
+                    paused.join(", ")
+                ));
+            }
+            if waiting > 0 {
+                said.push_str(&format!(
+                    "; {waiting} item{} waiting for the owner (see status)",
+                    if waiting == 1 { "" } else { "s" }
+                ));
+            }
+            println!("{said}");
         }
     }
     Ok(())
@@ -998,10 +1099,7 @@ fn run_due_command(core: &Core) -> Out {
 /// stop switch pauses it (said once per pause) instead of ending it; SIGTERM or SIGINT ends it
 /// cleanly between two runs (exit 0). A failed run is reported and the loop goes on.
 fn serve(core: &Core, w: &[String]) -> Out {
-    let every = num(need(w, "--every")?, "--every")?;
-    if every < 1 {
-        return Err(Fail::Error("--every must be at least 1 second".into()));
-    }
+    let every = seconds(need(w, "--every")?, "--every")?;
     let stop = Arc::new(AtomicBool::new(false));
     for sig in [SIGTERM, SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(err)?;
@@ -1019,7 +1117,9 @@ fn serve(core: &Core, w: &[String]) -> Out {
             }
             Err(Fail::Error(why)) => println!("run-due failed: {why}"),
         }
-        let until = Instant::now() + Duration::from_secs(u64::try_from(every).unwrap_or(1));
+        let until = Instant::now()
+            .checked_add(Duration::from_secs(u64::try_from(every).unwrap_or(1)))
+            .ok_or_else(|| Fail::Error("--every is too long for this clock".into()))?;
         while Instant::now() < until && !stop.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -1029,9 +1129,15 @@ fn serve(core: &Core, w: &[String]) -> Out {
 }
 
 fn status(core: &Core, short: bool) -> Out {
+    let text = core.status_text(if short { 0 } else { 15 }).map_err(err)?;
+    // `--short` has no evidence tail at all, not an empty header.
     print!(
         "{}",
-        core.status_text(if short { 0 } else { 15 }).map_err(err)?
+        if short {
+            text.split("\nEVIDENCE (tail)").next().unwrap_or(&text)
+        } else {
+            &text
+        }
     );
     println!("\nROUTINES");
     for r in core.store().routines().map_err(err)? {
@@ -1262,7 +1368,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
                 .map_err(|e| refused_move(core, id, e, "accept"))?
             {
                 Acceptance::Accepted { by } => {
-                    println!("item {} accepted by {by}", w[1]);
+                    println!("item {} accepted by {by}", id.0);
                     Ok(())
                 }
                 // Still exit 2 (an owner accept refused by the rules); the item's own state is said.
@@ -1286,7 +1392,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             need_item(core, id)?;
             core.decline(&proof, id, "declined by the owner")
                 .map_err(|e| refused_move(core, id, e, "decline"))?;
-            println!("item {} declined", w[1]);
+            println!("item {} declined", id.0);
             Ok(())
         }
         (Some("confirm-criterion"), _) | (Some("confirm"), _) => {
@@ -1298,7 +1404,15 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             let n = num(w.get(2).map_or("", String::as_str), "criterion number")?;
             let proof = auth.prove(core)?;
             let id = item(1)?;
-            need_item(core, id)?;
+            let state = need_item(core, id)?;
+            // The engine would still change a finished item's criteria; the command line does not.
+            if matches!(state, ItemState::Done | ItemState::Failed) {
+                return Err(Fail::Error(format!(
+                    "item {} is already {}: its criteria cannot be changed",
+                    id.0,
+                    state.name()
+                )));
+            }
             let have = core.store().criteria(id).map_err(err)?.len();
             let n = usize::try_from(n).ok().filter(|n| *n >= 1).ok_or_else(|| {
                 Fail::Error(format!("criterion {n}: criteria are numbered from 1"))
@@ -1312,7 +1426,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             }
             core.confirm_criterion(&proof, id, n - 1)
                 .map_err(|e| refused_move(core, id, e, "confirm"))?;
-            println!("criterion {n} of item {} confirmed", w[1]);
+            println!("criterion {n} of item {} confirmed", id.0);
             Ok(())
         }
         (Some("stop"), _) => {
@@ -1342,7 +1456,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             let proof = auth.prove(core)?;
             need_goal(core, goal)?;
             core.resume_goal(&proof, goal).map_err(err)?;
-            println!("goal {} resumed", w[1]);
+            println!("goal {} resumed", goal.0);
             Ok(())
         }
         (Some("verify-evidence"), _) => {
@@ -1421,7 +1535,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
 }
 
 fn run() -> Out {
-    let a = parse_args()?;
+    let a = parse_args();
     if matches!(
         a.words.first().map(String::as_str),
         Some("--version" | "-V")
@@ -1434,9 +1548,18 @@ fn run() -> Out {
         );
         return Ok(());
     }
-    if check_words(&a.words)? {
+    if wants_help(&a.words) {
         print!("{HELP}");
         return Ok(());
+    }
+    if let Some(problem) = a.problem {
+        return Err(Fail::Error(problem));
+    }
+    check_words(&a.words)?;
+    if a.token_out.is_some() && a.words.first().map(String::as_str) != Some("init") {
+        return Err(Fail::Error(
+            "--token-out is only for init (see --help)".into(),
+        ));
     }
     let db =
         a.db.or_else(|| std::env::var_os("ENDORA_FOUNDATION_DB").map(PathBuf::from))
@@ -1509,7 +1632,17 @@ fn run() -> Out {
 }
 
 fn main() {
-    match run() {
+    let result = run();
+    // Flush now: a buffered line that cannot be written is a failed run, not a panic at exit.
+    let flushed = std::io::Write::flush(&mut std::io::stdout()).is_ok();
+    if !flushed || OUT_FAILED.load(Ordering::Relaxed) {
+        if let Err(Fail::Refused(_)) = result {
+            // The refusal is still the answer (exit 2): authority comes before the output.
+        } else {
+            exit(1);
+        }
+    }
+    match result {
         Ok(()) => {}
         Err(Fail::Refused(why)) => {
             eprintln!("{why}");

@@ -1382,3 +1382,424 @@ fn resume_goal_needs_the_token_and_lifts_a_cost_stop() {
         text(&again)
     );
 }
+
+// ---- round 2: review CLI1 (B1, B2, D1, D2, D3 and the nits) ----
+
+fn no_panic(o: &Output, what: &str) {
+    let t = text(o);
+    assert!(
+        !t.contains("panicked") && matches!(o.status.code(), Some(0..=2)),
+        "{what}: a panic or a signal (code {:?}): {t}",
+        o.status.code()
+    );
+}
+
+#[test]
+fn a_non_utf8_argument_is_refused_with_exit_1_and_never_panics_but_help_still_works() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+    let lab = Lab::new("utf8");
+    let db = lab.dir.join("never.db");
+    let bad = OsString::from_vec(vec![b'x', 0xff, b'y']);
+    let s = |x: &str| OsString::from(x);
+    let cases: Vec<Vec<OsString>> = vec![
+        vec![bad.clone()],
+        vec![s("status"), bad.clone()],
+        vec![
+            s("goal"),
+            s("add"),
+            s("--title"),
+            bad.clone(),
+            s("--criteria"),
+            s("c"),
+        ],
+        vec![s("--db"), s(db.to_str().unwrap()), bad.clone()],
+        vec![s("--db"), bad.clone(), s("status")],
+        vec![s("--config"), bad.clone(), s("status")],
+        vec![s("--token-file"), bad.clone(), s("accept"), s("1")],
+        vec![s("accept"), bad.clone()],
+        vec![s("--version"), bad.clone()],
+    ];
+    for args in &cases {
+        // `--db` first, unless the case names one itself (a second one is refused).
+        let mut cmd = bin();
+        if !args.iter().any(|a| a == "--db") {
+            cmd.arg("--db").arg(&db);
+        }
+        let o = cmd.args(args).output().unwrap();
+        let t = text(&o);
+        assert_eq!(code(&o), 1, "{args:?}: {t}");
+        assert!(t.contains("not valid UTF-8"), "{args:?}: {t}");
+        assert!(!t.contains("panicked"), "{args:?}: {t}");
+    }
+    assert!(!db.exists(), "a refused argument created a database");
+    // Help and version never convert the other arguments first.
+    for args in [
+        vec![s("--help"), bad.clone()],
+        vec![s("-h"), bad.clone()],
+        vec![s("status"), s("--help"), bad.clone()],
+        vec![bad.clone(), s("--help")],
+    ] {
+        let o = bin()
+            .args(&args)
+            .env_remove("ENDORA_FOUNDATION_DB")
+            .output()
+            .unwrap();
+        // `bad --help` is an unknown command with a bad word; everything else is help.
+        if args[0] == bad {
+            assert_eq!(code(&o), 1, "{args:?}: {}", text(&o));
+        } else {
+            assert_eq!(code(&o), 0, "{args:?}: {}", text(&o));
+            assert!(String::from_utf8_lossy(&o.stdout).contains("exit codes"));
+        }
+        assert!(!text(&o).contains("panicked"), "{args:?}: {}", text(&o));
+    }
+    let v = bin()
+        .arg("--version")
+        .env_remove("ENDORA_FOUNDATION_DB")
+        .output()
+        .unwrap();
+    assert_eq!(code(&v), 0);
+}
+
+#[test]
+fn every_numeric_option_survives_empty_negative_huge_and_overflowing_values() {
+    let (lab, cfg, db) = owner_lab("numbers");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    let values = [
+        "",
+        "-1",
+        "0",
+        "1",
+        "+1",
+        "9223372036854775807",
+        "9223372036854775808",
+        "18446744073709551615",
+        "4294967296",
+        "31622401",
+        "99999999999",
+        "abc",
+        "1e9",
+        " 1",
+    ];
+    for v in values {
+        for args in [
+            vec!["goal", "add", "--title", "T", "--criteria", "c", "--cap", v],
+            vec!["routine", "add", "--goal", "1", "--every", v],
+            vec!["routine", "add", "--goal", v, "--every", "60"],
+            vec![
+                "routine",
+                "add",
+                "--goal",
+                "1",
+                "--every",
+                "60",
+                "--max-failures",
+                v,
+            ],
+            vec!["routine", "resume", v],
+            vec![
+                "git-task",
+                "--goal",
+                v,
+                "--instruction",
+                "i",
+                "--test-cmd",
+                "t",
+            ],
+            vec![
+                "git-task",
+                "--cap",
+                v,
+                "--instruction",
+                "i",
+                "--test-cmd",
+                "t",
+            ],
+            vec!["accept", v],
+            vec!["decline", v],
+            vec!["publish", v],
+            vec!["confirm-criterion", v, "1"],
+            vec!["confirm-criterion", "1", v],
+            vec!["resume-goal", v],
+            vec!["overall-cap", v],
+            vec!["evidence", "--item", v],
+        ] {
+            // Valid values may succeed (exit 0) and change the lab; none may panic.
+            no_panic(&run(&args), &format!("{args:?}"));
+        }
+    }
+    // `serve` never ends on a valid value, so only the refused ones run here.
+    for v in [
+        "",
+        "-1",
+        "0",
+        "9223372036854775807",
+        "9223372036854775808",
+        "31622401",
+        "abc",
+        "1e9",
+    ] {
+        let o = run(&["serve", "--every", v]);
+        assert_eq!(code(&o), 1, "serve --every {v:?}: {}", text(&o));
+        no_panic(&o, v);
+        assert!(
+            text(&o).contains("--every must be a whole number")
+                || text(&o).contains("--every must be between 1 and 31622400 seconds"),
+            "serve --every {v:?}: {}",
+            text(&o)
+        );
+    }
+    let big = run(&[
+        "routine",
+        "add",
+        "--goal",
+        "1",
+        "--every",
+        "9223372036854775807",
+    ]);
+    assert_eq!(code(&big), 1, "{}", text(&big));
+    assert!(
+        text(&big).contains("--every must be between 1 and 31622400 seconds"),
+        "{}",
+        text(&big)
+    );
+    let mf = run(&[
+        "routine",
+        "add",
+        "--goal",
+        "1",
+        "--every",
+        "60",
+        "--max-failures",
+        "99999999999",
+    ]);
+    assert_eq!(code(&mf), 1);
+    assert!(
+        text(&mf).contains("--max-failures is too large"),
+        "{}",
+        text(&mf)
+    );
+    // And a routine that was accepted still runs.
+    no_panic(&run(&["run-due"]), "run-due after the numbers");
+}
+
+#[test]
+fn a_missing_argument_says_missing_and_opens_no_database() {
+    let lab = Lab::new("missing");
+    let db = lab.dir.join("never.db");
+    for (args, want) in [
+        (
+            vec!["confirm-criterion", "1"],
+            "missing N for confirm-criterion",
+        ),
+        (vec!["accept"], "missing ITEM for accept"),
+        (vec!["publish"], "missing ITEM for publish"),
+        (
+            vec!["goal", "add", "--criteria", "c"],
+            "missing --title for goal add",
+        ),
+        (vec!["evidence"], "missing --item for evidence"),
+        (vec!["backup"], "missing --to for backup"),
+        (vec!["serve"], "missing --every for serve"),
+        (
+            vec!["git-task", "--instruction", "i"],
+            "missing --test-cmd for git-task",
+        ),
+        (vec!["overall-cap"], "missing MICRO_USD for overall-cap"),
+    ] {
+        let o = bin().arg("--db").arg(&db).args(&args).output().unwrap();
+        assert_eq!(code(&o), 1, "{args:?}: {}", text(&o));
+        assert!(text(&o).contains(want), "{args:?}: {}", text(&o));
+        assert!(!text(&o).contains("whole number"), "{args:?}: {}", text(&o));
+    }
+    assert!(!db.exists(), "a missing argument created a database");
+    // A word that is not a number is still said so.
+    let o = bin()
+        .arg("--db")
+        .arg(&db)
+        .args(["evidence", "--item", "abc"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 1);
+    assert!(text(&o).contains("whole number"), "{}", text(&o));
+    // publish: a missing or non-numeric id is a usage error (1); a refusal is 2.
+    let p = bin()
+        .arg("--db")
+        .arg(&db)
+        .args(["publish", "abc"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&p), 1, "{}", text(&p));
+}
+
+#[test]
+fn a_repeated_option_is_refused_and_so_is_token_out_outside_init_and_bogus_help() {
+    let (lab, cfg, db) = owner_lab("repeat");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    for (args, want) in [
+        (
+            vec![
+                "goal",
+                "add",
+                "--title",
+                "A",
+                "--title",
+                "B",
+                "--criteria",
+                "c",
+            ],
+            "--title given twice for goal add",
+        ),
+        (
+            vec![
+                "routine", "add", "--goal", "1", "--every", "60", "--every", "90",
+            ],
+            "--every given twice for routine add",
+        ),
+        (
+            vec!["status", "--short", "--short"],
+            "--short given twice for status",
+        ),
+        (
+            vec!["status", "--token-out", "x.tok"],
+            "--token-out is only for init",
+        ),
+        (vec!["bogus", "--help"], "unknown command `bogus`"),
+        (
+            vec!["status", "bogus"],
+            "unexpected argument `bogus` for status",
+        ),
+    ] {
+        let o = run(&args);
+        assert_eq!(code(&o), 1, "{args:?}: {}", text(&o));
+        assert!(text(&o).contains(want), "{args:?}: {}", text(&o));
+    }
+    let o = run(&["--db", db.to_str().unwrap(), "status"]);
+    assert_eq!(code(&o), 1, "{}", text(&o));
+    assert!(text(&o).contains("--db given twice"), "{}", text(&o));
+    // Repeating the options that are documented to repeat is fine.
+    let g = run(&[
+        "goal",
+        "add",
+        "--title",
+        "R",
+        "--criteria",
+        "a",
+        "--criteria",
+        "b",
+        "--probe",
+        "none-x",
+    ]);
+    assert_eq!(code(&g), 1, "{}", text(&g));
+    assert!(text(&g).contains("`none-x` is not a probe"), "{}", text(&g));
+    let g = run(&[
+        "goal",
+        "add",
+        "--title",
+        "R",
+        "--criteria",
+        "a",
+        "--criteria",
+        "b",
+    ]);
+    assert_eq!(code(&g), 0, "{}", text(&g));
+    // `goal --help` is help for goal.
+    let h = bin()
+        .args(["goal", "--help"])
+        .env_remove("ENDORA_FOUNDATION_DB")
+        .output()
+        .unwrap();
+    assert_eq!(code(&h), 0, "{}", text(&h));
+}
+
+#[test]
+fn messages_name_the_parsed_id_say_what_waits_and_status_short_has_no_tail_header() {
+    let (lab, cfg, db) = owner_lab("tidy");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    let nothing = text(&run(&["run-due"]));
+    assert!(nothing.contains("nothing due (1 routine)"), "{nothing}");
+    assert!(
+        nothing.contains("1 item waiting for the owner"),
+        "{nothing}"
+    );
+    let short = text(&run(&["status", "--short"]));
+    assert!(!short.contains("EVIDENCE"), "{short}");
+    assert!(short.contains("OPEN DECISIONS"), "{short}");
+    let c = run(&["confirm-criterion", "+1", "+1"]);
+    assert_eq!(code(&c), 0, "{}", text(&c));
+    assert!(
+        text(&c).contains("criterion 1 of item 1 confirmed"),
+        "{}",
+        text(&c)
+    );
+    let d = run(&["decline", "+1"]);
+    assert_eq!(code(&d), 0, "{}", text(&d));
+    assert!(
+        text(&d).contains("item 1 declined") && !text(&d).contains("+1"),
+        "{}",
+        text(&d)
+    );
+    let r = run(&["resume-goal", "+1"]);
+    assert_eq!(code(&r), 0, "{}", text(&r));
+    assert!(text(&r).contains("goal 1 resumed"), "{}", text(&r));
+}
+
+#[test]
+fn confirm_on_a_finished_item_is_refused_and_real_corruption_still_says_corruption() {
+    let (lab, cfg, db) = owner_lab("finished");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    assert_eq!(code(&run(&["decline", "1"])), 0);
+    let before = text(&run(&["status"]));
+    let o = run(&["confirm-criterion", "1", "1"]);
+    assert_eq!(code(&o), 1, "{}", text(&o));
+    assert!(
+        text(&o).contains("item 1 is already failed: its criteria cannot be changed"),
+        "{}",
+        text(&o)
+    );
+    assert_eq!(
+        before,
+        text(&run(&["status"])),
+        "a refused confirm changed the item"
+    );
+    // A row whose state is unreadable is real corruption: the engine's words stay for it where it
+    // reads the state itself (`decline`). (`accept` and `status` show such a row as `failed`: a
+    // known limit, root cause in the Core reader, planned fix CORE-2; not pinned here.)
+    let (lab2, cfg2, db2) = owner_lab("corrupt");
+    {
+        let c = rusqlite::Connection::open(&db2).unwrap();
+        c.execute_batch(
+            "PRAGMA ignore_check_constraints=1; UPDATE items SET state='zzz' WHERE id=1;",
+        )
+        .unwrap();
+    }
+    let d = lab2.run_on(&db2, &cfg2, &["decline", "1"]);
+    assert_eq!(code(&d), 1, "{}", text(&d));
+    assert!(text(&d).contains("corrupt stored data"), "{}", text(&d));
+}
+
+#[test]
+fn a_closed_stdout_never_panics() {
+    // `endora-foundation --help | head -0`: the reader is gone before the first write.
+    for args in [vec!["--help"], vec!["--version"]] {
+        for _ in 0..5 {
+            let mut child = bin()
+                .args(&args)
+                .env_remove("ENDORA_FOUNDATION_DB")
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            drop(child.stdout.take());
+            let o = child.wait_with_output().unwrap();
+            let t = String::from_utf8_lossy(&o.stderr);
+            assert!(!t.contains("panicked"), "{args:?}: {t}");
+            assert!(
+                matches!(o.status.code(), Some(0 | 1)),
+                "{args:?}: {:?}",
+                o.status
+            );
+        }
+    }
+}

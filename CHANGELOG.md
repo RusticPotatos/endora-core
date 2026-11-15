@@ -37,7 +37,7 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
 - **Added:** `endora-foundation --help` (`-h`, `help`, `<command> --help`) and `--version` print to stdout, exit 0 and
   open no database (`--db x.db --help` no longer creates `x.db`). The help lists every command, option, the environment
   variables and the exit codes. `status --short` leaves out the evidence tail.
-- **Changed, a deliberate hardening of a FROZEN surface:** a command line is checked before the database is opened. An
+- **Changed, a deliberate hardening of a FROZEN surface (NOT additive; the decision is recorded in `docs/foundation/STABILITY.md`):** a command line is checked before the database is opened. An
   unknown option (`--bogus-flag`), an option without its value, an extra word, or an unknown command is refused with
   **exit 1** naming it (`unknown option --cpa for goal add`). Before, an unknown option was silently ignored (a mistyped
   `--cap` or `--acceptance` gave the goal the default) and an unknown command created a database file. The command names,
@@ -50,8 +50,8 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
   error: Query returned no rows` or `FOREIGN KEY constraint failed`; `evidence --item 999` exits 1 (it printed an empty line
   and exited 0); a negative `--cap` or `--max-failures` says it must not be negative; an impossible move says what state the
   item is in (`item 3 is already failed`, exit 1 for `decline`; `accept` of an item that is not running stays a refusal, exit 2,
-  and now names the state) and never `corrupt stored data: cannot transition from failed to failed`; `publish` always exits 2,
-  prints `refused:` once, and does so for an item that does not exist; `run-due` with nothing to do prints `no routines: a
+  and now names the state) and never `corrupt stored data: cannot transition from failed to failed`; `publish` exits 2 (refused),
+  prints `refused:` once, and does so for an item that does not exist (a missing or non-numeric id is a usage error, exit 1); `run-due` with nothing to do prints `no routines: a
   goal needs a routine to make items` or `nothing due (N routines)` (it printed nothing; `serve` stays quiet).
 - **Tests:** process tests for each of the above, and for `resume-goal` (stopped through the cost-violation path: exit 2
   without the token, 0 with it, the goal takes calls again). The reviewer's mutation (`resume-goal` made a no-op) now fails a
@@ -61,6 +61,26 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
   in the foundation README, not removed; comments in `domains/foundation-git` now state only what is verified about the
   dollar cap, the turn cap and the group kill (comment-only).
 - **Docs:** the skip line of an overlapping `run-due` is quoted as the binary prints it (`... (it is running)`).
+
+### Added and changed (the command line, round 2 of the review of the changes above)
+
+- **Fixed (pre-existing panics):** an argument that is not UTF-8 panicked (exit 101), even with `--help`; it is now refused
+  with exit 1 (`argument N is not valid UTF-8`), and `--help` and `--version` work whatever else is on the line.
+  `serve --every <huge>` panicked on an overflow; `--every` of `serve` and `routine add` must now be 1 to 31,622,400
+  seconds (366 days, the engine's own limit; a longer rhythm was already refused by Core). Writing to a closed stdout
+  (`... | head -0`) panicked; it now ends the run with exit 1 and no message.
+- **Changed (hardening, same family as above):** a missing argument says `missing ITEM for accept` and opens no database; a
+  repeated option (`--title A --title B`, `--db a --db b`) is refused (`given twice`; `--criteria`, `--check` and `--probe`
+  of `goal add` may repeat); `--token-out` outside `init` is refused; `bogus --help` is an unknown command, not help;
+  `confirm-criterion` on a `done` or `failed` item is refused (`item N is already failed: its criteria cannot be changed`);
+  success lines name the parsed id (`item 1`, not `+1`); `--max-failures` too large says so; `run-due` with nothing due also
+  names paused routines and items waiting for the owner; `status --short` has no empty evidence header.
+- **Known issues (not fixed here):** a database row with an unreadable item state is shown as `failed` by `status` and
+  `accept` (root cause in the Core reader; `verify-evidence` is the integrity check; fix planned CORE-2). Core itself still
+  lets `confirm-criterion` change a finished item (the command line now refuses). The two `*-status` helper binaries create
+  or migrate a database and print a subset of `status`; the README now says so.
+- **Docs:** the STABILITY Docker row now says the Docker tests are ignored off Linux, not counted as passed; the stale
+  `claude.rs` comment deviation (ADR 0150 item 4) is marked fixed.
 
 ### Changed (the HQ product is LEGACY)
 

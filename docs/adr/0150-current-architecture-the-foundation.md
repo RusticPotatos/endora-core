@@ -64,15 +64,15 @@ is a Rust trait compiled in, with no wire protocol, schema, SDK, plugin loader o
 
 ## Known deviations
 
-The code and its comments depart from the retained principles and from the evidence in four places. They are documented, not fixed
-(decision of 15 Nov 2026: no code change and no new abstraction in this increment):
+The code and its comments depart from the retained principles in three places. They are documented, not fixed
+(decision of 15 Nov 2026: no code change and no new abstraction in this increment). A fourth, stale comments that overstated the evidence, was fixed afterwards (item 4):
 
 1. **No storage port.** `application` imports the concrete SQLite `Store` and a `ManualClock` from
    `infrastructure`. 0050 said storage is reached only through application-defined ports.
 2. **Capability crates depend on Core's whole crate**, including its SQLite store.
 3. **Domain purity is by convention.** The three layers are modules of one crate that depends on
    `rusqlite` and `sha2`; the compiler does not stop a domain file from importing them.
-4. **Stale comments in `domains/foundation-git/src/claude.rs`** (lines 7-9 and 17-20). They say `--max-turns` "stops after that many turns", and that a dollar-capped run "can end ABOVE the cap by up to one step" and that `Enforced` means "stops at, or one step above, the grant". The evidence is narrower: one real run, `--max-turns 1`, ended one turn over; no real run reached the dollar cap, so any dollar overshoot is unverified. The docs follow the evidence; the comments are to be corrected in a later code change (this increment edits no Rust).
+4. **Stale comments in `domains/foundation-git/src/claude.rs`: FIXED on 15 Nov 2026** (comment-only change, branch `fix/cli-usability`). The comments no longer say `--max-turns` "stops after that many turns" or that a dollar-capped run "can end ABOVE the cap by up to one step"; they state what is verified: one real run, `--max-turns 1`, ended one turn over, and no real run reached the dollar cap (the cap is unverified). The comments on the process-group kill (lib.rs, confine.rs) now also say that a macOS `setsid` child escapes it.
 
 ## Consequences
 

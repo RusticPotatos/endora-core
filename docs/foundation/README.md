@@ -82,7 +82,8 @@ git-task [--goal ID] [--repo PATH] --instruction T --test-cmd CMD [--cap MICRO_U
                             (--cap: the new goal's spend cap; a real executor needs a non-zero one)
 overall-cap MICRO_USD       the owner sets the most all goals may spend together (starts at 0)
                             amounts are micro-USD: 1 USD = 1,000,000
-publish ITEM                always refused (exit 2): nothing here publishes
+publish ITEM                refused (exit 2): nothing here publishes; a missing or non-numeric ITEM is a
+                            usage error (exit 1)
 init --token-out FILE       once: make the owner credential; the token goes to FILE (mode 600)
 accept ITEM | decline ITEM  the owner's decision (needs the token)
 confirm-criterion ITEM N    the owner confirms criterion N (one with no check); `confirm` is a
@@ -98,10 +99,10 @@ capabilities                every registered call with its band, tier and maximu
 
 `endora-foundation --help` (or `-h`, or `help`; also `<command> --help`) prints this command block, the
 environment variables and the exit codes to stdout, and `endora-foundation --version` prints
-`endora-foundation <version> (schema <n>)`. Both exit 0 and open **no** database file, even with `--db`. Every
+`endora-foundation <version> (schema <n>)`. Both exit 0 and open **no** database file, even with `--db`, and both work whatever else is on the line (an argument that is not UTF-8 is refused with exit 1 and never panics). Every
 command line is checked before the database is opened: a command, option or extra word Core does not know is
 refused with exit 1 and named (`unknown option --cpa for goal add`, `unexpected argument ...`,
-`unknown command ...`), and nothing is created. An unknown item, goal, routine or criterion says so
+`unknown command ...`, `--title given twice for goal add`, `missing ITEM for accept`, `--token-out is only for init`), and nothing is created. `--every` of `routine add` and `serve` is 1 to 31,622,400 seconds (366 days). An unknown item, goal, routine or criterion says so
 (`no item 9`, `no goal 99`, `item 1 has 1 criterion: there is no criterion 7`; exit 1), a move the item's
 state does not allow says what the state is (`item 3 is already failed`; exit 1 for `decline`, and `accept`
 stays a refusal, exit 2), and `run-due` with nothing to do says so (`nothing due (N routines)` or `no routines:
@@ -164,12 +165,25 @@ Running it long-term: [../operate.md](../operate.md).
 - **No machine-readable output.** `--help` and `--version` exist (see "The command line" above); there is
   no JSON mode, and `status --json` is refused as an unknown option.
 - **Four helper binaries are built with the crates and are not part of the product.** `foundation-status`
-  (domains/foundation) and `foundation-git-status` (domains/foundation-git) print what `endora-foundation
-  status` prints, read-only; nothing in the repository runs them. `foundation-run` (foundation-observe) and
-  `foundation-git-run` (foundation-git) are the runners that the process tests start and kill
-  (`CARGO_BIN_EXE_...` in `slice1.rs`, `slice2.rs`, `slice5b.rs`); they are test harnesses, not tools to
-  run. They are left where they are because moving them means editing the Core and capability crates,
-  which a command-line change does not do; **use `endora-foundation`**.
+  (domains/foundation) and `foundation-git-status` (domains/foundation-git) print the goals, items and the
+  evidence tail (not the routines or the open decisions that `endora-foundation status` also prints). They
+  are **not read-only in the sense of "opens nothing"**: like every command they open the database file
+  read-write, so a missing file is **created** at the current schema and an older file is **migrated**.
+  Nothing in the repository runs them. `foundation-run` (foundation-observe) and `foundation-git-run`
+  (foundation-git) are the runners the process tests start and kill (`CARGO_BIN_EXE_...` in `slice1.rs`,
+  `slice2.rs`, `slice5b.rs`); they are test harnesses, not tools to run. They are left where they are
+  because moving or fixing them means editing the Core and capability crates, which the command-line
+  change does not do (a read-only open belongs to the planned Core change CORE-2); **use
+  `endora-foundation`**.
+- **A database row whose item state cannot be read is shown as `failed`** by `status` and `accept` (the
+  Core reader maps an unknown state to `failed`; it does not report corruption there). Commands that read the
+  state themselves, such as `decline`, still say `corrupt stored data`. `verify-evidence` is the integrity
+  check (it covers the evidence chain, not the item rows). Not fixed: the root cause is in Core; the fix is
+  planned as CORE-2.
+- **Two owner commands act on a finished item at the engine level.** The command line refuses
+  `confirm-criterion` on a `done` or `failed` item (`item N is already failed: its criteria cannot be
+  changed`), but Core itself would still change it; a second process racing the command, or a program using
+  Core directly, is not stopped. Planned with CORE-2.
 
 ## Trust and what is enforced
 
@@ -417,8 +431,8 @@ future work.
 ## Known deviations from the architecture
 
 The project's design rules (responsibility-based modules, dependencies pointing inward, replaceable
-infrastructure) are stated in [the architecture page](../architecture.md). The code and its comments deviate in four
-known places. They are documented, not fixed:
+infrastructure) are stated in [the architecture page](../architecture.md). The code deviates in three
+known places (a fourth, stale comments, is fixed; see the last item). They are documented, not fixed:
 
 - **Storage has no port.** `application` imports the concrete SQLite `Store` and a `ManualClock`
   from `infrastructure` (`domains/foundation/src/application/core.rs`, `owner.rs`). The only port is
@@ -428,4 +442,4 @@ known places. They are documented, not fixed:
 - **Domain purity is by convention.** `domain`, `application` and `infrastructure` are modules of one
   crate whose `Cargo.toml` has `rusqlite` and `sha2`; no compiler rule or test stops a domain file from
   importing them (today none does).
-- **Stale comments in `domains/foundation-git/src/claude.rs`** (lines 7-9 and 17-20). They say `--max-turns` "stops after that many turns", and that a dollar-capped run "can end ABOVE the cap by up to one step" and that `Enforced` means "stops at, or one step above, the grant". The evidence is narrower: one real run, `--max-turns 1`, ended one turn over; no real run reached the dollar cap, so any dollar overshoot is unverified. The docs follow the evidence; the comments are to be corrected in a later code change (this increment edits no Rust).
+- **Stale comments in `domains/foundation-git/src/claude.rs`: FIXED on 15 Nov 2026** (comment-only change, branch `fix/cli-usability`). The comments no longer say `--max-turns` "stops after that many turns" or that a dollar-capped run "can end ABOVE the cap by up to one step"; they state what is verified: one real run, `--max-turns 1`, ended one turn over, and no real run reached the dollar cap (the cap is unverified). The comments on the process-group kill (lib.rs, confine.rs) now also say that a macOS `setsid` child escapes it.
