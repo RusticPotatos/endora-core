@@ -30,8 +30,8 @@ contents and listings; metadata such as `stat` stays open):
   `/Library/Application Support`, `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`,
   `/opt/homebrew/etc` (except the OpenSSL directory above), the home folders (`/Users`), the temporary
   folders (`/private/tmp`, `/tmp`, `/private/var/folders`), `/private/var/root`, `/var/root`, `/Volumes`.
-- Denied by name, in both profiles: the database, its `-journal`, `-wal` and `-shm` files and the owner
-  token file, whenever the command line runs a git capability. The sandbox matches the path it is given,
+- Denied by name, in both profiles: the database, its `-journal`, `-wal` and `-shm` files, its `.holders`
+  directory (the lease's holder files, D4b) and the owner token file, whenever the command line runs a git capability. The sandbox matches the path it is given,
   so the command line first makes each of these paths absolute (against the directory it was started in)
   and canonical (symlinks resolved; `.`, `..` and `//` removed; for a file that does not exist yet, its
   directory is resolved), and denies it in **both** spellings of the macOS Data volume: the plain path
@@ -52,11 +52,14 @@ contents and listings; metadata such as `stat` stays open):
   paths lies under a prefix the profile can read. A hard link or a copy of the database made by someone
   else is not covered: a confined agent cannot create a hard link to a denied file, but a copy kept under a
   readable prefix is readable.
-- **Not denied by name: the `<db>.holders/` directory** (D4b). When the database sits under a readable prefix,
-  a confined agent can list that directory and open the holder files in it (tested: opening is allowed, the lock
-  stays busy while Core lives). An agent that outlives a killed Core could take a lock and so keep that item
-  held; the independent review found no way for it to make an item run twice. Keep the database outside the
-  readable prefixes (above), which also keeps its holders directory out of reach.
+- **The `<db>.holders/` directory is denied by name** with the database's other sidecars (D4b): the
+  directory and every holder file in it, in the canonical and the `/System/Volumes/Data` spelling, after the
+  system allow and as the last rule. Tested with a real sandbox on macOS (both profiles, both spellings): with the
+  database under a readable prefix a confined agent can neither list the directory nor open a holder file, while
+  the unconfined control can, and the lease still works for the Core process. A confined agent that could open
+  a holder file used to be able to take its lock and keep that item held (found by the independent review of
+  15 Nov 2026; no way to cause a double run was found); that route is closed. A copy of the database under a
+  readable prefix is still readable, as above.
 - Still readable: everything else under the readable prefixes (for example `/usr/local/bin` and the rest
   of `/usr`, `/Library` outside the denied directories, `/opt/homebrew/share`). A backup or other copy
   of the database kept there is readable to a confined agent: keep copies under the home folder or a
@@ -184,14 +187,30 @@ the same observe call twice). After the fix:
   like every other table). A process killed outright while no running item names its holder file
   leaves that empty file; the next process that starts an item removes free files no item names (once, at its first start of an item), and the directory is safe to delete when nothing runs. One
   runner process remains the design.
-- **Overlapping `run-due` processes (measured by the independent review of this branch).** A second `run-due`
-  started while another runs (a second later is enough) takes the next open item. When both reach the same
-  open item, the first process may exit 1 with `corrupt stored data: cannot transition from running to running`
-  (a `serve` logs the same and carries on). That message does **not** mean the database is damaged: the
-  evidence chain verified intact afterwards, no item ran twice and no data harm was observed (16 to 18 of 20
-  staggered processes per wave exited 1 in the review's storms; the base behaves the same). Run one runner
-  anyway. The message and the exit code are to be improved in a later increment (REC-2).
-- **KNOWN ISSUE (recovery; fix planned: REC-2).** An item that was interrupted once, and whose re-run then meets its criteria, can be recovered again by later `run-due` passes (under `serve` there is one pass per tick: with `--every 2` it failed within three ticks, about 6 seconds). Each pass writes a false `core.recover` row ("interrupted on attempt N"), and the third marks the item `failed` ("interrupted again after 3 attempts") although its criteria were met and it was waiting for the owner. No item is run twice (a met criterion is not checked again) and the evidence chain stays intact, but the work is lost to the owner's decision and the evidence carries the false rows. It is present on `22fe97ac` (the public `docs/developer-docs-v1`) as well; it was found by an independent review of this branch. Workaround, checked on one database: right after the `run-due` that prints `item N: 1/1 criteria met` for a recovered item, run `accept N`; an accepted item is not recovered again. No workaround was tested for a running `serve`: its ticks may reach the item first.
+- **Recovery counts attempts (fixed 15 Nov 2026; tested on macOS with real processes and with schema 7 and 8
+  files).** A call counts as unsettled for recovery only when its intent was recorded after the item's latest
+  `core.start` row and has no result. An earlier attempt's call that never got a result was already recovered
+  (that is what put the item back to `open`); the evidence is append-only, so it stays in the file, and recovery
+  and the stranded-item sweep ignore it (the spend check still reserves the worst case for every call without a
+  result). So an item that was interrupted once and whose re-run met its criteria waits for the owner however
+  many `run-due` passes or `serve` ticks follow, and can still be accepted (before the fix the third pass failed
+  it, with a false `core.recover` row per pass: reproduced on the tutorial database and under `serve --every 2`).
+  An item killed inside a call three times still fails (`interrupted again after 3 attempts`). Files written
+  before the fix: the old unsettled call is ignored the same way; an item the old behaviour already failed stays
+  failed and its false `core.recover` rows stay in the evidence (nothing is rewritten). An item killed after its
+  start but before its first call of that attempt has no call to recover by and stays `running`, except a routine
+  item with an unmet check, which `run-due` re-checks as before.
+- **Overlapping `run-due` processes (fixed 15 Nov 2026).** Several `run-due` that start together or a second
+  apart list the same open items and race to start them, and to fire the same routine slot. Exactly one wins each;
+  the loser skips that item (it prints `item N: skipped: item N is no longer open: another process took it
+  (running)`) or that routine slot (silently) and goes on to the next, and `run-due` exits 0 when nothing else is
+  wrong. Before the fix the loser exited 1 with `corrupt stored data: cannot transition from running to running`
+  (or `firings are append-only`), which did not mean damaged data. In code, `Core::start` returns
+  `AppError::Conflict` with the code `item-taken`. Tested with real processes: six started together over six open
+  items (every item starts and runs once, all exit 0, chain intact) and storms of staggered `run-due` with random
+  `kill -9` (10 repetitions in the test suite: no false `core.recover` row, no item run twice unless a kill cut its
+  call, no exit status but 0 or the kill). Not claimed: that overlapping runs share the work evenly or in any order.
+  One runner process remains the design.
 - **Interfaces.** Recovery of interrupted work is a new EXPERIMENTAL row in [STABILITY.md](STABILITY.md) (the
   freeze table had none; the README had said CURRENT) until a new independent review of this fix.
 

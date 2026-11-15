@@ -90,12 +90,25 @@ Nothing in this list is claimed fixed.
 
 ### Known issues (as of this branch)
 
-Found by the independent review of this branch (15 Nov 2026); none is fixed here.
+Found by the independent review of this branch (15 Nov 2026); the recovery, overlapping-`run-due` and holders-directory findings are fixed below.
 
-- **KNOWN ISSUE (recovery; fix planned: REC-2).** An item that was interrupted once, and whose re-run then meets its criteria, can be recovered again by later `run-due` passes (under `serve` there is one pass per tick: with `--every 2` it failed within three ticks, about 6 seconds). Each pass writes a false `core.recover` row ("interrupted on attempt N"), and the third marks the item `failed` ("interrupted again after 3 attempts") although its criteria were met and it was waiting for the owner. No item is run twice (a met criterion is not checked again) and the evidence chain stays intact, but the work is lost to the owner's decision and the evidence carries the false rows. It is present on `22fe97ac` (the public `docs/developer-docs-v1`) as well; it was found by an independent review of this branch. Workaround, checked on one database: right after the `run-due` that prints `item N: 1/1 criteria met` for a recovered item, run `accept N`; an accepted item is not recovered again. No workaround was tested for a running `serve`: its ticks may reach the item first.
-- **A second `run-due` that overlaps a running one** takes the next open item, and the first process may exit 1 with `corrupt stored data: cannot transition from running to running` when both reach the same open item (a `serve` logs it and carries on). The message does not mean the database is damaged; no double run and no data harm was observed. The message and the exit code are to be improved in a later increment (REC-2).
-- **`<db>.holders/` is not denied by name** in the macOS profiles: a confined agent can list it when the database sits under a readable prefix (it could keep an item held; no way to cause a double run was found).
 - Smaller, checked: `--db x.db/` creates `x.db` with mode 644; a 254-character database name leaves a 0-byte file and exits 1; `scripts/gate.sh` prunes build folders under `$HOME/repos` and needs PyYAML; `/usr/bin/git` cannot run in the macOS profile when Xcode is the active developer directory (reported by the review). Details: [docs/operate.md](docs/operate.md#known-issues).
+
+### Fixed (recovery attempts, the integration review's findings F1 and F2 and N1)
+
+- **An item interrupted once whose re-run met its criteria was recovered again and failed** (present on
+  `22fe97ac`): each later `run-due` pass (or `serve` tick) wrote a false `core.recover` row and the third failed
+  the item while it waited for the owner. Recovery and the stranded-item sweep now count only the calls
+  recorded after the item's latest `core.start` row as unsettled. No row is rewritten or added; spend still
+  reserves the worst case for every call without a result. Old files work: the old unsettled call is ignored
+  (schema 7 and 8 tested); an item the old behaviour already failed stays failed. An item killed inside a call
+  three times still fails.
+- **Overlapping `run-due` processes no longer fail with a misleading message.** The loser of a race for an open
+  item skips it (`AppError::Conflict`, code `item-taken`, from `Core::start`) and the loser of a race to fire a
+  routine slot skips the routine; `run-due` exits 0 when nothing else is wrong. The old messages were `corrupt
+  stored data: cannot transition from running to running` and `firings are append-only`.
+- **The macOS profiles deny `<db>.holders/` by name** with the database's other sidecars (both spellings, last
+  rule), so a confined agent can neither list it nor open a holder file.
 
 ### Fixed (recovery liveness, weekly independent review B)
 

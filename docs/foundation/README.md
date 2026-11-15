@@ -152,11 +152,6 @@ Running it long-term: [../operate.md](../operate.md).
   read-only ones too (`status`, `evidence`, `verify-evidence`, `capabilities`), opens the file read-write
   and runs the pending schema migrations (the current schema is version 8). An older binary then refuses
   the file, and there is no downgrade path.
-- **Known issue (recovery; fix planned: REC-2).** An item interrupted once whose re-run then meets its criteria
-  can be recovered again by later `run-due` passes and failed after three, with false `core.recover` rows, while
-  it waits for the owner; `accept` it right after the run that met its criteria. Overlapping `run-due` processes
-  can make one exit 1 with `corrupt stored data: cannot transition from running to running`, which does not
-  mean the file is damaged. Both are described in [operate.md](../operate.md#known-issues).
 - **No machine-readable output, no `--help`, no `--version`.** See "The command line" above.
 
 ## Trust and what is enforced
