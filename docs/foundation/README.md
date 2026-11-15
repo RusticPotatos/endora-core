@@ -61,8 +61,8 @@ code; text an agent or a remote wrote can never be one.
 `endora-foundation [--db FILE] [--config FILE] [--token-file FILE] <command>` (or
 `ENDORA_FOUNDATION_DB`, `ENDORA_FOUNDATION_CONFIG`, `ENDORA_OWNER_TOKEN_FILE`: a PATH, never the
 token). Exit 0 ok, 1 error, 2 refused by authority (the reason is printed). Owner commands
-(`goal add`, `routine add|resume`, `git-task`, `accept`, `decline`, `confirm-criterion`, `resume`,
-`resume-goal`) need the token file and exit 2 without it or with a wrong one.
+(`goal add`, `routine add|resume`, `git-task`, `overall-cap`, `accept`, `decline`, `confirm-criterion`,
+`resume`, `resume-goal`) need the token file and exit 2 without it or with a wrong one.
 
 ```
 goal add --title T [--why W] --criteria TEXT [--check CALL INPUT FIELD EXPECT]
@@ -87,12 +87,15 @@ confirm-criterion ITEM N    the owner confirms criterion N (one with no check); 
 stop | resume               stop: anyone;  resume: the owner;  resume-goal GOAL lifts a cost stop
 verify-evidence             recompute the evidence hash chain; exit 1 naming the first broken row
 evidence --item ID          every record about an item, in full
-backup --to FILE            consistent copy; restore by pointing --db at it
+backup --to FILE            consistent copy (mode 600; missing parent directories are created; an
+                            existing FILE is never overwritten); restore by pointing --db at it
 capabilities                every registered call with its band, tier and maximum cost
 ```
 
-There is no `--help`. A command Core does not know prints the one-line usage and exits 1; with `--db`
-that also creates the database file. A goal on its own does nothing: `run-due` only works on work
+There is no `--help` and no `--version`. A command Core does not know prints the one-line usage and exits 1;
+every command opens the database first, so with `--db` (or `ENDORA_FOUNDATION_DB`) that also creates the
+database file. A flag Core does not know is **ignored**, not rejected: a mistyped `--cap` or `--acceptance`
+gives the goal the default (zero cap, owner acceptance), so read `status` after `goal add`. A goal on its own does nothing: `run-due` only works on work
 items, and a routine is what makes them.
 
 `goal add` grants Core the observe-band calls its checks need (the owner wrote them). A routine
@@ -120,6 +123,35 @@ claude-arg --effort                                       # (repeatable) extra C
 
 A probe gives the call `probe.run <name>` with facts `up` (tcp, http), `status` (http) and `exit`
 (command). Probe commands and the git agent line are the owner's, written in the config.
+
+## Known limits
+
+What an operator cannot do today. Each item is **not implemented**; nothing here says it is coming.
+Running it long-term: [../operate.md](../operate.md).
+
+- **A goal or a routine cannot be retired.** There is no command to close a goal, pause or delete a
+  routine, or remove an item, and nothing deletes rows. What does stop work, each checked by running it:
+  1. the **stop switch** (`stop`, then `resume`): it refuses every call, for all goals at once;
+  2. a routine whose goal has `--acceptance owner` (the default) and which was made without `--auto-accept`
+     waits while its latest item is neither accepted nor declined: leaving that item undecided parks the
+     routine (`run-due` prints `skipped_open true`; the item shows under `OPEN DECISIONS` for ever). This
+     is a side effect, not a feature. `decline` does not stop a routine: the next slot starts a new item;
+  3. five failed items in a row pause a routine until `routine resume ID`.
+  A goal with no routine does nothing, and stays listed. To drop everything: back the database up, then
+  start a new one with its own `--db` and `init`; the old file keeps the history.
+- **A lost owner token cannot be replaced.** The database keeps only a salted hash of it, and `init` refuses
+  to run again (`already enrolled`, exit 2). With the token file gone, no owner command can run on that
+  database again: `status`, `evidence`, `verify-evidence`, `backup`, `stop`, `capabilities`, `run-due` and
+  `serve` still work, so routines keep firing, but nothing can be accepted, added or resumed. Keep a second
+  copy of the token file, apart from the database and with the same care. Editing the database by hand to
+  remove the credential is outside the trust model and is not supported. To regain control: back up (the
+  history stays readable), start a new database, `init`, and make the goals again.
+- **Back up before you upgrade the binary. A newer binary upgrades any database file it opens, including a
+  backup you only inspect; keep one copy that the newer binary has never opened.** Every command, the
+  read-only ones too (`status`, `evidence`, `verify-evidence`, `capabilities`), opens the file read-write
+  and runs the pending schema migrations (the current schema is version 7). An older binary then refuses
+  the file, and there is no downgrade path.
+- **No machine-readable output, no `--help`, no `--version`.** See "The command line" above.
 
 ## Trust and what is enforced
 

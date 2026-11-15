@@ -222,7 +222,15 @@ $ endora-foundation --db backup.db status | grep '\['
 ```
 
 `backup --to FILE` writes a consistent copy, safe while the database is in use. To restore, point
-`--db` at the copy. (Do not copy the live file with `cp`.)
+`--db` at the copy. (Do not copy the live file with `cp`.) A backup is never overwritten (a second
+`backup --to` with the same name fails), is created mode 600, and holds the database only: **not the owner
+token file**, which cannot be made again, so keep a second copy of it (see
+[Known limits](foundation/README.md#known-limits)).
+
+**Back up before you upgrade the binary. A newer binary upgrades any database file it opens, including a
+backup you only inspect; keep one copy that the newer binary has never opened.** The `status` command in
+the block above opens the backup like any other file: with a newer binary it would migrate that copy too.
+More on running it for longer: [operate.md](operate.md).
 
 ## 7. Kill it in the middle of a check
 
@@ -295,6 +303,8 @@ commands), **run** (one call, `probe.run`), **record** (intent and result rows),
 accept) and **recover** (the restart). Next:
 
 - the commands and the config grammar: [docs/foundation/README.md](foundation/README.md);
+- running it for longer (service, backup and restore, upgrade, growth) and what it cannot do yet:
+  [operate.md](operate.md) and [Known limits](foundation/README.md#known-limits);
 - what Core trusts and what it does not: [trust-and-spend.md](trust-and-spend.md);
 - the words: [terminology.md](terminology.md);
 - writing code on top: [architecture.md](architecture.md#where-does-my-code-go).
@@ -302,8 +312,8 @@ accept) and **recover** (the restart). Next:
 ## If something goes wrong
 
 - **`no database: pass --db <path> or set ENDORA_FOUNDATION_DB`**: the settings in step 0 are missing.
-  There is no `--help`: an unknown command prints a one-line usage and exits 1, and with `--db` it also
-  creates a database file (the schema, no rows).
+  There is no `--help` and no `--version`: an unknown command prints a one-line usage and exits 1, and with
+  `--db` it also creates a database file (the schema, no rows). An unknown flag is ignored, not rejected.
 - **`this command needs the owner token`** (exit 2): pass `--token-file`, or set
   `ENDORA_OWNER_TOKEN_FILE` to the path `init` wrote. If the variable is set but empty or names a missing
   file, the message is instead `cannot read the owner token file <path>: entity not found` (exit 2; an

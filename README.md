@@ -40,6 +40,8 @@ work or not to be relied on), `PLANNED` (not built; never described as if it wer
 | Claude Code CLI as the agent of the git capability | EXPERIMENTAL | macOS only; costs real money; the dollar cap is unverified |
 | Confinement of untrusted agents: macOS `sandbox-exec`, Docker per call on Linux | macOS scripted profile FROZEN; the rest EXPERIMENTAL | Linux `bwrap` is written but not verified on any host tested |
 | A real agent under the Docker backend | UNSUPPORTED | no network in the container; credential handling is not designed for it |
+| Retiring a goal or a routine | UNSUPPORTED | not implemented: no command closes a goal or deletes a routine; the stop switch halts everything; [Known limits](docs/foundation/README.md#known-limits) |
+| Replacing a lost owner token | UNSUPPORTED | not implemented: keep a second copy of the token file with the same care as the database |
 | A per-call owner approval (`approve-call`) | PLANNED | does not exist; an outward-reversible call is refused, not asked about |
 | Container image for the runner | EXPERIMENTAL | built and healthchecked on one Linux host; not deployed as a service |
 
@@ -64,7 +66,7 @@ Then do it by hand, one command at a time, with every flag explained: [docs/star
 
 | You want to | Go to | Audience |
 |---|---|---|
-| **Use** it: run it, write goals and probes, back it up | [docs/start.md](docs/start.md), [docs/foundation/README.md](docs/foundation/README.md) | someone with Rust and a terminal |
+| **Use** it: run it, write goals and probes, back it up, keep it running | [docs/start.md](docs/start.md), [docs/foundation/README.md](docs/foundation/README.md), [docs/operate.md](docs/operate.md) | someone with Rust and a terminal |
 | **Build** on it: add a capability, integrate a tool | [docs/architecture.md](docs/architecture.md#where-does-my-code-go), [terminology](docs/terminology.md) | a Rust developer |
 | **Contribute**: change Core, add docs, review | [CONTRIBUTING.md](CONTRIBUTING.md), [docs/architecture.md](docs/architecture.md) | a contributor |
 

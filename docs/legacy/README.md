@@ -13,6 +13,7 @@ If you came for the foundation: [README](../../README.md), then [docs/README.md]
 | Material | Where | Note |
 |---|---|---|
 | The former front page (HQ, `make run-node`) | [README-HQ.md](README-HQ.md) | moved here from the repository root |
+| The HQ node's security policy | [SECURITY-HQ.md](SECURITY-HQ.md) | the text `SECURITY.md` held before 15 Nov 2026; the current policy is [SECURITY.md](../../SECURITY.md) |
 | Installing and running HQ | [install](../install.md), [hosting](../hosting.md), [homelab](../homelab.md), [model-hosting](../model-hosting.md), [recovery](../recovery.md), [releasing-core-image](../releasing-core-image.md), [terminal-console](../terminal-console.md) | node and console deployments |
 | Console contract | [api/console-v1](../api/console-v1.md) | HTTP + JSON + SSE, node era |
 | Deployment recipes | `deploy/compose/`, `deploy/ansible/` | compose and Ansible for the node; each README carries the label |

@@ -1,5 +1,7 @@
-# One service, no published ports. Copy this file and foundation.conf.example's lines into a
-# foundation.conf next to it, then:  docker compose -f compose.example.yml up -d --build
+# One service, no published ports. Write your probe lines into a foundation.conf next to this file
+# (for example `probe web tcp 192.0.2.10:443 60`; see docs/foundation/README.md for the format), then:
+#   docker compose -f compose.example.yml up -d --build
+# Then make the owner credential once (see README.md, "Run", step 4).
 # Build context is the repository root (this file lives in deploy/foundation/).
 services:
   foundation:

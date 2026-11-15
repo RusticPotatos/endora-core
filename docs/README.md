@@ -26,6 +26,7 @@ Three entry points. Pick by what you are doing.
 |---|---|---|
 | [start.md](start.md) | CURRENT | a ten-minute first run (example A), every flag explained |
 | [foundation/README.md](foundation/README.md) | CURRENT | the reference: commands, config lines, authority, spend, confinement |
+| [operate.md](operate.md) | EXPERIMENTAL | running it for longer: service, watching, backup and restore, upgrade, growth |
 | [trust-and-spend.md](trust-and-spend.md) | CURRENT | what is a boundary, what is metadata, what spend limits really hold |
 | [foundation/STABILITY.md](foundation/STABILITY.md) | CURRENT | which interfaces are FROZEN and which EXPERIMENTAL, with evidence |
 | [foundation/TRUST-BOUNDARY.md](foundation/TRUST-BOUNDARY.md) | CURRENT | the security statement and its known gaps |
