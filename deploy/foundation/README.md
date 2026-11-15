@@ -93,6 +93,9 @@ in `docs/operate.md`: a newer binary upgrades any database file it opens.
   needs the token.
 - A `git` config line needs `git` and a sandbox in the image; this image has neither, so
   `git-task` is not available here. Probes of kind `tcp`, `http` and `command` are.
+- Upgrading the image: stop the old container (and any `git-task` or cron `run-due` on the same file)
+  before the new one starts. A process of a build before schema 8 that is still running when the new
+  build first runs has its running item recovered as if it had died.
 - Back up with `backup --to`, not by copying the live file.
 - The image holds no secrets; the config is mounted, never baked in.
 - Limits you will meet: a goal or a routine cannot be retired and a lost owner token cannot be replaced;

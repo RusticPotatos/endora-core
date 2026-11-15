@@ -18,6 +18,7 @@ use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use endora_kernel::RepositoryError;
@@ -66,6 +67,8 @@ impl Drop for Own {
 pub(super) struct Holders {
     dir: PathBuf,
     own: Mutex<Option<Own>>,
+    /// Whether the one sweep of stale files (see [`Holders::stale`]) was handed out.
+    swept: AtomicBool,
 }
 
 /// A holder name is `<pid>-<hex time>`: letters, digits and dashes only, so a name read from
@@ -80,19 +83,59 @@ fn plain(name: &str) -> bool {
 }
 
 impl Holders {
-    /// The holders of the database at `path`; `None` for a private in-memory database (nothing
-    /// else can open it) and on platforms without `flock`. The directory sits beside the file
-    /// under the file's canonical path, so two spellings of one path share it.
-    pub(super) fn for_db(path: &str) -> Option<Self> {
-        if cfg!(not(unix)) || path.is_empty() || path.contains(":memory:") {
-            return None;
+    /// Refuses a SQLite URI (`file:...`) spelling of the database path. Core never documented URI
+    /// support, and a URI is a second spelling the holders directory cannot be derived from: the
+    /// lease would be off for that process in both directions. Call it BEFORE the file is opened.
+    pub(super) fn refuse_uri(path: &str) -> Res<()> {
+        if path.len() >= 5 && path[..5].eq_ignore_ascii_case("file:") {
+            return Err(backend(format!(
+                "database path `{path}` is a SQLite URI, which this program does not support: give a plain file path (nothing was opened)"
+            )));
         }
-        let mut dir = std::fs::canonicalize(path).ok()?.into_os_string();
+        Ok(())
+    }
+
+    /// The holders of the database at `path` (already opened, so it exists); `None` for a private
+    /// in-memory database (exactly `:memory:` or an empty name: nothing else can open it) and on
+    /// platforms without `flock`. The directory sits beside the file under the file's canonical
+    /// path, so two plain spellings of one path share it. A path that cannot be made canonical is
+    /// an error, never a silent "no holders".
+    pub(super) fn for_db(path: &str) -> Res<Option<Self>> {
+        if cfg!(not(unix)) || path.is_empty() || path == ":memory:" {
+            return Ok(None);
+        }
+        let mut dir = std::fs::canonicalize(path)
+            .map_err(|e| backend(format!("database path `{path}`: {e}")))?
+            .into_os_string();
         dir.push(".holders");
-        Some(Self {
+        Ok(Some(Self {
             dir: PathBuf::from(dir),
             own: Mutex::new(None),
-        })
+            swept: AtomicBool::new(false),
+        }))
+    }
+
+    /// Hands out, once per process, the dead holders' files nobody holds (not this process's):
+    /// each comes with its lock, so no other process can take it over meanwhile. The store removes
+    /// the ones no item names (a named one is left for the recovery that settles its item).
+    pub(super) fn stale(&self) -> Vec<(String, Guard)> {
+        if self.swept.swap(true, Ordering::SeqCst) {
+            return Vec::new();
+        }
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !plain(&name) {
+                continue;
+            }
+            if let Held::Dead(Some(g)) = self.probe(&name) {
+                out.push((name, g));
+            }
+        }
+        out
     }
 
     /// This process's holder name, making and locking its file the first time.
@@ -155,31 +198,48 @@ fn lock(_file: &File) -> std::io::Result<bool> {
 
 #[cfg(unix)]
 fn make_own(dir: &std::path::Path) -> Res<Own> {
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+    let at = |what: &str, e: &dyn std::fmt::Display| {
+        backend(format!("holders directory {}: {what}: {e}", dir.display()))
+    };
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(dir)
-        .map_err(backend)?;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let name = format!("{}-{nanos:x}", std::process::id());
-    let path = dir.join(&name);
-    let file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)
-        .map_err(backend)?;
-    if !lock(&file).map_err(backend)? {
-        return Err(backend("a new holder file was already locked"));
+        .map_err(|e| at("cannot create it", &e))?;
+    // A sweeping process may lock or delete a brand-new file before this one has locked it
+    // (the file is free for that instant): then this file is not ours and we try a new name.
+    for _ in 0..5 {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos());
+        let name = format!("{}-{nanos:x}", std::process::id());
+        let path = dir.join(&name);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(|e| at("cannot make its holder file", &e))?;
+        if !lock(&file).map_err(|e| at("cannot lock its holder file", &e))? {
+            continue;
+        }
+        let same = std::fs::metadata(&path)
+            .ok()
+            .zip(file.metadata().ok())
+            .is_some_and(|(a, b)| a.dev() == b.dev() && a.ino() == b.ino());
+        if same {
+            return Ok(Own {
+                name,
+                path,
+                _file: file,
+            });
+        }
     }
-    Ok(Own {
-        name,
-        path,
-        _file: file,
-    })
+    Err(at(
+        "cannot keep a holder file",
+        &"it was removed five times",
+    ))
 }
 
 #[cfg(not(unix))]

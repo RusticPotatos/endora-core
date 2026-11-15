@@ -374,8 +374,13 @@ future work.
   [TRUST-BOUNDARY.md](TRUST-BOUNDARY.md#d4b-several-processes-on-one-database)). It is NULL for every
   older item and for an item that is not running, in which case recovery behaves as it always did. The
   evidence rows, their hashes and the chain are untouched; a file at schema 7 migrates by adding the
-  column. A holders directory sits beside the database file (`live.db.holders/`, mode 700); a process
-  killed outright can leave an empty file in it, which the next recovery that meets its name removes.
+  column. A holders directory sits beside the database file (`live.db.holders/`, mode 700). A process
+  killed outright can leave an empty file in it: the recovery that settles an item naming it removes
+  it, and any process that starts an item removes the free files no item names (once, when it makes
+  its own); the directory is safe to delete when nothing runs. `--db` takes a plain file path: a
+  `file:` URI is refused. **Upgrading: stop every running `endora-foundation` process (`serve`,
+  `git-task`, cron `run-due`) before the first run of the new binary**, or an item the old process is
+  running is recovered as if it had died.
 - **What `Enforced` means.** It is the capability's claim that its executor limits its own spend; Core
   checks the call's maximum against it and does not verify it (see [trust and spend](../trust-and-spend.md)).
   Core's clamp and violation row are the second line, and they only see what the capability reports.

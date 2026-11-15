@@ -451,3 +451,23 @@ fn run_due_settles_an_auto_observe_item_stranded_after_its_last_check() {
     );
     assert!(lab.status().contains("#1 [done]"), "{}", lab.status());
 }
+
+// ---- round 2: a SQLite URI path is refused, not opened with the lease off ------------------------
+
+#[test]
+fn a_uri_spelling_of_the_database_is_refused_with_a_clear_error() {
+    let lab = Lab::at(fresh_dir("uri"), "probe web tcp 127.0.0.1:1 60\n");
+    lab.init();
+    let uri = format!("file:{}", lab.db.display());
+    let o = Command::new(BIN)
+        .arg("--db")
+        .arg(&uri)
+        .arg("--config")
+        .arg(&lab.cfg)
+        .arg("run-due")
+        .output()
+        .unwrap();
+    let said = text(&o);
+    assert_eq!(o.status.code(), Some(1), "{said}");
+    assert!(said.contains("URI"), "{said}");
+}

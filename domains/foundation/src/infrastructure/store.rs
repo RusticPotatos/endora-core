@@ -332,10 +332,11 @@ impl Store {
     /// # Errors
     /// [`RepositoryError::Backend`].
     pub fn open(path: &str) -> Res<Self> {
+        Holders::refuse_uri(path)?;
         let db = Db::open(path)?;
         let store = Self {
             db,
-            holders: Holders::for_db(path),
+            holders: Holders::for_db(path)?,
         };
         let c = store.db.lock()?;
         migrate(&c)?;
@@ -611,7 +612,11 @@ impl Store {
         }
         // A running item names this process as its holder; any other state names nobody.
         let holder = match (&self.holders, to) {
-            (Some(h), ItemState::Running) => Some(h.own_name()?),
+            (Some(h), ItemState::Running) => {
+                let name = h.own_name()?;
+                self.sweep_holders(h);
+                Some(name)
+            }
             _ => None,
         };
         let c = self.db.lock()?;
@@ -625,6 +630,23 @@ impl Store {
             return Err(corrupt("the item changed under the move"));
         }
         Ok(())
+    }
+
+    /// Once per process, removes the free holder files no item names (a killed `serve` leaves
+    /// one between ticks). Each file is locked first, so its holder is dead and no item can come
+    /// to name it afterwards; a file an item still names is left for the recovery of that item.
+    fn sweep_holders(&self, h: &Holders) {
+        for (name, guard) in h.stale() {
+            let named: i64 = self.db.lock().map_or(1, |c| {
+                c.query_row("SELECT COUNT(*) FROM items WHERE holder=?1", [&name], |r| {
+                    r.get(0)
+                })
+                .unwrap_or(1)
+            });
+            if named == 0 {
+                guard.remove();
+            }
+        }
     }
 
     /// Takes over a RUNNING item for this process, if no other live process runs it: `true` when

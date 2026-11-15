@@ -144,19 +144,34 @@ the same observe call twice). After the fix:
   killed with `kill -9` or crashes, and children of the process do not inherit it), an item with no
   holder (written by an older build: recovered exactly as before) and an item the same process started.
   A live holder's items are left alone and nothing waits or fails. The name is `<pid>-<time>` and
-  never reused, so a new process with a dead holder's pid does not keep its items alive.
+  never reused, so a new process with a dead holder's pid does not keep its items alive. The database
+  must be opened by a plain file path: a SQLite `file:` URI is refused with an error (a URI is a second
+  spelling the holders directory cannot be derived from). A path that cannot be made canonical, or a
+  holders directory that cannot be used, is an error that names the path; nothing starts then.
+- **Upgrading from a build before schema 8.** An item an older build started has no holder, so the
+  first run of this build recovers it even if the older process is still alive. **Stop every running
+  `endora-foundation` process (`serve`, `git-task`, cron `run-due`) before the first run of the new
+  binary.**
 - **Safe, and tested with real processes** (macOS: all of it; one Linux container: all but the git-task
   case, which needs a confinement backend): a `run-due`, a `serve` tick or a `git-task` while
   another `run-due`, `serve` or `git-task` runs on the same file: the live item is neither recovered
   nor run twice, no false `core.recover` row is written, and after the holder is killed the next
   `run-due` recovers its item as before.
 - **Not claimed.** Processes on different hosts or on a network file system; the Docker
-  backend and the NAS (not run there; one Linux container is the only Linux run), and a database file
-  shared between a host and a container; a holders directory deleted while a holder
+  backend and the NAS (not run there; one Linux container is the only Linux run); a database file
+  shared between a host process and a container on a Docker Desktop bind mount (an independent review
+  reproduced that it **fails**: the lock does not cross the VM, so the other side's items are recovered
+  as if left by a dead process);
+  deleting or replacing a single holder file while its holder lives, and opening the same database
+  through a hard link or a file-only bind mount (each path gets its own `.holders` directory), which
+  bypass the lease: such items are recovered as if left by a dead process; a holders directory deleted while a holder
   lives (its items then read as left by a dead process); a holder that hangs without dying (its items
   stay held until it ends); two threads of one process sharing one `Core` (a process may recover its
   own leftover items); a writer that edits the file (`items.holder` is not covered by the hash chain,
-  like every other table). One runner process remains the design.
+  like every other table). A process killed outright while no running item names its holder file
+  leaves that empty file; the next process that starts an item removes free files no item names (once,
+  when it makes its own), and the directory is safe to delete when nothing runs. One runner process
+  remains the design.
 - **Interfaces.** Recovery of interrupted work is EXPERIMENTAL again in [STABILITY.md](STABILITY.md)
   until a new independent review of this fix.
 

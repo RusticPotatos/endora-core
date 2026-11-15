@@ -356,3 +356,150 @@ fn a_version_7_file_migrates_by_one_nullable_column_and_its_chain_is_untouched()
     assert_eq!(out[0].item, item);
     assert_eq!(state(&core, item), ItemState::Open);
 }
+
+// ---- round 2: URI paths, stale holder files, a broken holders directory --------------------------
+
+#[test]
+fn a_sqlite_uri_path_is_refused_not_opened_with_the_lease_off() {
+    let db = lab("uri");
+    for uri in [
+        format!("file:{}", db.display()),
+        format!("file://{}?mode=rwc", db.display()),
+        format!("FILE:{}", db.display()),
+        "file::memory:".to_owned(),
+        "file:x.db?cache=shared".to_owned(),
+    ] {
+        let err = Core::open(&uri, Arc::new(ManualClock::new(1)))
+            .err()
+            .unwrap_or_else(|| panic!("{uri} was opened"));
+        let said = err.to_string();
+        assert!(said.contains("URI"), "{uri}: {said}");
+    }
+    assert!(!db.exists(), "a refused path created nothing");
+    // The plain path, the in-memory name and a relative spelling still open.
+    drop(open(&db));
+    assert!(Core::in_memory(Arc::new(ManualClock::new(1))).is_ok());
+}
+
+#[test]
+fn two_spellings_of_one_plain_path_share_one_holder_directory() {
+    let db = lab("spellings");
+    let a = open(&db);
+    let item = running_cut_off(&a);
+    let dotted = db.parent().unwrap().join(".").join("live.db");
+    let b = Core::open(dotted.to_str().unwrap(), Arc::new(ManualClock::new(1))).unwrap();
+    assert!(
+        b.recover_interrupted().unwrap().is_empty(),
+        "a live holder is seen through another spelling"
+    );
+    assert_eq!(state(&b, item), ItemState::Running);
+}
+
+#[test]
+fn a_new_holder_sweeps_free_files_no_item_names_and_keeps_the_rest() {
+    let db = lab("sweep");
+    let a = open(&db);
+    let named = running_cut_off(&a);
+    let dir = holders(&db);
+    let stale = "111-1";
+    let still_named = "222-2";
+    std::fs::write(dir.join(stale), b"").unwrap();
+    std::fs::write(dir.join(still_named), b"").unwrap();
+    set_holder(&a, named, Some(still_named));
+    // A second live process: its file is locked, so it is never swept.
+    let live = open(&db);
+    let g2 = live
+        .add_goal(
+            &owner(&live),
+            NewGoal {
+                title: "t2".into(),
+                why: "w".into(),
+                criteria: vec![Criterion {
+                    text: "c".into(),
+                    check: None,
+                }],
+                scope: vec![],
+                tier: Tier::Internal,
+                spend_cap_micros: 0,
+            },
+        )
+        .unwrap();
+    let i2 = live.add_item(g2, "second").unwrap();
+    live.start(&actor_named("runner"), i2).unwrap();
+    let live_file = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n != stale && n != still_named)
+        .count();
+    assert!(live_file >= 2, "two live holders have files");
+    // A third process starts an item: the sweep runs once, as it makes its own file.
+    let c = open(&db);
+    let g3 = c
+        .add_goal(
+            &owner(&c),
+            NewGoal {
+                title: "t3".into(),
+                why: "w".into(),
+                criteria: vec![Criterion {
+                    text: "c".into(),
+                    check: None,
+                }],
+                scope: vec![],
+                tier: Tier::Internal,
+                spend_cap_micros: 0,
+            },
+        )
+        .unwrap();
+    let i3 = c.add_item(g3, "third").unwrap();
+    c.start(&actor_named("runner"), i3).unwrap();
+    assert!(!dir.join(stale).exists(), "a free, unnamed file is removed");
+    assert!(
+        dir.join(still_named).exists(),
+        "a free file a running item still names is left for recovery"
+    );
+    let after = std::fs::read_dir(&dir).unwrap().flatten().count();
+    assert_eq!(
+        after,
+        live_file + 2,
+        "the two live holders' files, the new one's own and the still-named one remain"
+    );
+    // Recovery still works through the named file, and removes it.
+    drop(a);
+    assert_eq!(c.recover_interrupted().unwrap().len(), 1);
+    assert!(!dir.join(still_named).exists());
+}
+
+#[test]
+fn an_unusable_holders_directory_fails_closed_and_the_error_names_the_path() {
+    let db = lab("broken-dir");
+    let a = open(&db);
+    let g = a
+        .add_goal(
+            &owner(&a),
+            NewGoal {
+                title: "t".into(),
+                why: "w".into(),
+                criteria: vec![Criterion {
+                    text: "c".into(),
+                    check: None,
+                }],
+                scope: vec![],
+                tier: Tier::Internal,
+                spend_cap_micros: 0,
+            },
+        )
+        .unwrap();
+    let item = a.add_item(g, "i").unwrap();
+    std::fs::write(holders(&db), b"a file where the directory should be").unwrap();
+    let err = a
+        .start(&actor_named("runner"), item)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains(".holders"), "{err}");
+    assert_eq!(
+        state(&a, item),
+        ItemState::Open,
+        "fail closed: nothing started"
+    );
+}
