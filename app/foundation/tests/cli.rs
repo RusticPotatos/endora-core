@@ -779,3 +779,606 @@ fn amounts_are_micro_usd_in_the_cli_and_its_output() {
         "{usage}"
     );
 }
+
+// ---- CLI usability (weekly review A findings 07, 08, 15, 22; D1 follow-ups; review REC2 N-c) ----
+
+/// A SKIP is not a pass: with `ENDORA_STRICT_TESTS=1` a skipped test fails.
+fn skip(why: &str) {
+    eprintln!("SKIP: {why}");
+    assert!(
+        std::env::var_os("ENDORA_STRICT_TESTS").is_none(),
+        "ENDORA_STRICT_TESTS is set and the test cannot run: {why}"
+    );
+}
+
+fn bin() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_endora-foundation"))
+}
+
+const COMMANDS: [&str; 19] = [
+    "goal add",
+    "routine add",
+    "routine resume",
+    "git-task",
+    "publish",
+    "run-due",
+    "serve",
+    "status",
+    "init",
+    "accept",
+    "decline",
+    "confirm-criterion",
+    "stop",
+    "resume",
+    "resume-goal",
+    "overall-cap",
+    "evidence",
+    "verify-evidence",
+    "backup",
+];
+
+#[test]
+fn help_and_version_print_to_stdout_exit_0_and_never_create_a_database() {
+    let lab = Lab::new("help");
+    let db = lab.dir.join("never.db");
+    let db_s = db.to_str().unwrap();
+    for args in [
+        vec!["--help"],
+        vec!["-h"],
+        vec!["help"],
+        vec!["--db", db_s, "--help"],
+        vec!["--db", db_s, "help"],
+        vec!["--db", db_s, "goal", "add", "--help"],
+        vec!["--db", db_s, "status", "-h"],
+    ] {
+        let o = bin()
+            .args(&args)
+            .env_remove("ENDORA_FOUNDATION_DB")
+            .output()
+            .unwrap();
+        assert_eq!(code(&o), 0, "{args:?}: {}", text(&o));
+        assert!(o.stderr.is_empty(), "{args:?}: stderr {}", text(&o));
+        let out = String::from_utf8_lossy(&o.stdout);
+        for c in COMMANDS.iter().chain(&["capabilities"]) {
+            assert!(out.contains(c), "{args:?}: help lacks `{c}`:\n{out}");
+        }
+        for f in [
+            "--db",
+            "--config",
+            "--token-file",
+            "--token-out",
+            "--title",
+            "--criteria",
+            "--check",
+            "--probe",
+            "--scope",
+            "--tier",
+            "--cap",
+            "--acceptance",
+            "--every",
+            "--max-failures",
+            "--auto-accept",
+            "--repo",
+            "--instruction",
+            "--test-cmd",
+            "--item",
+            "--to",
+            "ENDORA_FOUNDATION_DB",
+            "ENDORA_FOUNDATION_CONFIG",
+            "ENDORA_OWNER_TOKEN_FILE",
+            "micro-USD",
+            "0 ok",
+            "1 error",
+            "2 refused",
+        ] {
+            assert!(out.contains(f), "{args:?}: help lacks `{f}`:\n{out}");
+        }
+    }
+    assert!(!db.exists(), "asking for help created a database file");
+    let v = bin()
+        .arg("--version")
+        .env_remove("ENDORA_FOUNDATION_DB")
+        .output()
+        .unwrap();
+    assert_eq!(code(&v), 0, "{}", text(&v));
+    let line = String::from_utf8_lossy(&v.stdout).trim().to_owned();
+    assert_eq!(
+        line,
+        format!(
+            "endora-foundation {} (schema {})",
+            env!("CARGO_PKG_VERSION"),
+            endora_foundation::infrastructure::SCHEMA_VERSION
+        )
+    );
+    let v2 = bin().args(["--db", db_s, "--version"]).output().unwrap();
+    assert_eq!(code(&v2), 0);
+    assert!(!db.exists(), "--version created a database file");
+}
+
+#[test]
+fn an_unknown_command_is_refused_before_a_database_is_created() {
+    let lab = Lab::new("unkcmd");
+    let db = lab.dir.join("never.db");
+    let o = bin()
+        .arg("--db")
+        .arg(&db)
+        .arg("frobnicate")
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 1, "{}", text(&o));
+    assert!(
+        text(&o).contains("unknown command `frobnicate`") && text(&o).contains("--help"),
+        "{}",
+        text(&o)
+    );
+    assert!(!db.exists(), "an unknown command created a database");
+    // The old one-line usage still names the unit.
+    let none = bin().arg("--db").arg(&db).output().unwrap();
+    assert_eq!(code(&none), 1);
+    assert!(!db.exists());
+}
+
+#[test]
+fn an_unknown_flag_or_extra_word_is_refused_naming_it_and_changes_nothing() {
+    let (lab, cfg, db) = owner_lab("unkflag");
+    let before = text(&lab.run_on(&db, &cfg, &["status"]));
+    let cases: [(&[&str], &str); 14] = [
+        (
+            &[
+                "goal",
+                "add",
+                "--title",
+                "T",
+                "--criteria",
+                "c",
+                "--bogus-flag",
+                "x",
+            ],
+            "unknown option --bogus-flag for goal add",
+        ),
+        (
+            &[
+                "goal",
+                "add",
+                "--title",
+                "T",
+                "--criteria",
+                "c",
+                "--cpa",
+                "5",
+            ],
+            "unknown option --cpa for goal add",
+        ),
+        (
+            &["goal", "add", "--title", "T", "--criteria", "c", "stray"],
+            "unexpected argument `stray` for goal add",
+        ),
+        (
+            &[
+                "routine",
+                "add",
+                "--goal",
+                "1",
+                "--every",
+                "60",
+                "--auto-acept",
+            ],
+            "unknown option --auto-acept for routine add",
+        ),
+        (
+            &["routine", "resume", "1", "--now"],
+            "unknown option --now for routine resume",
+        ),
+        (&["run-due", "--fast"], "unknown option --fast for run-due"),
+        (&["status", "--json"], "unknown option --json for status"),
+        (
+            &["accept", "1", "--force"],
+            "unknown option --force for accept",
+        ),
+        (
+            &["decline", "1", "extra"],
+            "unexpected argument `extra` for decline",
+        ),
+        (
+            &["overall-cap", "5", "--x"],
+            "unknown option --x for overall-cap",
+        ),
+        (
+            &["evidence", "--item", "1", "--all"],
+            "unknown option --all for evidence",
+        ),
+        (
+            &["backup", "--to", "x.db", "--zip"],
+            "unknown option --zip for backup",
+        ),
+        (
+            &["serve", "--every", "1", "--once"],
+            "unknown option --once for serve",
+        ),
+        (
+            &["git-task", "--instruction", "i", "--test-cmd", "t", "--bad"],
+            "unknown option --bad for git-task",
+        ),
+    ];
+    for (args, want) in cases {
+        let o = lab.run_on(&db, &cfg, args);
+        assert_eq!(code(&o), 1, "{args:?}: {}", text(&o));
+        assert!(text(&o).contains(want), "{args:?}: {}", text(&o));
+    }
+    let after = text(&lab.run_on(&db, &cfg, &["status"]));
+    assert_eq!(before, after, "a refused command changed the database");
+    // A flag that lacks its value says so, whichever command it belongs to.
+    let o = lab.run_on(&db, &cfg, &["goal", "add", "--title"]);
+    assert_eq!(code(&o), 1, "{}", text(&o));
+    assert!(text(&o).contains("--title needs a value"), "{}", text(&o));
+    let o = lab.run_plain(&db, &cfg, &["--token-file"]);
+    assert_eq!(code(&o), 1, "{}", text(&o));
+    assert!(
+        text(&o).contains("--token-file needs a value"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn every_documented_flag_is_still_accepted() {
+    let lab = Lab::new("known");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let cfg = lab.config(&format!("probe web tcp 127.0.0.1:{port} 60"));
+    let db = lab.dir.join("live.db");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    let g = run(&[
+        "goal",
+        "add",
+        "--title",
+        "T",
+        "--why",
+        "W",
+        "--criteria",
+        "c",
+        "--check",
+        "probe.run",
+        "web",
+        "up",
+        "true",
+        "--criteria",
+        "d",
+        "--probe",
+        "web",
+        "--scope",
+        "a,b",
+        "--tier",
+        "internal",
+        "--cap",
+        "5",
+        "--acceptance",
+        "owner",
+    ]);
+    assert_eq!(code(&g), 0, "{}", text(&g));
+    let r = run(&[
+        "routine",
+        "add",
+        "--goal",
+        "1",
+        "--every",
+        "60",
+        "--title",
+        "R",
+        "--max-failures",
+        "2",
+        "--auto-accept",
+    ]);
+    assert_eq!(code(&r), 0, "{}", text(&r));
+    let r = run(&["routine", "add", "--goal", "1", "--probe", "web"]);
+    assert_eq!(code(&r), 0, "{}", text(&r));
+    assert_eq!(code(&run(&["status", "--short"])), 0);
+    assert_eq!(code(&run(&["capabilities"])), 0);
+}
+
+#[test]
+fn run_due_says_what_it_did_when_nothing_was_due_or_no_routine_exists() {
+    let lab = Lab::new("nothing");
+    let cfg = lab.config("");
+    let db = lab.dir.join("live.db");
+    let none = lab.run_on(&db, &cfg, &["run-due"]);
+    assert_eq!(code(&none), 0, "{}", text(&none));
+    assert!(
+        text(&none).contains("no routines: a goal needs a routine to make items"),
+        "{}",
+        text(&none)
+    );
+    lab.run_on(
+        &db,
+        &cfg,
+        &["goal", "add", "--title", "t", "--criteria", "looks right"],
+    );
+    lab.run_on(
+        &db,
+        &cfg,
+        &["routine", "add", "--goal", "1", "--every", "3600"],
+    );
+    let first = lab.run_on(&db, &cfg, &["run-due"]);
+    assert_eq!(code(&first), 0, "{}", text(&first));
+    assert!(text(&first).contains("item 1"), "{}", text(&first));
+    let again = lab.run_on(&db, &cfg, &["run-due"]);
+    assert_eq!(code(&again), 0, "{}", text(&again));
+    assert!(
+        text(&again).contains("nothing due (1 routine)"),
+        "{}",
+        text(&again)
+    );
+}
+
+#[test]
+fn an_unknown_item_goal_or_criterion_says_so_and_a_negative_amount_says_why() {
+    let (lab, cfg, db) = owner_lab("unknown-ids");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    for (args, want) in [
+        (vec!["accept", "9"], "no item 9"),
+        (vec!["decline", "9"], "no item 9"),
+        (vec!["confirm-criterion", "9", "1"], "no item 9"),
+        (vec!["evidence", "--item", "999"], "no item 999"),
+        (
+            vec!["routine", "add", "--goal", "99", "--every", "300"],
+            "no goal 99",
+        ),
+        (vec!["routine", "resume", "99"], "no routine 99"),
+        (vec!["resume-goal", "99"], "no goal 99"),
+        (
+            vec!["confirm-criterion", "1", "7"],
+            "item 1 has 1 criterion: there is no criterion 7",
+        ),
+        (
+            vec!["confirm-criterion", "1", "0"],
+            "criteria are numbered from 1",
+        ),
+        (
+            vec![
+                "goal",
+                "add",
+                "--title",
+                "T",
+                "--criteria",
+                "c",
+                "--cap",
+                "-5",
+            ],
+            "--cap must not be negative",
+        ),
+        (
+            vec![
+                "routine",
+                "add",
+                "--goal",
+                "1",
+                "--every",
+                "60",
+                "--max-failures",
+                "-1",
+            ],
+            "--max-failures must not be negative",
+        ),
+    ] {
+        let o = run(&args);
+        assert_eq!(code(&o), 1, "{args:?}: {}", text(&o));
+        let t = text(&o);
+        assert!(t.contains(want), "{args:?}: {t}");
+        assert!(
+            !t.contains("storage backend")
+                && !t.contains("Query returned")
+                && !t.contains("FOREIGN KEY")
+                && !t.contains("out of range"),
+            "{args:?}: a raw engine error: {t}"
+        );
+    }
+    // Authority still comes first: without the token these are refused (2), not "no item".
+    let o = lab.run_plain(&db, &cfg, &["accept", "9"]);
+    assert_eq!(code(&o), 2, "{}", text(&o));
+    // An item that exists but has no evidence yet is not an error.
+    let ok = run(&["evidence", "--item", "1"]);
+    assert_eq!(code(&ok), 0, "{}", text(&ok));
+}
+
+#[test]
+fn publish_refuses_with_exit_2_one_prefix_and_no_engine_text_even_for_a_missing_item() {
+    let (lab, cfg, db) = owner_lab("publish");
+    for item in ["1", "999"] {
+        let o = lab.run_on(&db, &cfg, &["publish", item]);
+        assert_eq!(code(&o), 2, "item {item}: {}", text(&o));
+        let t = text(&o);
+        assert!(t.starts_with("refused: "), "{t}");
+        assert_eq!(t.matches("refused:").count(), 1, "a doubled prefix: {t}");
+        assert!(
+            !t.contains("storage backend") && !t.contains("Query returned"),
+            "{t}"
+        );
+    }
+}
+
+#[test]
+fn an_impossible_transition_gets_its_own_message_never_corrupt_stored_data() {
+    let (lab, cfg, db) = owner_lab("transitions");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    // Item 1 is running (criterion unmet): decline it, then every further move is impossible.
+    let d = run(&["decline", "1"]);
+    assert_eq!(code(&d), 0, "{}", text(&d));
+    for (args, want) in [
+        (vec!["decline", "1"], "item 1 is already failed"),
+        (
+            vec!["accept", "1"],
+            "item 1 is failed, not running: only a running item can be accepted",
+        ),
+    ] {
+        let o = run(&args);
+        // `accept` stays a refusal by the rules (2); the others were errors (1) and stay so.
+        let want_code = if args[0] == "accept" { 2 } else { 1 };
+        assert_eq!(code(&o), want_code, "{args:?}: {}", text(&o));
+        let t = text(&o);
+        assert!(t.contains(want), "{args:?}: {t}");
+        assert!(
+            !t.contains("corrupt stored data") && !t.contains("cannot transition"),
+            "{args:?}: {t}"
+        );
+    }
+    // An owner accept that comes second to a settle: a done item.
+    let g = run(&[
+        "goal",
+        "add",
+        "--title",
+        "t2",
+        "--criteria",
+        "c2",
+        "--acceptance",
+        "auto-observe",
+    ]);
+    assert_eq!(code(&g), 0, "{}", text(&g));
+    assert_eq!(
+        code(&run(&["routine", "add", "--goal", "2", "--every", "60"])),
+        0
+    );
+    assert_eq!(code(&run(&["run-due"])), 0);
+    assert_eq!(code(&run(&["confirm-criterion", "2", "1"])), 0);
+    let a = run(&["accept", "2"]);
+    assert_eq!(code(&a), 0, "{}", text(&a));
+    for args in [vec!["accept", "2"], vec!["decline", "2"]] {
+        let o = run(&args);
+        assert_eq!(
+            code(&o),
+            if args[0] == "accept" { 2 } else { 1 },
+            "{args:?}: {}",
+            text(&o)
+        );
+        assert!(
+            text(&o).contains("item 2 is already done"),
+            "{args:?}: {}",
+            text(&o)
+        );
+        assert!(!text(&o).contains("corrupt stored data"), "{}", text(&o));
+    }
+}
+
+#[test]
+fn status_short_omits_the_evidence_tail() {
+    let (lab, cfg, db) = owner_lab("short");
+    let full = text(&lab.run_on(&db, &cfg, &["status"]));
+    let short = text(&lab.run_on(&db, &cfg, &["status", "--short"]));
+    assert!(
+        full.contains("ROUTINES") && short.contains("ROUTINES") && short.contains("OPEN DECISIONS")
+    );
+    assert!(
+        short.len() < full.len(),
+        "--short is not shorter:\n{short}\n---\n{full}"
+    );
+    assert!(!short.contains("core.start"), "{short}");
+}
+
+/// The cost-violation path through the real command line: a fake `claude` reports more than the
+/// grant, the goal stops, `resume-goal` needs the owner, and the goal then takes calls again.
+#[test]
+fn resume_goal_needs_the_token_and_lifts_a_cost_stop() {
+    if !confined_or_skip() {
+        skip("no confinement backend on this host");
+        return;
+    }
+    let lab = Lab::new("resume-goal");
+    let tpl = lab.dir.join("template");
+    std::fs::create_dir_all(&tpl).unwrap();
+    std::fs::write(tpl.join("lib.sh"), "add() { echo $(( $1 - $2 )); }\n").unwrap();
+    std::fs::write(
+        tpl.join("test.sh"),
+        ". ./lib.sh\n[ \"$(add 2 3)\" = 5 ] || { echo FAIL; exit 1; }\necho PASS\n",
+    )
+    .unwrap();
+    let fake = lab.dir.join("fake-claude");
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nprintf 'add() { echo $(( $1 + $2 )); }\\n' > lib.sh\necho '{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"num_turns\":1,\"total_cost_usd\":0.50,\"result\":\"fixed\"}'\n",
+    )
+    .unwrap();
+    std::process::Command::new("chmod")
+        .arg("+x")
+        .arg(&fake)
+        .status()
+        .unwrap();
+    let cred = lab.dir.join("cred");
+    std::fs::write(&cred, "DUMMY-CREDENTIAL-NOT-A-SECRET\n").unwrap();
+    let cfg = lab.config(&format!(
+        "git {} {} -- unused\nclaude-code {} dummy-model 300000 3\nclaude-credential {}",
+        lab.dir.join("scratch").display(),
+        tpl.display(),
+        fake.display(),
+        cred.display()
+    ));
+    let db = lab.dir.join("live.db");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    assert_eq!(code(&run(&["overall-cap", "5000000"])), 0);
+    let task = |extra: &[&str]| {
+        let mut a = vec![
+            "git-task",
+            "--instruction",
+            "fix add",
+            "--test-cmd",
+            "sh test.sh",
+            "--repo",
+            tpl.to_str().unwrap(),
+        ];
+        a.extend_from_slice(extra);
+        run(&a)
+    };
+    // 0.50 USD against a 0.30 USD declaration: a violation, so the goal stops.
+    let first = task(&["--cap", "1000000"]);
+    assert_eq!(code(&first), 1, "{}", text(&first));
+    assert!(
+        text(&first).contains("broke its cost declaration"),
+        "{}",
+        text(&first)
+    );
+    let st = text(&run(&["status"]));
+    assert!(
+        st.contains("goal 1 is stopped after a cost violation. resume-goal 1"),
+        "{st}"
+    );
+    // A stopped goal takes no call.
+    let blocked = task(&["--goal", "1"]);
+    assert_eq!(code(&blocked), 2, "{}", text(&blocked));
+    assert!(
+        text(&blocked).contains("the goal is stopped after a cost violation"),
+        "{}",
+        text(&blocked)
+    );
+    // Only the owner lifts it: no token, or a wrong one, exits 2 and the stop stays.
+    let none = lab.run_plain(&db, &cfg, &["resume-goal", "1"]);
+    assert_eq!(code(&none), 2, "{}", text(&none));
+    assert!(text(&run(&["status"])).contains("goal 1 is stopped"));
+    let wrong = lab.dir.join("wrong.token");
+    std::fs::write(&wrong, "DUMMY-WRONG-TOKEN\n").unwrap();
+    std::process::Command::new("chmod")
+        .arg("600")
+        .arg(&wrong)
+        .status()
+        .unwrap();
+    let w = lab.run_plain(
+        &db,
+        &cfg,
+        &["--token-file", wrong.to_str().unwrap(), "resume-goal", "1"],
+    );
+    assert_eq!(code(&w), 2, "{}", text(&w));
+    assert!(text(&run(&["status"])).contains("goal 1 is stopped"));
+    // With the token it lifts the stop, and the goal takes calls again (prepare runs).
+    let ok = run(&["resume-goal", "1"]);
+    assert_eq!(code(&ok), 0, "{}", text(&ok));
+    assert!(text(&ok).contains("goal 1 resumed"), "{}", text(&ok));
+    assert!(!text(&run(&["status"])).contains("goal 1 is stopped"));
+    let again = task(&["--goal", "1"]);
+    assert!(
+        text(&again).contains("prepare:"),
+        "the goal still takes no call: {}",
+        text(&again)
+    );
+    assert!(
+        !text(&again).contains("the goal is stopped"),
+        "{}",
+        text(&again)
+    );
+}

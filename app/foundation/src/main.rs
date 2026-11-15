@@ -1,7 +1,10 @@
 //! `endora-foundation`: the foundation's command line. Plain text in and out over ONE SQLite file
 //! (`--db <path>` or `ENDORA_FOUNDATION_DB`). Capabilities come from a small config file
 //! (`--config <path>` or `ENDORA_FOUNDATION_CONFIG`) that is not kept in the repository.
-//! Exit codes: 0 ok, 1 error, 2 refused by authority (the reason is printed).
+//! Exit codes: 0 ok, 1 error (a usage mistake, an unknown command, option or id, a failed run),
+//! 2 refused by authority (the reason is printed). `--help` and `--version` print to stdout, exit 0
+//! and open no database. Every command line is checked against [`SPECS`] before a database is
+//! opened: an unknown command, option or extra word is refused (exit 1) naming itself.
 
 mod probes;
 
@@ -26,7 +29,7 @@ use endora_foundation_git::{
     AgentExecutor, ClaudeCode, ClaudeLimits, Config as GitConfig, Confinement, GitChange, Options,
     canonical_deny_paths, mac_profile_can_read,
 };
-use endora_kernel::{AppError, Clock, Reversibility, Tier};
+use endora_kernel::{AppError, Clock, RepositoryError, Reversibility, Tier};
 
 use probes::{Kind, Probe, Probes};
 
@@ -139,7 +142,7 @@ struct Args {
     token_out: Option<PathBuf>,
 }
 
-fn parse_args() -> Args {
+fn parse_args() -> Result<Args, Fail> {
     let mut a = Args {
         words: Vec::new(),
         db: None,
@@ -149,15 +152,363 @@ fn parse_args() -> Args {
     };
     let mut it = std::env::args().skip(1);
     while let Some(w) = it.next() {
-        match w.as_str() {
-            "--db" => a.db = it.next().map(PathBuf::from),
-            "--config" => a.config = it.next().map(PathBuf::from),
-            "--token-file" => a.token_file = it.next().map(PathBuf::from),
-            "--token-out" => a.token_out = it.next().map(PathBuf::from),
-            _ => a.words.push(w),
+        let slot = match w.as_str() {
+            "--db" => &mut a.db,
+            "--config" => &mut a.config,
+            "--token-file" => &mut a.token_file,
+            "--token-out" => &mut a.token_out,
+            _ => {
+                a.words.push(w);
+                continue;
+            }
+        };
+        *slot = Some(
+            it.next()
+                .map(PathBuf::from)
+                .ok_or_else(|| Fail::Error(format!("{w} needs a value (a path)")))?,
+        );
+    }
+    Ok(a)
+}
+
+/// One command's accepted words: its name (one or two words), each option with the number of
+/// values it takes, and how many plain words (ids, amounts) may follow. The global options
+/// (`--db`, `--config`, `--token-file`, `--token-out`) are taken out before this.
+struct Spec {
+    name: &'static str,
+    options: &'static [(&'static str, usize)],
+    plain: usize,
+}
+
+const SPECS: &[Spec] = &[
+    Spec {
+        name: "goal add",
+        options: &[
+            ("--title", 1),
+            ("--why", 1),
+            ("--criteria", 1),
+            ("--check", 4),
+            ("--probe", 1),
+            ("--scope", 1),
+            ("--tier", 1),
+            ("--cap", 1),
+            ("--acceptance", 1),
+        ],
+        plain: 0,
+    },
+    Spec {
+        name: "routine add",
+        options: &[
+            ("--goal", 1),
+            ("--every", 1),
+            ("--probe", 1),
+            ("--title", 1),
+            ("--max-failures", 1),
+            ("--auto-accept", 0),
+        ],
+        plain: 0,
+    },
+    Spec {
+        name: "routine resume",
+        options: &[],
+        plain: 1,
+    },
+    Spec {
+        name: "git-task",
+        options: &[
+            ("--goal", 1),
+            ("--repo", 1),
+            ("--instruction", 1),
+            ("--test-cmd", 1),
+            ("--cap", 1),
+        ],
+        plain: 0,
+    },
+    Spec {
+        name: "publish",
+        options: &[],
+        plain: 1,
+    },
+    Spec {
+        name: "run-due",
+        options: &[],
+        plain: 0,
+    },
+    Spec {
+        name: "serve",
+        options: &[("--every", 1)],
+        plain: 0,
+    },
+    Spec {
+        name: "status",
+        options: &[("--short", 0)],
+        plain: 0,
+    },
+    Spec {
+        name: "init",
+        options: &[],
+        plain: 0,
+    },
+    Spec {
+        name: "accept",
+        options: &[],
+        plain: 1,
+    },
+    Spec {
+        name: "decline",
+        options: &[],
+        plain: 1,
+    },
+    Spec {
+        name: "confirm-criterion",
+        options: &[],
+        plain: 2,
+    },
+    Spec {
+        name: "confirm",
+        options: &[],
+        plain: 2,
+    },
+    Spec {
+        name: "stop",
+        options: &[],
+        plain: 0,
+    },
+    Spec {
+        name: "resume",
+        options: &[],
+        plain: 0,
+    },
+    Spec {
+        name: "overall-cap",
+        options: &[],
+        plain: 1,
+    },
+    Spec {
+        name: "resume-goal",
+        options: &[],
+        plain: 1,
+    },
+    Spec {
+        name: "verify-evidence",
+        options: &[],
+        plain: 0,
+    },
+    Spec {
+        name: "evidence",
+        options: &[("--item", 1)],
+        plain: 0,
+    },
+    Spec {
+        name: "backup",
+        options: &[("--to", 1)],
+        plain: 0,
+    },
+    Spec {
+        name: "capabilities",
+        options: &[],
+        plain: 0,
+    },
+];
+
+/// The one-line usage an unknown command is answered with.
+const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine resume|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
+
+/// What `--help`, `-h` and `help` print (to stdout, exit 0, no database opened).
+const HELP: &str = "endora-foundation: the foundation's command line (plain text over one SQLite file)
+
+usage: endora-foundation [--db FILE] [--config FILE] [--token-file FILE] <command> [options]
+       endora-foundation --help | -h | help       this text
+       endora-foundation --version | -V           the version and the database schema it writes
+
+global options (take a value; may stand anywhere on the line):
+  --db FILE           the database (or ENDORA_FOUNDATION_DB)
+  --config FILE       the capabilities config (or ENDORA_FOUNDATION_CONFIG)
+  --token-file FILE   the owner token file (or ENDORA_OWNER_TOKEN_FILE): a PATH, never the token
+  --token-out FILE    init only: where the new owner token is written (mode 600, never overwritten)
+
+commands (OWNER = needs the owner token file; without it, or with a wrong one: exit 2):
+  goal add --title T --criteria TEXT [--check CALL INPUT FIELD EXPECT] [--criteria TEXT ...]
+           [--why W] [--probe NAME] [--scope a,b] [--tier public|internal|confidential|restricted]
+           [--cap MICRO_USD] [--acceptance owner|auto-observe]            OWNER
+                      a --check belongs to the --criteria before it
+  routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--max-failures N]
+           [--auto-accept]                                                OWNER
+  routine resume ID   lift the pause after repeated failures              OWNER
+  git-task --instruction T --test-cmd CMD [--goal ID] [--repo PATH] [--cap MICRO_USD]   OWNER
+                      prepare, change (the configured agent), verify; waits for the owner
+  run-due             fire due routines, start new items, run their checks
+  serve --every SECONDS   run-due in a loop; SIGTERM ends it cleanly
+  status [--short]    goals, items, evidence tail (--short: without the tail), open decisions
+  init --token-out FILE   once: make the owner credential
+  accept ITEM         the owner accepts an item whose criteria are all met        OWNER
+  decline ITEM        the owner declines an item                                 OWNER
+  confirm-criterion ITEM N   the owner confirms criterion N (numbered from 1)    OWNER
+                      (`confirm` is a deprecated alias that warns)
+  stop                stop switch on (anyone may)
+  resume              stop switch off                                            OWNER
+  resume-goal GOAL    lift the stop a cost violation put on a goal               OWNER
+  overall-cap MICRO_USD   the most all goals may spend together (starts at 0)    OWNER
+  publish ITEM        always refused (exit 2): nothing here publishes
+  evidence --item ID  every record about an item, in full
+  verify-evidence     recompute the evidence hash chain; exit 1 naming the first broken row
+  backup --to FILE    consistent copy (mode 600; an existing FILE is never overwritten)
+  capabilities        every registered call with its band, tier and maximum cost
+
+amounts are micro-USD: 1 USD = 1,000,000.
+
+environment:
+  ENDORA_FOUNDATION_DB                the database, when --db is not given
+  ENDORA_FOUNDATION_CONFIG            the capabilities config, when --config is not given
+  ENDORA_OWNER_TOKEN_FILE             the path of the owner token file, when --token-file is not given
+  ENDORA_FOUNDATION_EXECUTOR_IMAGE    the container image of the Docker confinement backend
+
+exit codes: 0 ok, 1 error (a mistake in the command line, an unknown id, a failed run),
+            2 refused by authority (the reason is printed).
+An unknown command, option or extra word is refused with exit 1 and named; nothing is opened.
+";
+
+/// The command's [`Spec`], by its first (and for `goal` and `routine` second) word.
+fn spec_of(w: &[String]) -> Option<&'static Spec> {
+    SPECS.iter().find(|s| {
+        let mut name = s.name.split(' ');
+        w.first().map(String::as_str) == name.next()
+            && name
+                .next()
+                .is_none_or(|second| w.get(1).map(String::as_str) == Some(second))
+    })
+}
+
+/// Checks a command line against its [`Spec`] before anything is opened. `Ok(true)` when help was
+/// asked for; an unknown command, an unknown option, an option without its value or an extra
+/// word is an error (exit 1) that names the offender.
+fn check_words(w: &[String]) -> Result<bool, Fail> {
+    if w.first().is_some_and(|x| x == "help") {
+        return Ok(true);
+    }
+    let spec = spec_of(w);
+    let skip = spec.map_or(0, |s| s.name.split(' ').count());
+    let takes = |o: &str| {
+        spec.and_then(|s| s.options.iter().find(|(n, _)| *n == o))
+            .map(|(_, n)| *n)
+    };
+    // Help first, wherever it stands (but never a value of an option).
+    let mut i = skip;
+    while i < w.len() {
+        if w[i] == "--help" || w[i] == "-h" {
+            return Ok(true);
+        }
+        i += 1 + takes(&w[i]).unwrap_or(0);
+    }
+    let Some(spec) = spec else {
+        return Err(Fail::Error(match w.first() {
+            None => format!("no command given; {USAGE_LINE}"),
+            Some(_) => format!(
+                "unknown command `{}`; {USAGE_LINE}",
+                w.iter().take(2).cloned().collect::<Vec<_>>().join(" ")
+            ),
+        }));
+    };
+    let (mut plain, mut i) = (0, skip);
+    while i < w.len() {
+        let x = w[i].as_str();
+        if x.starts_with("--") {
+            let n = takes(x).ok_or_else(|| {
+                Fail::Error(format!("unknown option {x} for {} (see --help)", spec.name))
+            })?;
+            if i + n >= w.len() {
+                return Err(Fail::Error(if x == "--check" {
+                    "--check needs CALL INPUT FIELD EXPECT".into()
+                } else if n == 1 {
+                    format!("{x} needs a value")
+                } else {
+                    format!("{x} needs {n} values")
+                }));
+            }
+            i += 1 + n;
+        } else {
+            plain += 1;
+            if plain > spec.plain {
+                return Err(Fail::Error(format!(
+                    "unexpected argument `{x}` for {} (see --help)",
+                    spec.name
+                )));
+            }
+            i += 1;
         }
     }
-    a
+    Ok(false)
+}
+
+/// `rusqlite` says `Query returned no rows` for an id that is not there.
+fn is_gone(e: &RepositoryError) -> bool {
+    matches!(e, RepositoryError::Backend(m) if m.contains("no rows"))
+}
+
+/// The item's state, or `no item N` (exit 1) instead of the engine's words.
+fn need_item(core: &Core, id: ItemId) -> Result<ItemState, Fail> {
+    core.store().item(id).map(|i| i.state).map_err(|e| {
+        if is_gone(&e) {
+            Fail::Error(format!("no item {}", id.0))
+        } else {
+            err(e)
+        }
+    })
+}
+
+fn need_goal(core: &Core, id: GoalId) -> Result<(), Fail> {
+    core.store().goal(id).map(|_| ()).map_err(|e| {
+        if is_gone(&e) {
+            Fail::Error(format!("no goal {}", id.0))
+        } else {
+            err(e)
+        }
+    })
+}
+
+fn need_routine(core: &Core, id: RoutineId) -> Result<(), Fail> {
+    core.store().routine(id).map(|_| ()).map_err(|e| {
+        if is_gone(&e) {
+            Fail::Error(format!("no routine {}", id.0))
+        } else {
+            err(e)
+        }
+    })
+}
+
+/// A move the item's state does not allow (the engine calls it `Corrupt`, because the store
+/// cannot tell a lost race from damage) is said as what it is, from the item's own state; only
+/// a real storage fault keeps the engine's words. `verb` is what the owner asked for.
+fn refused_move(core: &Core, id: ItemId, e: AppError, verb: &str) -> Fail {
+    let AppError::Repository(RepositoryError::Corrupt(m)) = &e else {
+        return err(e);
+    };
+    let a_move = m.starts_with("cannot transition")
+        || m.contains("only a running item")
+        || m.contains("changed under the move")
+        || m.contains("done is reached only");
+    let Some(state) = a_move
+        .then(|| core.store().item(id).ok().map(|i| i.state))
+        .flatten()
+    else {
+        return err(e);
+    };
+    let name = state.name();
+    Fail::Error(match (verb, state) {
+        (_, ItemState::Done | ItemState::Failed) if verb == "decline" => {
+            format!("item {} is already {name}", id.0)
+        }
+        ("accept", ItemState::Done) => format!("item {} is already done", id.0),
+        ("accept", _) => format!(
+            "item {} is {name}, not running: only a running item can be accepted",
+            id.0
+        ),
+        ("confirm", _) => format!(
+            "item {} is {name}: only a running item's criteria can be confirmed",
+            id.0
+        ),
+        _ => format!("item {} is {name}: it cannot be {verb}d", id.0),
+    })
 }
 
 /// The value after `--flag`, if present.
@@ -266,6 +617,7 @@ fn goal_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> Out 
         }
     }
     let cap = flag(w, "--cap").map_or(Ok(0), |v| num(v, "--cap"))?;
+    let cap = u64::try_from(cap).map_err(|_| Fail::Error("--cap must not be negative".into()))?;
     let acceptance = match flag(w, "--acceptance") {
         None => AcceptancePolicy::Owner,
         Some(name) => AcceptancePolicy::from_name(name).ok_or_else(|| {
@@ -283,7 +635,7 @@ fn goal_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> Out 
                 criteria,
                 scope,
                 tier,
-                spend_cap_micros: u64::try_from(cap).map_err(err)?,
+                spend_cap_micros: cap,
             },
             acceptance,
         )
@@ -411,7 +763,7 @@ fn git_task(core: &Core, proof: &OwnerProof, w: &[String]) -> Out {
             id
         }
     };
-    core.store().goal(goal).map_err(err)?;
+    need_goal(core, goal)?;
     let now = SystemClock.now().unix_millis();
     // The owner is running this command, so the owner grants the runner exactly what a task needs.
     for (actor, call, band, uses) in [
@@ -484,6 +836,7 @@ fn git_task(core: &Core, proof: &OwnerProof, w: &[String]) -> Out {
 
 fn routine_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> Out {
     let goal = GoalId(num(need(w, "--goal")?, "--goal")?);
+    need_goal(core, goal)?;
     let secs = match (flag(w, "--every"), flag(w, "--probe")) {
         (Some(v), _) => num(v, "--every")?,
         (None, Some(name)) => s
@@ -507,6 +860,8 @@ fn routine_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> O
         .map_or(Ok(i64::from(DEFAULT_MAX_FAILURES)), |v| {
             num(v, "--max-failures")
         })?;
+    let max_failures = u32::try_from(max_failures)
+        .map_err(|_| Fail::Error("--max-failures must not be negative".into()))?;
     let id = core
         .add_routine_limited(
             proof,
@@ -515,14 +870,17 @@ fn routine_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> O
             secs.saturating_mul(1000),
             w.iter().any(|x| x == "--auto-accept"),
             now,
-            u32::try_from(max_failures).map_err(err)?,
+            max_failures,
         )
         .map_err(err)?;
     println!("routine {}", id.0);
     Ok(())
 }
 
-fn run_due(core: &Core) -> Out {
+/// Runs what is due and prints what it did. `Ok(true)` when it did or said anything, `Ok(false)`
+/// when there was nothing to do (`run-due` then says so; `serve` stays quiet).
+fn run_due(core: &Core) -> Result<bool, Fail> {
+    let mut acted = false;
     let runner = core.capability_actor("runner").map_err(err)?;
     if core.store().control("stop").map_err(err)? != 0 {
         return Err(Fail::Refused(
@@ -530,11 +888,13 @@ fn run_due(core: &Core) -> Out {
         ));
     }
     for r in core.recover_interrupted().map_err(err)? {
+        acted = true;
         println!("recovered item {} -> {}: {}", r.item.0, r.now.name(), r.why);
     }
     // An auto-observe item a killed process left after its last check and before its
     // acceptance is settled now, not left for the owner for ever.
     for (id, got) in core.settle_stranded_auto_observe().map_err(err)? {
+        acted = true;
         match got {
             Acceptance::Accepted { by } => println!("item {} accepted by {by}", id.0),
             Acceptance::Refused(why) => {
@@ -543,6 +903,7 @@ fn run_due(core: &Core) -> Out {
         }
     }
     for f in core.fire_due().map_err(err)? {
+        acted = true;
         println!(
             "routine {}: item {} missed {} skipped_open {}",
             f.routine.0,
@@ -562,6 +923,7 @@ fn run_due(core: &Core) -> Out {
         todo.push((id, routine, false));
     }
     for (id, routine, fresh) in todo {
+        acted = true;
         if fresh {
             match core.start(&runner, id) {
                 Ok(()) => {}
@@ -616,6 +978,19 @@ fn run_due(core: &Core) -> Out {
             }
         }
     }
+    Ok(acted)
+}
+
+/// `run-due` as a command: what `run_due` printed, or one line saying why it printed nothing.
+fn run_due_command(core: &Core) -> Out {
+    if !run_due(core)? {
+        let n = core.store().routines().map_err(err)?.len();
+        if n == 0 {
+            println!("no routines: a goal needs a routine to make items");
+        } else {
+            println!("nothing due ({n} routine{})", if n == 1 { "" } else { "s" });
+        }
+    }
     Ok(())
 }
 
@@ -635,7 +1010,7 @@ fn serve(core: &Core, w: &[String]) -> Out {
     let mut paused = false;
     while !stop.load(Ordering::Relaxed) {
         match run_due(core) {
-            Ok(()) => paused = false,
+            Ok(_) => paused = false,
             Err(Fail::Refused(why)) => {
                 if !paused {
                     println!("{why}");
@@ -653,8 +1028,11 @@ fn serve(core: &Core, w: &[String]) -> Out {
     Ok(())
 }
 
-fn status(core: &Core) -> Out {
-    print!("{}", core.status_text(15).map_err(err)?);
+fn status(core: &Core, short: bool) -> Out {
+    print!(
+        "{}",
+        core.status_text(if short { 0 } else { 15 }).map_err(err)?
+    );
     println!("\nROUTINES");
     for r in core.store().routines().map_err(err)? {
         println!(
@@ -837,47 +1215,103 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
         (Some("routine"), Some("add")) => routine_add(core, &auth.prove(core)?, s, w),
         (Some("routine"), Some("resume")) => {
             let id = RoutineId(num(w.get(2).map_or("", String::as_str), "routine id")?);
-            core.resume_routine(&auth.prove(core)?, id).map_err(err)?;
+            let proof = auth.prove(core)?;
+            need_routine(core, id)?;
+            core.resume_routine(&proof, id).map_err(err)?;
             println!("routine {} resumed", id.0);
             Ok(())
         }
         (Some("git-task"), _) => git_task(core, &auth.prove(core)?, w),
         (Some("publish"), _) => {
             // Publishing is refused by authority: there is no row, and the call is outward-reversible.
-            let it = core.store().item(item(1)?).map_err(err)?;
+            // Always exit 2, also for an item that does not exist (the refusal does not depend on it).
+            let id = item(1)?;
+            if need_item(core, id).is_err() {
+                return Err(Fail::Refused(format!(
+                    "refused: nothing here publishes (and there is no item {})",
+                    id.0
+                )));
+            }
+            let it = core.store().item(id).map_err(err)?;
             let job = it.subject.unwrap_or_default();
-            match core.call(
-                &core.capability_actor("publish-request").map_err(err)?,
-                it.id,
-                "git.publish",
-                &job,
-            ).map_err(err)? {
-                Outcome::Refused(why) => Err(Fail::Refused(format!("refused: {}", why.said()))),
-                other => Err(Fail::Refused(format!("refused: publishing is not enabled ({other:?})"))),
+            match core
+                .call(
+                    &core.capability_actor("publish-request").map_err(err)?,
+                    it.id,
+                    "git.publish",
+                    &job,
+                )
+                .map_err(err)?
+            {
+                // `said()` already starts with `refused:`.
+                Outcome::Refused(why) => Err(Fail::Refused(why.said().to_owned())),
+                other => Err(Fail::Refused(format!(
+                    "refused: publishing is not enabled ({other:?})"
+                ))),
             }
         }
-        (Some("run-due"), _) => run_due(core),
+        (Some("run-due"), _) => run_due_command(core),
         (Some("serve"), _) => serve(core, w),
-        (Some("status"), _) => status(core),
-        (Some("accept"), _) => match core.accept(&auth.prove(core)?, item(1)?).map_err(err)? {
-            Acceptance::Accepted { by } => {
-                println!("item {} accepted by {by}", w[1]);
-                Ok(())
+        (Some("status"), _) => status(core, w.iter().any(|x| x == "--short")),
+        (Some("accept"), _) => {
+            let proof = auth.prove(core)?;
+            let id = item(1)?;
+            let state = need_item(core, id)?;
+            match core
+                .accept(&proof, id)
+                .map_err(|e| refused_move(core, id, e, "accept"))?
+            {
+                Acceptance::Accepted { by } => {
+                    println!("item {} accepted by {by}", w[1]);
+                    Ok(())
+                }
+                // Still exit 2 (an owner accept refused by the rules); the item's own state is said.
+                Acceptance::Refused(_) if state == ItemState::Done => Err(Fail::Refused(format!(
+                    "refused: item {} is already done",
+                    id.0
+                ))),
+                Acceptance::Refused(_) if state != ItemState::Running => {
+                    Err(Fail::Refused(format!(
+                        "refused: item {} is {}, not running: only a running item can be accepted",
+                        id.0,
+                        state.name()
+                    )))
+                }
+                Acceptance::Refused(why) => Err(Fail::Refused(why.said().into())),
             }
-            Acceptance::Refused(why) => Err(Fail::Refused(why.said().into())),
-        },
+        }
         (Some("decline"), _) => {
-            core.decline(&auth.prove(core)?, item(1)?, "declined by the owner")
-                .map_err(err)?;
+            let proof = auth.prove(core)?;
+            let id = item(1)?;
+            need_item(core, id)?;
+            core.decline(&proof, id, "declined by the owner")
+                .map_err(|e| refused_move(core, id, e, "decline"))?;
             println!("item {} declined", w[1]);
             Ok(())
         }
         (Some("confirm-criterion"), _) | (Some("confirm"), _) => {
             if w[0] == "confirm" {
-                eprintln!("warning: `confirm` is deprecated and will be removed in the next release: use `confirm-criterion` (it confirms a criterion of an item, never a call)");
+                eprintln!(
+                    "warning: `confirm` is deprecated and will be removed in the next release: use `confirm-criterion` (it confirms a criterion of an item, never a call)"
+                );
             }
-            let n = usize::try_from(num(w.get(2).map_or("", String::as_str), "criterion number")?).map_err(err)?;
-            core.confirm_criterion(&auth.prove(core)?, item(1)?, n.saturating_sub(1)).map_err(err)?;
+            let n = num(w.get(2).map_or("", String::as_str), "criterion number")?;
+            let proof = auth.prove(core)?;
+            let id = item(1)?;
+            need_item(core, id)?;
+            let have = core.store().criteria(id).map_err(err)?.len();
+            let n = usize::try_from(n).ok().filter(|n| *n >= 1).ok_or_else(|| {
+                Fail::Error(format!("criterion {n}: criteria are numbered from 1"))
+            })?;
+            if n > have {
+                return Err(Fail::Error(format!(
+                    "item {} has {have} {}: there is no criterion {n}",
+                    id.0,
+                    if have == 1 { "criterion" } else { "criteria" }
+                )));
+            }
+            core.confirm_criterion(&proof, id, n - 1)
+                .map_err(|e| refused_move(core, id, e, "confirm"))?;
             println!("criterion {n} of item {} confirmed", w[1]);
             Ok(())
         }
@@ -898,12 +1332,16 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             // The amount is in micro-USD (1 USD = 1,000,000).
             let micros = u64::try_from(num(w.get(1).map_or("", String::as_str), "micro-USD")?)
                 .map_err(|_| Fail::Error("micro-USD must not be negative".into()))?;
-            core.set_overall_cap(&auth.prove(core)?, micros).map_err(err)?;
+            core.set_overall_cap(&auth.prove(core)?, micros)
+                .map_err(err)?;
             println!("overall cap {micros} micro-USD");
             Ok(())
         }
         (Some("resume-goal"), _) => {
-            core.resume_goal(&auth.prove(core)?, GoalId(num(w.get(1).map_or("", String::as_str), "goal id")?)).map_err(err)?;
+            let goal = GoalId(num(w.get(1).map_or("", String::as_str), "goal id")?);
+            let proof = auth.prove(core)?;
+            need_goal(core, goal)?;
+            core.resume_goal(&proof, goal).map_err(err)?;
             println!("goal {} resumed", w[1]);
             Ok(())
         }
@@ -926,29 +1364,80 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             }
         }
         (Some("evidence"), _) => {
-            for e in core.store().evidence_for(ItemId(num(need(w, "--item")?, "--item")?)).map_err(err)? {
-                println!("e{} t={} {} {} {} {} {}{}{}:\n{}", e.id, e.at_ms, e.actor, e.call, e.band.name(), if e.allowed { "allow" } else { "DENY" }, e.kind.name(), if e.cost_micros > 0 { format!(" cost={} micro-USD", e.cost_micros) } else { String::new() }, e.profile.as_ref().map_or_else(String::new, |p| format!(" profile={p}")), e.output);
+            let id = ItemId(num(need(w, "--item")?, "--item")?);
+            need_item(core, id)?;
+            let rows = core.store().evidence_for(id).map_err(err)?;
+            if rows.is_empty() {
+                println!("item {} has no evidence yet", id.0);
+            }
+            for e in rows {
+                println!(
+                    "e{} t={} {} {} {} {} {}{}{}:\n{}",
+                    e.id,
+                    e.at_ms,
+                    e.actor,
+                    e.call,
+                    e.band.name(),
+                    if e.allowed { "allow" } else { "DENY" },
+                    e.kind.name(),
+                    if e.cost_micros > 0 {
+                        format!(" cost={} micro-USD", e.cost_micros)
+                    } else {
+                        String::new()
+                    },
+                    e.profile
+                        .as_ref()
+                        .map_or_else(String::new, |p| format!(" profile={p}")),
+                    e.output
+                );
             }
             Ok(())
         }
         (Some("backup"), _) => {
             let to = PathBuf::from(need(w, "--to")?);
             endora_persistence::snapshot(db, &to).map_err(err)?;
-            println!("backup written to {} (restore: point --db at it)", to.display());
+            println!(
+                "backup written to {} (restore: point --db at it)",
+                to.display()
+            );
             Ok(())
         }
         (Some("capabilities"), _) => {
             for sp in core.specs() {
-                println!("{} band={} tier={:?} max_cost={} micro-USD in: {} out: {}", sp.name, sp.effective_band().name(), sp.tier, sp.max_cost_micros, sp.input, sp.output);
+                println!(
+                    "{} band={} tier={:?} max_cost={} micro-USD in: {} out: {}",
+                    sp.name,
+                    sp.effective_band().name(),
+                    sp.tier,
+                    sp.max_cost_micros,
+                    sp.input,
+                    sp.output
+                );
             }
             Ok(())
         }
-        _ => Err(Fail::Error("usage: endora-foundation [--db F] [--config F] goal add|routine add|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them)".into())),
+        _ => Err(Fail::Error(USAGE_LINE.into())),
     }
 }
 
 fn run() -> Out {
-    let a = parse_args();
+    let a = parse_args()?;
+    if matches!(
+        a.words.first().map(String::as_str),
+        Some("--version" | "-V")
+    ) && a.words.len() == 1
+    {
+        println!(
+            "endora-foundation {} (schema {})",
+            env!("CARGO_PKG_VERSION"),
+            endora_foundation::infrastructure::SCHEMA_VERSION
+        );
+        return Ok(());
+    }
+    if check_words(&a.words)? {
+        print!("{HELP}");
+        return Ok(());
+    }
     let db =
         a.db.or_else(|| std::env::var_os("ENDORA_FOUNDATION_DB").map(PathBuf::from))
             .ok_or_else(|| {
