@@ -59,7 +59,9 @@ stage and does not yet have a dedicated contact address, reporters may contact a
 current maintainer directly (see [GOVERNANCE.md](GOVERNANCE.md) for who
 maintainers are and how to reach them). A dedicated conduct contact will be
 published as the project grows; until then, please avoid disclosing conduct
-concerns in public issues.
+concerns in public issues. There is no private channel set up yet: if the maintainer's GitHub profile
+offers none, open a public issue titled "conduct contact request" that contains **no details** and ask for a
+private channel.
 
 All complaints will be reviewed and investigated promptly and fairly. All
 maintainers are obligated to respect the privacy and security of the reporter of

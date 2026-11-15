@@ -510,6 +510,7 @@ docs/hosting.md
 docs/install.md
 docs/legacy/README-HQ.md
 docs/legacy/README.md
+docs/legacy/SECURITY-HQ.md
 docs/model-hosting.md
 docs/patterns.md
 docs/plans/always-on-butler.md

@@ -4,6 +4,12 @@
 > suited to a project that does not yet have a contributor community. It will
 > grow only as real needs appear — not before.
 
+> Note (15 Nov 2026): the [Constitution](docs/constitution.md) named below is the HQ-era statement of
+> principles and is labelled LEGACY; it is kept as background. The current statement of the architecture
+> is [docs/architecture.md](docs/architecture.md) and
+> [ADR 0150](docs/adr/0150-current-architecture-the-foundation.md). The security reporting route is in
+> [SECURITY.md](SECURITY.md).
+
 ## Principles
 
 - Governance should be as light as possible while protecting the project's

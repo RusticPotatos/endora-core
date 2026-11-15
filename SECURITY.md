@@ -1,88 +1,91 @@
-# Security Policy
+Status: CURRENT · the security policy of the foundation (Core, its capabilities, the confinement, the `endora-foundation` command); the earlier HQ node's policy is in docs/legacy/SECURITY-HQ.md
 
-Security is a core design goal of Endora: deterministic policy — not a language
-model — is the enforcement boundary for consequential actions. We take reports
-seriously and appreciate coordinated, responsible disclosure.
+# Security policy
+
+This policy covers the **foundation**: Core, its capabilities and the `endora-foundation` command line.
+What the foundation's security rests on, and where it is known to be weak, is written down in
+[docs/foundation/TRUST-BOUNDARY.md](docs/foundation/TRUST-BOUNDARY.md); what spend limits really hold is
+in [docs/trust-and-spend.md](docs/trust-and-spend.md). Read both before reporting: a gap listed there is
+already known, though a way to make it worse than described is a finding.
 
 ## Supported versions
 
-Endora is **pre-1.0** and in a foundation phase. Only the latest `0.x` release
-and the active branches receive security attention.
+**There are no releases of the foundation yet.** The version number in the workspace manifest is a label
+inherited from the earlier HQ product, not a release of the foundation. Only the current head of the
+foundation branch receives security attention (today the branch `docs/developer-docs-v1`; `main` once the
+foundation is merged into it). Fixes land on that head; nothing is backported, and there is no long-term
+support window. Interfaces are rated FROZEN or EXPERIMENTAL in
+[docs/foundation/STABILITY.md](docs/foundation/STABILITY.md); neither rating is a security guarantee.
 
-| Version | Supported |
-| --- | --- |
-| latest `0.1.x` | ✅ security fixes |
-| `main` / `develop` | ✅ best-effort; fixes land here first |
-| `< 0.1.0` (pre-release) | ❌ not supported |
+## What is in scope
 
-Until a `1.0` release there is no long-term support window; upgrade to the latest
-`0.x` to receive fixes.
+A flaw is in scope if it lets something do more than the owner's policy allows, or lets an untrusted
+party read or change what only the owner or Core may. For example:
 
-## Deployment note
+- **The confinement.** An untrusted executor (an agent, a script an agent wrote) that reads the owner
+  token file, opens or writes the database, signals Core, writes outside its job directory, reaches the
+  network from a profile that denies it, or escapes the macOS `sandbox-exec` profile or the Docker
+  container Core builds for it.
+- **Authority.** A call that runs without a policy row, an `irreversible` call that runs, an
+  outward-reversible call that runs without the owner, work that counts as done without an authorized
+  actor's acceptance, an owner command that succeeds without the owner token, or a stop switch that does
+  not stop.
+- **Spend.** A call that is charged less than it cost, a spend cap that is passed without the violation
+  being recorded, or a declared maximum that is not checked before the call. (The dollar cap of the
+  real-executor path is documented as unverified; showing it fail is welcome.)
+- **Evidence.** A change to or removal of an evidence row through the engine that `verify-evidence`
+  does not detect, or evidence that leaks a secret the redaction should have removed.
+- **Secrets.** The owner token or a credential appearing in an argument, an environment value, a log,
+  an evidence row, a job directory or a backup.
+- **The command line and the container recipe** (`deploy/foundation/`): a way to make a flag or a config
+  line do something its page says it cannot.
+- **Memory safety.** `unsafe` code is forbidden in the workspace (a compiler lint); a memory-safety defect
+  anywhere in the foundation crates is high priority.
 
-The node authenticates `/v1` requests with bearer credentials, except the sign-in
-endpoint. Enrollment uses a host-held bootstrap token; normal sign-in requires a
-password and authenticator code and creates a 30-day full session. Checking
-sessions permit reads but exclude bulk export and all writes. The console assets
-and health endpoint are public. Missing accepted credentials fail closed.
+## What is not in scope
 
-The node remains a local-first, single-user service. Keep it on loopback or a
-private network. Containers listen on all interfaces internally; publish only to
-the intended host interface. Use verified HTTPS or a private encrypted overlay
-for credentials in transit. HTTP on a trusted LAN does not encrypt them.
+- **The earlier HQ product** (the node, the console, the team, sound and mail code under `app/node`,
+  `app/hq`, `domains/team`, `domains/platform`, `domains/capabilities` and their neighbours) is
+  **LEGACY and unsupported**. It is kept in the tree as history. Reports about it will be read but not
+  fixed; do not run it on anything you care about. Its old policy is in
+  [docs/legacy/SECURITY-HQ.md](docs/legacy/SECURITY-HQ.md).
+- An **unconfined process of the same user** reading the owner token file or editing the database. This is
+  the stated boundary, not a bug: the foundation protects against untrusted executors that are confined,
+  not against code you run unconfined as yourself.
+- A **compromised host, physical access, or whoever may talk to the Docker daemon** (the daemon is root).
+- Behaviour already listed as a **known gap** in the trust-boundary page, unless you show it is worse than
+  described.
+- Vulnerabilities in a third-party dependency with no effect on the foundation. Please still tell us.
+- Missing hardening with no demonstrated effect.
 
-Dashboard integrations keep upstream keys on the node. Their fixed-route readers
-are not model tools. See [home-lab setup](docs/homelab.md) for Docker's restricted
-proxy; access to the raw Docker daemon is privileged host access.
+## How to report
 
-For running the node always-on and reaching it securely from other devices — a
-private overlay network (e.g. Tailscale/WireGuard) or an authenticating reverse
-proxy — see the [hosting guide](docs/hosting.md).
+Please do **not** put vulnerability details in a public issue, and do not disclose them publicly before
+the maintainer has had time to fix them.
 
-## Reporting a vulnerability
+GitHub's private vulnerability reporting is the intended route:
 
-**Please do not open a public issue for security vulnerabilities**, and please do
-not disclose them publicly before we have had a chance to coordinate a fix.
+- Use the repository **Security** tab's **"Report a vulnerability"** if it is offered.
+- If it is not offered, open a public issue titled **"security contact request"** that contains **no
+  details at all** (no description, no component, no proof of concept) and ask for a private channel. The
+  maintainer will answer there and move the conversation off the public page.
 
-Report privately using **GitHub Security Advisories**:
+A useful report contains:
 
-1. Go to the repository's **Security** tab → **Report a vulnerability** (GitHub's
-   private vulnerability reporting).
-2. Include: a description, affected component/version or commit, reproduction
-   steps or a proof of concept, impact, and any suggested remediation.
+1. what you found, in a sentence;
+2. the commit or branch and the platform (macOS version, Linux distribution, Docker version) you tested;
+3. the exact steps or a minimal script that reproduces it, and what you expected and saw;
+4. the effect: what an attacker gains, and what they already need (a local account, a confined agent,
+   network access);
+5. whether it touches the owner token, the database, the evidence chain or spend;
+6. a suggested fix, if you have one (optional).
 
-We will acknowledge your report, work with you on assessment and a fix, and
-coordinate disclosure timing with you. Please give us reasonable time to remediate
-before any public disclosure.
+Do not include real secrets, tokens or personal data; a placeholder is enough.
 
-## Scope
+## What the project does not promise
 
-Security-relevant issues include, but are not limited to:
-
-- **Permission bypass** — any path that performs a consequential action without
-  the required authorization, or that circumvents the policy layer.
-- **Model prompt injection that crosses the deterministic boundary** — input that
-  causes a model's proposal to be executed without proper deterministic
-  authorization. (Models propose; policy authorizes — a proposal being *made* is
-  not itself the vulnerability; the boundary being *crossed* is.)
-- **Unsafe capability execution** — a capability doing more than policy
-  authorized, or ignoring reversibility/proportionality constraints.
-- **Data leakage** — exposure of user data to unintended parties, destinations,
-  or logs; violations of the local-first / privacy guarantees.
-- **Cross-user or cross-context memory access** — reading or writing memory that
-  belongs to another user or another bounded context without authorization.
-- **Secret exposure** — leaking credentials, tokens, or keys in code, logs,
-  errors, or artifacts.
-- **Authentication / authorization failures** — flaws in how identity or
-  permissions are established or checked.
-- **Memory corruption** — memory-safety defects (note: `unsafe` is forbidden in
-  the workspace, so these should be rare and are high priority if found).
-
-## Out of scope (generally)
-
-- Vulnerabilities in third-party dependencies with no impact on Endora (please
-  still tell us; we may pursue upstream).
-- Issues that require a fully compromised host or physical access.
-- Missing hardening that has no demonstrated exploit, absent a concrete impact.
-
-When in doubt, report it privately and let us assess.
+This is one maintainer's project. There is **no service-level agreement**: no guaranteed time to
+acknowledge, assess or fix a report. There is **no bug bounty** and no payment of any kind. A report
+will be acknowledged and answered as soon as the maintainer is able, a fix will be made where one is
+warranted, and the reporter will be credited in the change if they wish, and coordinated with on
+disclosure timing. Nothing here is legal advice or a warranty; see the [licence](LICENSE).
