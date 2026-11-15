@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use endora_foundation_git::{
-    Reads, canonical_deny_paths, check_deny_path, check_profile_path, mac_profile,
-    mac_profile_real_agent,
+    Reads, canonical_deny_paths, check_deny_outside_writable, check_deny_path, check_profile_path,
+    mac_profile, mac_profile_real_agent,
 };
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/\
@@ -47,6 +47,16 @@ fn skip(test: &str) -> bool {
         "SKIP {test}: the macOS sandbox profile can only be exercised on macOS (sandbox-exec)"
     );
     true
+}
+
+/// A SKIP that is not about the platform: with `ENDORA_STRICT_TESTS=1` (the gate sets it) the
+/// test fails instead of passing silently.
+fn cannot_run(test: &str, why: &str) {
+    eprintln!("SKIP {test}: {why}");
+    assert!(
+        std::env::var_os("ENDORA_STRICT_TESTS").is_none(),
+        "ENDORA_STRICT_TESTS is set and {test} cannot run: {why}"
+    );
 }
 
 /// A throwaway lab: `<tmp>/sec1-<unique>/job` (the confined job directory) and `.../out` (outside
@@ -564,7 +574,10 @@ fn a_database_typed_by_a_non_canonical_path_is_still_denied_by_name() {
     let share = Path::new("/opt/homebrew/share");
     let probe = share.join(format!("sec1-probe-{}", std::process::id()));
     if std::fs::create_dir(&probe).is_err() {
-        eprintln!("SKIP non-canonical deny paths: /opt/homebrew/share is not writable here");
+        cannot_run(
+            "non-canonical deny paths",
+            "/opt/homebrew/share is not writable here",
+        );
         return;
     }
     let _ = std::fs::remove_dir(&probe);
@@ -640,10 +653,12 @@ fn a_database_typed_by_a_non_canonical_path_is_still_denied_by_name() {
     }
 }
 
-/// The by-name deny is the last rule: a database inside the job directory or inside a named read
-/// directory stays unreadable, while the job can still write and read its own other files.
+/// The by-name deny is the last rule: a database inside a named read directory stays unreadable,
+/// and since that directory is read-only it cannot be renamed away either; the job can still
+/// write and read its own files. (A database inside the job directory is refused at start, see the
+/// next test: a deny cannot hold against a rename where the job may write.)
 #[test]
-fn the_by_name_deny_wins_inside_the_job_and_inside_a_read_directory() {
+fn the_by_name_deny_wins_inside_a_read_directory_and_the_job_keeps_its_files() {
     if skip("deny order") {
         return;
     }
@@ -652,15 +667,13 @@ fn the_by_name_deny_wins_inside_the_job_and_inside_a_read_directory() {
         let (name, _) = profiles(&lab.job).into_iter().nth(pi).unwrap();
         let readdir = lab.root.join("readdir");
         std::fs::create_dir_all(&readdir).unwrap();
-        let job_db = lab.job.join("core.db");
         let read_db = readdir.join("core.db");
         let read_other = readdir.join("other.txt");
-        std::fs::write(&job_db, "dummy").unwrap();
         std::fs::write(&read_db, "dummy").unwrap();
         std::fs::write(&read_other, "dummy-other").unwrap();
         let reads = Reads {
             dirs: vec![readdir.canonicalize().unwrap()],
-            deny: canonical_deny_paths(&[job_db.clone(), read_db.clone()]),
+            deny: canonical_deny_paths(&[read_db.clone()]),
             ..Reads::default()
         };
         let profile = if pi == 0 {
@@ -669,42 +682,174 @@ fn the_by_name_deny_wins_inside_the_job_and_inside_a_read_directory() {
             mac_profile_real_agent(&lab.job, &reads, &[])
         };
         let script = format!(
-            "cat '{j}' > /dev/null 2>&1; echo $? > job.exit\n\
-             cat '{r}' > /dev/null 2>&1; echo $? > read.exit\n\
+            "cat '{r}' > /dev/null 2>&1; echo $? > read.exit\n\
+             mv '{r}' '{d}/moved' > /dev/null 2>&1; echo $? > mv.exit\n\
+             cat '{d}/moved' > /dev/null 2>&1; echo $? > moved.exit\n\
              cat '{o}' > other.txt 2>&1; echo $? > other.exit\n\
              echo mine > own.txt; echo $? > write.exit\n\
              cat own.txt > own.copy 2>&1; echo $? > own.exit\n",
-            j = job_db.display(),
             r = read_db.display(),
+            d = readdir.display(),
             o = read_other.display()
         );
         lab.confined(&profile, &script);
-        let n = |f: &str| std::fs::read_to_string(lab.job.join(f)).unwrap_or_default();
+        let n = |f: &str| {
+            std::fs::read_to_string(lab.job.join(f))
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        };
+        assert_ne!(n("read.exit"), "0", "{name}: the database was readable");
+        assert_ne!(n("mv.exit"), "0", "{name}: the read directory was writable");
         assert_ne!(
-            n("job.exit").trim(),
+            n("moved.exit"),
             "0",
-            "{name}: a database inside the job directory was readable"
-        );
-        assert_ne!(
-            n("read.exit").trim(),
-            "0",
-            "{name}: a database inside a read directory was readable"
+            "{name}: the database was readable after a rename"
         );
         assert_eq!(
-            n("other.exit").trim(),
+            n("other.exit"),
             "0",
             "{name}: another file in the read directory must stay readable"
         );
         assert_eq!(
-            n("write.exit").trim(),
+            n("write.exit"),
             "0",
             "{name}: the job could not write its own file"
         );
         assert_eq!(
-            n("own.exit").trim(),
+            n("own.exit"),
             "0",
             "{name}: the job could not read its own file"
         );
+    }
+}
+
+/// Review round 3, blocker 2: a denied path inside a directory the job may write cannot hold (the
+/// job renames the file, or its parent, to a name that is not denied), so the layout is refused.
+/// The Data-volume prefix does not hide it. A path outside the writable directories is fine.
+#[test]
+fn a_denied_path_inside_the_job_directory_is_refused_not_claimed() {
+    let job = PathBuf::from(JOB);
+    let inside = job.join("data/core.db");
+    let data = |p: &Path| PathBuf::from(format!("/System/Volumes/Data{}", p.display()));
+    for bad in [
+        inside.clone(),
+        job.join("core.db"),
+        data(&inside),
+        job.clone(),
+    ] {
+        let e = check_deny_outside_writable(&[bad.clone()], &[&job]).unwrap_err();
+        assert!(
+            e.contains("refusing to start") && e.contains("rename"),
+            "{bad:?}: {e}"
+        );
+    }
+    assert!(check_deny_outside_writable(&[PathBuf::from("/srv/owner/core.db")], &[&job]).is_ok());
+    assert!(
+        check_deny_outside_writable(&[PathBuf::from("/srv/sandbox-job2/core.db")], &[&job]).is_ok()
+    );
+}
+
+/// Review round 3, blocker 1 (unit): the Data-volume spelling and the plain spelling of a path
+/// both end up denied, with the plain one first when they are the same file; a path with a `..`
+/// segment yields only spellings the profile accepts (finding 3).
+#[test]
+fn both_volume_spellings_are_denied_and_every_spelling_is_acceptable_to_the_profile() {
+    let lab = Lab::new("firm");
+    let db = lab.root.join("core.db");
+    std::fs::write(&db, "dummy").unwrap();
+    let plain = db.canonicalize().unwrap();
+    let data = PathBuf::from(format!("/System/Volumes/Data{}", plain.display()));
+    for typed in [data.clone(), plain.clone()] {
+        let got = canonical_deny_paths(&[typed]);
+        assert_eq!(got[0], plain, "the plain spelling comes first: {got:?}");
+        assert!(
+            got.contains(&data),
+            "the Data-volume spelling is denied too: {got:?}"
+        );
+    }
+    // a file that does not exist yet
+    let new_plain = plain.with_file_name("new.db");
+    let got = canonical_deny_paths(&[PathBuf::from(format!(
+        "/System/Volumes/Data{}",
+        new_plain.display()
+    ))]);
+    assert_eq!(got[0], new_plain, "{got:?}");
+    // an absolute path with `..`, and the profile text carries both spellings and the sidecars
+    let dotdot = PathBuf::from(format!("{}/x/../core.db", lab.root.display()));
+    let got = canonical_deny_paths(&[dotdot]);
+    assert!(got.iter().all(|p| check_deny_path(p).is_ok()), "{got:?}");
+    let p = mac_profile(
+        &lab.job,
+        &Reads {
+            deny: got,
+            ..Reads::default()
+        },
+    );
+    for f in [
+        plain.display().to_string(),
+        format!("{}-wal", data.display()),
+        format!("{}-journal", plain.display()),
+    ] {
+        assert!(p.contains(&format!("(subpath \"{f}\")")), "no deny for {f}");
+    }
+}
+
+/// Review round 3, blocker 1 (real sandbox, both profiles): a file under a readable prefix typed
+/// with the Data-volume prefix is unreadable through the plain spelling and through the prefixed
+/// one. Control: unconfined it reads.
+#[test]
+fn a_database_typed_with_the_data_volume_prefix_is_denied_under_both_spellings() {
+    if skip("data volume spelling") {
+        return;
+    }
+    let share = Path::new("/opt/homebrew/share");
+    let probe = share.join(format!("sec1-probe-firm-{}", std::process::id()));
+    if std::fs::create_dir(&probe).is_err() {
+        cannot_run(
+            "data volume spelling",
+            "/opt/homebrew/share is not writable here",
+        );
+        return;
+    }
+    let _ = std::fs::remove_dir(&probe);
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    for pi in 0..2 {
+        let lab = Lab::new("firmrw");
+        let (name, _) = profiles(&lab.job).into_iter().nth(pi).unwrap();
+        let dir = share.join(format!("sec1-firm-{}", lab.tag));
+        let _clean = Cleanup(dir.clone());
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("core.db");
+        std::fs::write(&db, "dummy").unwrap();
+        let typed = PathBuf::from(format!("/System/Volumes/Data{}", db.display()));
+        let cat = |p: &Path| {
+            format!(
+                "cat '{}' > /dev/null 2>&1; echo $? > got.exit\n",
+                p.display()
+            )
+        };
+        assert_eq!(lab.unconfined(&cat(&db)).0, 0, "control");
+        let reads = Reads {
+            deny: canonical_deny_paths(&[typed.clone()]),
+            ..Reads::default()
+        };
+        let profile = if pi == 0 {
+            mac_profile(&lab.job, &reads)
+        } else {
+            mac_profile_real_agent(&lab.job, &reads, &[])
+        };
+        for (what, p) in [("plain", db.clone()), ("data volume", typed)] {
+            let _ = std::fs::remove_file(lab.job.join("got.exit"));
+            lab.confined(&profile, &cat(&p));
+            let code = std::fs::read_to_string(lab.job.join("got.exit")).unwrap_or_default();
+            assert_ne!(code.trim(), "0", "{name}: the {what} spelling was readable");
+        }
     }
 }
 
@@ -721,7 +866,10 @@ fn a_confined_process_cannot_list_the_owners_shortcuts() {
         let (name, profile) = profiles(&lab.job).into_iter().nth(pi).unwrap();
         let (code, listed) = lab.unconfined("shortcuts list");
         if code != 0 || listed.trim().is_empty() {
-            eprintln!("SKIP shortcuts: `shortcuts list` gives nothing unconfined, nothing to hide");
+            cannot_run(
+                "shortcuts",
+                "`shortcuts list` gives nothing unconfined, nothing to hide",
+            );
             return;
         }
         let (_, confined) = lab.confined(&profile, "shortcuts list 2>/dev/null");

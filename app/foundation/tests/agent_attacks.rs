@@ -331,28 +331,141 @@ fn an_agent_cannot_spoof_the_owner_or_accept_its_own_work() {
 /// data) is unreadable by directory. Needs a writable Homebrew prefix; otherwise it says SKIP.
 #[test]
 fn an_agent_cannot_read_a_database_or_token_kept_under_an_allowed_prefix() {
-    a16(false);
+    a16(Typed::Plain);
 }
 
 /// Review round 2 (R1): the owner reaches the same files through a symlinked directory, so the
 /// path typed on the command line is not the path the sandbox checks.
 #[test]
 fn the_deny_holds_when_the_database_is_reached_through_a_symlinked_directory() {
-    a16(true);
+    a16(Typed::SymlinkedDir);
 }
 
-fn a16(through_link: bool) {
+/// Review round 3: the owner types the Data-volume spelling of the paths; the agent reads the plain
+/// one. The real binary must deny both.
+#[test]
+fn the_deny_holds_when_the_paths_are_typed_with_the_data_volume_prefix() {
+    a16(Typed::DataVolume);
+}
+
+/// Review round 3: an absolute path with a `..` segment (a relative target directory gives one)
+/// must not make the git capability refuse to run, and the token stays unreadable.
+#[test]
+fn a_database_typed_with_a_dot_dot_segment_still_runs_the_task_and_stays_denied() {
+    let lab = Lab::new("dotdot");
+    std::fs::create_dir_all(lab.dir.join("x")).unwrap();
+    std::fs::create_dir_all(lab.dir.join("secret")).unwrap();
+    let token = lab.dir.join("secret/owner.token");
+    let db = PathBuf::from(format!("{}/x/../live.db", lab.dir.display()));
+    let tpl = lab.dir.join("template");
+    std::fs::create_dir_all(&tpl).unwrap();
+    std::fs::write(tpl.join("lib.sh"), "add() { echo $(( $1 - $2 )); }\n").unwrap();
+    std::fs::write(
+        tpl.join("test.sh"),
+        ". ./lib.sh\n[ \"$(add 2 3)\" = 5 ] || { echo FAIL; exit 1; }\necho PASS\n",
+    )
+    .unwrap();
+    let agent = lab.dir.join("agent.sh");
+    std::fs::write(
+        &agent,
+        format!(
+            "printf 'add() {{ echo $(( $1 + $2 )); }}\\n' > lib.sh\n\
+             cat '{}' > t.out 2> t.err; echo $? > t.exit\n",
+            token.display()
+        ),
+    )
+    .unwrap();
+    let cfg = lab.dir.join("foundation.conf");
+    std::fs::write(
+        &cfg,
+        format!(
+            "git {} {} -- sh {}\n",
+            lab.dir.join("scratch").display(),
+            tpl.display(),
+            agent.display()
+        ),
+    )
+    .unwrap();
+    let init = lab.cli(
+        &db,
+        &cfg,
+        None,
+        &["init", "--token-out", token.to_str().unwrap()],
+    );
+    assert_eq!(init.status.code(), Some(0), "{}", text(&init));
+    let g = lab.cli(&db, &cfg, Some(&token), &GOAL);
+    assert_eq!(g.status.code(), Some(0), "{}", text(&g));
+    let t = lab.cli(
+        &db,
+        &cfg,
+        Some(&token),
+        &[
+            "git-task",
+            "--goal",
+            "1",
+            "--repo",
+            tpl.to_str().unwrap(),
+            "--instruction",
+            "fix add",
+            "--test-cmd",
+            "sh test.sh",
+        ],
+    );
+    assert!(
+        !text(&t).contains("not absolute and normalised"),
+        "{}",
+        text(&t)
+    );
+    let job = std::fs::read_dir(lab.dir.join("scratch"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("repo"))
+        .find(|p| p.join("t.exit").exists())
+        .unwrap_or_else(|| panic!("the agent did not run: {}", text(&t)));
+    assert_ne!(read(&job, "t.exit"), "0", "the token was readable");
+}
+
+/// How the owner types the database and token paths in `a16`.
+#[derive(Clone, Copy, PartialEq)]
+enum Typed {
+    Plain,
+    SymlinkedDir,
+    /// With the Data-volume firmlink prefix, which the sandbox does not see in the path.
+    DataVolume,
+}
+
+/// A SKIP is not a pass: with `ENDORA_STRICT_TESTS=1` (the gate sets it) a skipped test fails.
+fn skip(why: &str) {
+    eprintln!("SKIP: {why}");
+    assert!(
+        std::env::var_os("ENDORA_STRICT_TESTS").is_none(),
+        "ENDORA_STRICT_TESTS is set and the test cannot run: {why}"
+    );
+}
+
+fn a16(mode: Typed) {
     let brew = Path::new("/opt/homebrew");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    // A probe name unique to this test: parallel tests must not collide on it.
+    let tag = format!(
+        "{}-{}-{nanos}",
+        std::process::id(),
+        match mode {
+            Typed::Plain => "plain",
+            Typed::SymlinkedDir => "link",
+            Typed::DataVolume => "data",
+        }
+    );
     let writable = |d: &str| {
-        let t = brew
-            .join(d)
-            .join(format!("sec1-probe-{}", std::process::id()));
+        let t = brew.join(d).join(format!("sec1-probe-{tag}"));
         let ok = std::fs::create_dir(&t).is_ok();
         let _ = std::fs::remove_dir(&t);
         ok
     };
     if !writable("share") || !writable("var") {
-        eprintln!("SKIP: no writable /opt/homebrew/share and /opt/homebrew/var on this Mac");
+        skip("no writable /opt/homebrew/share and /opt/homebrew/var on this Mac");
         return;
     }
     struct Cleanup(Vec<PathBuf>);
@@ -363,14 +476,8 @@ fn a16(through_link: bool) {
             }
         }
     }
-    let lab = Lab::new("a16");
-    let tag = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.subsec_nanos())
-    );
+    // A lab directory unique to this test (the tests run in parallel and `Lab::new` clears its path).
+    let lab = Lab::new(&format!("a16-{tag}"));
     let share = brew.join("share").join(format!("sec1-a16-{tag}"));
     let var = brew.join("var").join(format!("sec1-a16-{tag}"));
     let _clean = Cleanup(vec![share.clone(), var.clone()]);
@@ -380,7 +487,15 @@ fn a16(through_link: bool) {
     std::fs::write(var.join("copy.txt"), &canary).unwrap();
     // `db` and `token` are what the owner types (through a link, if asked); the agent is given the
     // real paths.
-    let (db, token, real_db, real_token) = if through_link {
+    let data = |p: &Path| PathBuf::from(format!("/System/Volumes/Data{}", p.display()));
+    let (db, token, real_db, real_token) = if mode == Typed::DataVolume {
+        (
+            data(&share.join("live.db")),
+            data(&share.join("owner.token")),
+            share.join("live.db"),
+            share.join("owner.token"),
+        )
+    } else if mode == Typed::SymlinkedDir {
         let link = lab.dir.join("link");
         std::os::unix::fs::symlink(&share, &link).unwrap();
         (

@@ -53,8 +53,8 @@ pub use claude::{
 use claude::{Report, granted};
 pub use confine::{
     Confinement, DEFAULT_IMAGE, DockerCall, EVIDENCE_CAP, Profile, Reads, SECRET_NAMES,
-    SECRET_PREFIXES, bwrap_args, canonical_deny_paths, cap_text, check_deny_path,
-    check_profile_path, detect, docker_args, mac_profile, mac_profile_can_read,
+    SECRET_PREFIXES, bwrap_args, canonical_deny_paths, cap_text, check_deny_outside_writable,
+    check_deny_path, check_profile_path, detect, docker_args, mac_profile, mac_profile_can_read,
     mac_profile_real_agent, reap_containers, redact,
 };
 use confine::{Job, Ran};

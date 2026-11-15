@@ -31,20 +31,27 @@ contents and listings; metadata such as `stat` stays open):
   `/opt/homebrew/etc` (except the OpenSSL directory above), the home folders (`/Users`), the temporary
   folders (`/private/tmp`, `/tmp`, `/private/var/folders`), `/private/var/root`, `/var/root`, `/Volumes`.
 - Denied by name, in both profiles: the database, its `-journal`, `-wal` and `-shm` files and the owner
-  token file, whenever the command line runs a git capability. The sandbox matches canonical paths, so
-  the command line first makes each of these paths absolute (against the directory it was started in)
-  and canonical (symlinks resolved, `.`, `..` and `//` removed; for a file that does not exist yet, its
-  directory is resolved), denies that canonical path, and also denies the path as typed when it differs
-  (the sidecars are derived from each). The deny is the last rule of the profile, so it also holds for a
-  file inside the job directory or inside a named read directory. A caller that builds a profile itself
-  must pass absolute, normalised paths: the profile builder refuses others. Before 15 Nov 2026 only the
-  real-agent profile did this, only with a `claude-code` line, and with the path as typed; a database or
-  token kept under a readable prefix such as `/usr/local/var` or `/opt/homebrew/share` was readable to a
-  scripted agent (writes stayed denied), and a relative or symlinked spelling of the path never matched.
-  The command line prints a note, using the canonical path, when one of these paths lies under a prefix
-  the profile can read. A hard link or a copy of the database made by someone else is not covered: a
-  confined agent cannot create a hard link to a denied file, but a copy kept under a readable prefix is
-  readable.
+  token file, whenever the command line runs a git capability. The sandbox matches the path it is given,
+  so the command line first makes each of these paths absolute (against the directory it was started in)
+  and canonical (symlinks resolved; `.`, `..` and `//` removed; for a file that does not exist yet, its
+  directory is resolved), and denies it in **both** spellings of the macOS Data volume: the plain path
+  (`/opt/...`) and the one with the `/System/Volumes/Data` prefix, which are the same file. The plain
+  spelling comes first; the path as typed and the lexical path are added only when they are absolute and
+  normalised (a spelling with a `..` segment is dropped; the canonical one covers it). The sidecar names
+  are derived from every spelling. The deny is the last rule of the profile, so it also holds for a file
+  inside a named read directory (read-only: nothing can rename it away). It does **not** hold inside a
+  directory the job may write, because the job can rename the file, or a parent directory of it, to a name
+  that is not denied; so the profile refuses to start a confined job when a denied path lies inside the job
+  directory (the only directory the profile lets the job write; the check ignores the Data-volume prefix).
+  The command line cannot produce that layout today, because job directories are fresh. A caller that
+  builds a profile itself must pass absolute, normalised paths: `run` refuses others. Before 15 Nov 2026
+  only the real-agent profile did this, only with a `claude-code` line, and with the path as typed; a
+  database or token kept under a readable prefix such as `/usr/local/var` or `/opt/homebrew/share` was
+  readable to a scripted agent (writes stayed denied), and a relative, symlinked or Data-volume spelling of
+  the path never matched. The command line prints a note, using the plain canonical path, when one of these
+  paths lies under a prefix the profile can read. A hard link or a copy of the database made by someone
+  else is not covered: a confined agent cannot create a hard link to a denied file, but a copy kept under a
+  readable prefix is readable.
 - Still readable: everything else under the readable prefixes (for example `/usr/local/bin` and the rest
   of `/usr`, `/Library` outside the denied directories, `/opt/homebrew/share`). A backup or other copy
   of the database kept there is readable to a confined agent: keep copies under the home folder or a
@@ -88,10 +95,10 @@ They are **defence in depth against mistakes by trusted code**, not a boundary. 
   process already holds); the profile denies running `/bin/launchctl`, which is a speed bump only, not
   a boundary. Mitigation: never put a secret in the environment of a launch agent or of an app started
   by launchd, and restart long-lived apps that hold one from a clean environment. The real fix belongs
-  with the allow-list rebuild. The longer-term fix is
-  to rebuild the profile from `(deny default)` with an allow-list (exec, the system read paths, the job
-  directory); that is not done. The preference and pasteboard denials were not tried with a real
-  Claude Code CLI.
+  with the allow-list rebuild.
+- **The longer-term fix is to rebuild the profile from `(deny default)`** with an allow-list (exec, the
+  system read paths, the job directory); that is not done. The preference and pasteboard denials were not
+  tried with a real Claude Code CLI.
 - **macOS backend limits (found by the same review, not fixed):** a child that calls `setsid` leaves
   the process group and survives the group kill (it stays confined, but outlives the call); killing
   Core outright does not stop the agent; there is no limit on disk written or on process count. The

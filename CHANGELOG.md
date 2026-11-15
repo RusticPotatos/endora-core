@@ -55,6 +55,11 @@ flags are ignored; a goal or routine cannot be retired and a lost owner token ca
 
 ### Security (macOS sandbox profile)
 
+- **Round 3 of the independent review.** The by-name deny now covers both spellings of the Data volume
+  (`/System/Volumes/Data/...` and the plain path), spellings the profile cannot match (a `..` segment) no longer make
+  every git task fail, and a database or token inside the job directory is refused at start instead of claimed
+  denied (the job can rename it).
+
 - **Round 2 of the independent review of the above.** The by-name deny is built from the canonical path (relative,
   `.`/`..`/`//` and symlinked spellings did not match before), is the last rule of the profile, and the Shortcuts service is
   denied. `launchctl print` still shows other launchd jobs' environment variables: documented as an open route.

@@ -283,6 +283,44 @@ fn deny_by_name(paths: &[PathBuf]) -> String {
     out
 }
 
+/// The macOS Data volume's firmlink prefix: a path and the same path with this prefix in front are
+/// the same file, and the sandbox checks the path it is given, so both spellings must be denied.
+const DATA_VOLUME: &str = "/System/Volumes/Data";
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    // Compare the nearest existing ancestors (the tails are the same names).
+    let (mut a, mut b) = (a.to_path_buf(), b.to_path_buf());
+    while !a.exists() || !b.exists() {
+        if !a.pop() || !b.pop() {
+            return false;
+        }
+    }
+    match (a.metadata(), b.metadata()) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        _ => false,
+    }
+}
+
+/// `p` in both spellings: the plain one (without the Data-volume prefix) first when it is the same
+/// file as the prefixed one, then the other. A path that is not on the Data volume gets the
+/// prefixed spelling added (denying a spelling that does not exist is harmless).
+fn both_volume_spellings(p: &Path) -> Vec<PathBuf> {
+    if let Ok(rest) = p.strip_prefix(DATA_VOLUME) {
+        let plain = Path::new("/").join(rest);
+        if rest.as_os_str().is_empty() {
+            return vec![p.to_path_buf()];
+        }
+        return if same_file(&plain, p) {
+            vec![plain, p.to_path_buf()]
+        } else {
+            vec![p.to_path_buf(), plain]
+        };
+    }
+    let data = Path::new(DATA_VOLUME).join(p.strip_prefix("/").unwrap_or(p));
+    vec![p.to_path_buf(), data]
+}
+
 /// Every spelling of each path that the sandbox could be asked to open it by: the canonical path
 /// first (absolute, symlinks resolved, `.`, `..` and `//` gone; a file that does not exist yet
 /// gets its nearest existing ancestor canonicalised), then the lexical absolute path and the path
@@ -333,12 +371,19 @@ pub fn canonical_deny_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
                 _ => break None,
             }
         };
-        if let Some(c) = canonical {
-            add(c);
-        }
-        add(lex);
+        let mut candidates: Vec<PathBuf> = canonical.into_iter().collect();
+        candidates.push(lex);
         if typed.is_absolute() {
-            add(typed.clone());
+            candidates.push(typed.clone());
+        }
+        for c in candidates {
+            // A spelling the profile could not match (a `..` segment, say) is dropped: the
+            // canonical one covers it.
+            for spelling in both_volume_spellings(&c) {
+                if check_deny_path(&spelling).is_ok() {
+                    add(spelling);
+                }
+            }
         }
     }
     out
@@ -364,6 +409,34 @@ pub fn check_deny_path(p: &Path) -> Result<(), String> {
             p.display()
         ))
     }
+}
+
+/// Refuses a layout where a by-name deny cannot hold: a denied path inside a directory the job may
+/// write. The profile denies reading only, so an agent that may write in that directory can rename
+/// the file, or a parent directory of it, to a name that is not denied and read it there. Fail
+/// closed instead of claiming a deny. The Data-volume prefix is ignored when comparing.
+///
+/// # Errors
+/// Names the denied path and the writable directory.
+pub fn check_deny_outside_writable(deny: &[PathBuf], writable: &[&Path]) -> Result<(), String> {
+    let plain = |p: &Path| -> PathBuf {
+        p.strip_prefix(DATA_VOLUME)
+            .map_or_else(|_| p.to_path_buf(), |r| Path::new("/").join(r))
+    };
+    for d in deny {
+        for w in writable {
+            if plain(d).starts_with(plain(w)) {
+                return Err(format!(
+                    "refusing to start: the denied path {} lies inside {}, where the job may write; \
+                     a denied name cannot hold against a rename, so keep the database and the token \
+                     outside every job directory",
+                    d.display(),
+                    w.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Rejects a path the macOS profile cannot carry safely: not UTF-8, or holding a control
@@ -450,7 +523,9 @@ pub fn mac_profile(dir: &Path, reads: &Reads) -> String {
     }
     p.push(')');
     // Last of all (the last matching rule wins): the owner's database and token stay denied even
-    // when they lie inside the job directory or a named read directory.
+    // when they lie inside a named read directory (read-only, so nothing can rename them away).
+    // NOT inside the job directory: the job may write there and could rename the file or its parent
+    // out of the denied name; `run` refuses that layout (`check_deny_outside_writable`).
     p.push_str(&deny_by_name(&reads.deny));
     p
 }
@@ -511,7 +586,9 @@ pub fn mac_profile_real_agent(dir: &Path, reads: &Reads, deny: &[PathBuf]) -> St
     }
     p.push(')');
     // Last of all (the last matching rule wins): the owner's database and token stay denied even
-    // when they lie inside the job directory or a named read directory.
+    // when they lie inside a named read directory (read-only, so nothing can rename them away).
+    // NOT inside the job directory: the job may write there and could rename the file or its parent
+    // out of the denied name; `run` refuses that layout (`check_deny_outside_writable`).
     p.push_str(&deny_by_name(&reads.deny));
     p
 }
@@ -1144,6 +1221,8 @@ pub fn run(j: &Job<'_>) -> Result<Ran, String> {
             for p in j.reads.deny.iter().chain(named) {
                 check_deny_path(p)?;
             }
+            let denied: Vec<PathBuf> = j.reads.deny.iter().chain(named).cloned().collect();
+            check_deny_outside_writable(&denied, &[j.dir, j.cwd])?;
             let mut c = Command::new("sandbox-exec");
             let profile = match j.profile {
                 Profile::Scripted => mac_profile(j.dir, j.reads),
@@ -1210,6 +1289,36 @@ pub fn run(j: &Job<'_>) -> Result<Ran, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A denied path inside the job directory is refused before anything starts (a by-name deny
+    /// cannot hold against a rename where the job may write).
+    #[test]
+    fn run_refuses_a_denied_path_inside_the_job_directory() {
+        let dir = Path::new("/srv/sandbox-job");
+        let reads = Reads {
+            deny: vec![dir.join("data/core.db")],
+            ..Reads::default()
+        };
+        let j = Job {
+            confinement: Confinement::MacSandbox,
+            dir,
+            cwd: dir,
+            argv: &["true".into()],
+            env: &[],
+            reads: &reads,
+            logs: (dir, dir),
+            limit: Duration::from_secs(1),
+            image: "",
+            records: dir,
+            unavailable: "",
+            profile: &Profile::Scripted,
+        };
+        let e = run(&j).err().expect("refused");
+        assert!(
+            e.contains("refusing to start") && e.contains("rename"),
+            "{e}"
+        );
+    }
 
     fn has_pair(a: &[String], x: &str, y: &str) -> bool {
         a.windows(2).any(|w| w[0] == x && w[1] == y)
