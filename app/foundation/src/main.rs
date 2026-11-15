@@ -150,7 +150,17 @@ fn read_config(path: &Path) -> Result<Settings, String> {
                         max_turns: turns,
                     },
                     t.get(5)
-                        .map(|v| v.parse().map_err(|_| at("max-seconds must be a number")))
+                        .map(|v| {
+                            let n: u64 = v.parse().map_err(|_| at("max-seconds must be a number"))?;
+                            // The same bound as `--every`: the Docker backend adds a second to it.
+                            if (1..=MOST_SECONDS as u64).contains(&n) {
+                                Ok(n)
+                            } else {
+                                Err(at(&format!(
+                                    "max-seconds must be between 1 and {MOST_SECONDS} seconds (366 days), not {n}"
+                                )))
+                            }
+                        })
                         .transpose()?
                         .map(Duration::from_secs),
                 ));
@@ -171,8 +181,9 @@ struct Args {
     token_file: Option<PathBuf>,
     token_out: Option<PathBuf>,
     /// The first thing wrong with the arguments themselves (a global option without its value or
-    /// given twice, an argument that is not UTF-8). Reported after help and version, which must
-    /// work whatever else is on the line.
+    /// given twice, an argument that is not UTF-8). Reported after help and version: `--help`
+    /// (`-h`) is honoured even with such a problem on the line (see `wants_help`), `--version`
+    /// only as the sole word.
     problem: Option<String>,
 }
 
@@ -1639,6 +1650,8 @@ fn main() {
         if let Err(Fail::Refused(_)) = result {
             // The refusal is still the answer (exit 2): authority comes before the output.
         } else {
+            // The change, if there was one, is already committed: say so (stderr may be closed too).
+            eprintln!("output closed: the change may have been applied");
             exit(1);
         }
     }

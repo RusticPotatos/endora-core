@@ -98,6 +98,14 @@ Found by an independent review of 15 Nov 2026 and checked here. The recovery and
   Core; the fix is planned (CORE-2).
 - **Core itself still lets `confirm-criterion` change a finished item**; the command line refuses it, a racing
   process or a program using Core directly is not stopped (CORE-2).
+- **A closed stdout after a change exits 1 although the change was applied.** If stdout is closed before the
+  command prints its result (`... | head -0`), the change may already be committed and the exit code is 1
+  (a line on stderr says `output closed: the change may have been applied`). Check with `status` before retrying;
+  do not script a blind retry of `goal add`.
+- **A malformed or out of range number still creates an empty database file** if the path did not exist
+  (`publish abc`, `overall-cap -1`, `serve --every 0`): the shape of the command line and the config file are
+  checked before the database is opened, the values after it (details in the command line section of
+  [foundation/README.md](foundation/README.md)).
 - **`--db x.db/` (a trailing slash) creates `x.db` with mode 644**, not 600 as for `--db x.db`. Write the path without the slash.
 - **A 254-character database file name** exits 1 (`unable to open database file`) and leaves a 0-byte file of that name behind.
 - **`scripts/gate.sh` starts by running `scripts/prune-builds.sh 15 "$HOME/repos"`**, which deletes the least recently used `target/` build folders of the worktrees under that folder (it keeps 15). Read it before running the gate on a machine with other work there.

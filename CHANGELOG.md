@@ -65,17 +65,22 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
 ### Added and changed (the command line, round 2 of the review of the changes above)
 
 - **Fixed (pre-existing panics):** an argument that is not UTF-8 panicked (exit 101), even with `--help`; it is now refused
-  with exit 1 (`argument N is not valid UTF-8`), and `--help` and `--version` work whatever else is on the line.
+  with exit 1 (`argument N is not valid UTF-8`), and `--help` (`-h`) is honoured anywhere after a known command, even beside a non-UTF-8 word, while `--version` works only as the sole word (`--version status` is an unknown command, exit 1).
   `serve --every <huge>` panicked on an overflow; `--every` of `serve` and `routine add` must now be 1 to 31,622,400
   seconds (366 days, the engine's own limit; a longer rhythm was already refused by Core). Writing to a closed stdout
-  (`... | head -0`) panicked; it now ends the run with exit 1 and no message.
+  (`... | head -0`) panicked; it now ends the run with exit 1. If stdout is closed before the command prints its result, the command's change may already be committed and the exit code is 1: check with `status` before retrying, and do not script a blind retry of `goal add`.
 - **Changed (hardening, same family as above):** a missing argument says `missing ITEM for accept` and opens no database; a
   repeated option (`--title A --title B`, `--db a --db b`) is refused (`given twice`; `--criteria`, `--check` and `--probe`
   of `goal add` may repeat); `--token-out` outside `init` is refused; `bogus --help` is an unknown command, not help;
   `confirm-criterion` on a `done` or `failed` item is refused (`item N is already failed: its criteria cannot be changed`);
   success lines name the parsed id (`item 1`, not `+1`); `--max-failures` too large says so; `run-due` with nothing due also
   names paused routines and items waiting for the owner; `status --short` has no empty evidence header.
-- **Known issues (not fixed here):** a database row with an unreadable item state is shown as `failed` by `status` and
+- **Changed (found in the re-check):** `max-seconds` of a `claude-code` config line must be 1 to 31,622,400 seconds
+  (it was unbounded, and the Docker backend adds a second to it); a closed stdout now also writes
+  `output closed: the change may have been applied` to stderr before exit 1.
+- **Known issues (not fixed here):** a malformed or out of range number or id (`publish abc`, `overall-cap -1`,
+  `serve --every 0`) is still checked after the database is opened, so it creates an empty database file when the path
+  did not exist; a database row with an unreadable item state is shown as `failed` by `status` and
   `accept` (root cause in the Core reader; `verify-evidence` is the integrity check; fix planned CORE-2). Core itself still
   lets `confirm-criterion` change a finished item (the command line now refuses). The two `*-status` helper binaries create
   or migrate a database and print a subset of `status`; the README now says so.

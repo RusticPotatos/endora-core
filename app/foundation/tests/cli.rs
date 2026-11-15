@@ -1780,6 +1780,102 @@ fn confirm_on_a_finished_item_is_refused_and_real_corruption_still_says_corrupti
 }
 
 #[test]
+fn claude_max_seconds_is_bounded_and_help_and_version_claims_are_exact() {
+    let lab = Lab::new("maxsec");
+    let db = lab.dir.join("never.db");
+    for (v, ok) in [
+        ("18446744073709551615", false),
+        ("31622401", false),
+        ("0", false),
+        ("-1", false),
+        ("abc", false),
+        ("1", true),
+        ("31622400", true),
+    ] {
+        let cfg = lab.config(&format!("claude-code /bin/true haiku 1 1 {v}"));
+        let o = bin()
+            .arg("--db")
+            .arg(&db)
+            .arg("--config")
+            .arg(&cfg)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert_eq!(code(&o), 0, "{v}: --version reads no config");
+        let o = bin()
+            .arg("--db")
+            .arg(&db)
+            .arg("--config")
+            .arg(&cfg)
+            .arg("capabilities")
+            .output()
+            .unwrap();
+        if ok {
+            assert_eq!(code(&o), 0, "{v}: {}", text(&o));
+        } else {
+            assert_eq!(code(&o), 1, "{v}: {}", text(&o));
+            assert!(
+                text(&o).contains("max-seconds must be"),
+                "{v}: {}",
+                text(&o)
+            );
+            assert!(!text(&o).contains("panicked"), "{v}: {}", text(&o));
+        }
+    }
+    // The documented words: `--help` anywhere after a known command, `--version` only alone.
+    assert_eq!(code(&bin().args(["status", "--help"]).output().unwrap()), 0);
+    assert_eq!(
+        code(&bin().args(["--version", "status"]).output().unwrap()),
+        1
+    );
+    let o = bin().args(["--version", "status"]).output().unwrap();
+    assert!(
+        text(&o).contains("unknown command `--version`"),
+        "{}",
+        text(&o)
+    );
+}
+
+#[test]
+fn a_closed_stdout_after_a_change_says_so_on_stderr() {
+    let lab = Lab::new("closedchange");
+    let db = lab.dir.join("l.db");
+    let cfg = lab.config("");
+    assert_eq!(code(&lab.run_on(&db, &cfg, &["status"])), 0); // makes the token
+    let mut child = bin()
+        .arg("--db")
+        .arg(&db)
+        .arg("--token-file")
+        .arg(lab.token())
+        .args(["goal", "add", "--title", "t", "--criteria", "c"])
+        .env_remove("ENDORA_FOUNDATION_CONFIG")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let o = child.wait_with_output().unwrap();
+    // The reader may be gone before or after the write; either way no panic, and if it failed the
+    // exit is 1 with the stderr line.
+    let t = String::from_utf8_lossy(&o.stderr);
+    assert!(!t.contains("panicked"), "{t}");
+    match o.status.code() {
+        Some(0) => {}
+        Some(1) => assert!(
+            t.contains("output closed: the change may have been applied"),
+            "{t}"
+        ),
+        other => panic!("{other:?}: {t}"),
+    }
+    let st = lab.run_on(&db, &cfg, &["status"]);
+    assert!(
+        text(&st).contains("goal 1"),
+        "the change must be applied: {}",
+        text(&st)
+    );
+}
+
+#[test]
 fn a_closed_stdout_never_panics() {
     // `endora-foundation --help | head -0`: the reader is gone before the first write.
     for args in [vec!["--help"], vec!["--version"]] {

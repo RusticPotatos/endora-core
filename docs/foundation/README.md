@@ -99,10 +99,10 @@ capabilities                every registered call with its band, tier and maximu
 
 `endora-foundation --help` (or `-h`, or `help`; also `<command> --help`) prints this command block, the
 environment variables and the exit codes to stdout, and `endora-foundation --version` prints
-`endora-foundation <version> (schema <n>)`. Both exit 0 and open **no** database file, even with `--db`, and both work whatever else is on the line (an argument that is not UTF-8 is refused with exit 1 and never panics). Every
-command line is checked before the database is opened: a command, option or extra word Core does not know is
+`endora-foundation <version> (schema <n>)`. Both exit 0 and open **no** database file, even with `--db`. `--help` (or `-h`) is also accepted as the first word, or anywhere after a known command (never as an option's value), even when another word on the line is wrong or not UTF-8; `--version` works **only as the sole word** (`--version status` is refused as an unknown command, exit 1). An argument that is not UTF-8 is refused with exit 1 and never panics. The *shape* of the command line is
+checked before the database is opened: a command, option or extra word Core does not know is
 refused with exit 1 and named (`unknown option --cpa for goal add`, `unexpected argument ...`,
-`unknown command ...`, `--title given twice for goal add`, `missing ITEM for accept`, `--token-out is only for init`), and nothing is created. `--every` of `routine add` and `serve` is 1 to 31,622,400 seconds (366 days). An unknown item, goal, routine or criterion says so
+`unknown command ...`, `--title given twice for goal add`, `missing ITEM for accept`, `--token-out is only for init`), as is a bad config file (an unreadable line, `max-seconds` of a `claude-code` line outside 1 to 31,622,400 seconds), and no database file is created. The *values* are checked after it is opened: a malformed or out of range number or id (`publish abc`, `resume-goal xxx`, `overall-cap -1`, `serve --every 0`, `routine resume x`) is still refused with exit 1, and the owner-token check (exit 2) also comes after, so these refusals **create an empty database file** (at the current schema) if the path did not exist. `--every` of `routine add` and `serve` is 1 to 31,622,400 seconds (366 days). An unknown item, goal, routine or criterion says so
 (`no item 9`, `no goal 99`, `item 1 has 1 criterion: there is no criterion 7`; exit 1), a move the item's
 state does not allow says what the state is (`item 3 is already failed`; exit 1 for `decline`, and `accept`
 stays a refusal, exit 2), and `run-due` with nothing to do says so (`nothing due (N routines)` or `no routines:
@@ -166,7 +166,7 @@ Running it long-term: [../operate.md](../operate.md).
   no JSON mode, and `status --json` is refused as an unknown option.
 - **Four helper binaries are built with the crates and are not part of the product.** `foundation-status`
   (domains/foundation) and `foundation-git-status` (domains/foundation-git) print the goals, items and the
-  evidence tail (not the routines or the open decisions that `endora-foundation status` also prints). They
+  evidence tail (not the routines or the open decisions that `endora-foundation status` also prints; `foundation-git-status` adds an `AWAITING ACCEPTANCE` list). They
   are **not read-only in the sense of "opens nothing"**: like every command they open the database file
   read-write, so a missing file is **created** at the current schema and an older file is **migrated**.
   Nothing in the repository runs them. `foundation-run` (foundation-observe) and `foundation-git-run`
@@ -180,10 +180,15 @@ Running it long-term: [../operate.md](../operate.md).
   state themselves, such as `decline`, still say `corrupt stored data`. `verify-evidence` is the integrity
   check (it covers the evidence chain, not the item rows). Not fixed: the root cause is in Core; the fix is
   planned as CORE-2.
-- **Two owner commands act on a finished item at the engine level.** The command line refuses
+- **One owner command (`confirm-criterion`, and its deprecated alias `confirm`) acts on a finished item at the engine level.** The command line refuses
   `confirm-criterion` on a `done` or `failed` item (`item N is already failed: its criteria cannot be
   changed`), but Core itself would still change it; a second process racing the command, or a program using
   Core directly, is not stopped. Planned with CORE-2.
+
+- **A closed stdout can hide a committed change.** If stdout is closed before the command prints its result
+  (`... | head -0`), the command's change may already be committed and the exit code is 1; one line goes to
+  stderr (`output closed: the change may have been applied`), if stderr is open. Check with `status` before
+  retrying; do not script a blind retry of `goal add` (it would make a second goal). A refusal still exits 2.
 
 ## Trust and what is enforced
 
