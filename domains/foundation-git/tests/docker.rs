@@ -1,8 +1,9 @@
 //! The Docker confinement backend (a plain unprivileged container per executor call), on a host
 //! where it can run: attack regressions, the leftover-container clean-up after a SIGKILLed Core,
-//! and that no token, database or Docker socket is visible to an executor. Every test SKIPS with
-//! a printed reason when Docker or the executor image is missing; none touches the network, a
-//! model or anything outside its own temp directory.
+//! and that no token, database or Docker socket is visible to an executor. Off Linux the four
+//! real tests are `ignore`d (the summary says so); on Linux each prints `SKIP: <reason>` when
+//! Docker or the executor image is missing, and fails under `ENDORA_STRICT_TESTS=1`. None touches
+//! the network, a model or anything outside its own temp directory.
 //!
 //! The executor image must contain `git` and `bash` (`rust:1.87-bookworm` does); set it with
 //! `ENDORA_FOUNDATION_EXECUTOR_IMAGE`. `FRX_ATTACK_OUT=<file>` copies the attack transcript there.
@@ -20,12 +21,17 @@ fn image() -> String {
 }
 
 /// Docker answers and the image exists locally; otherwise says why and the test returns.
+///
+/// A SKIP is not a pass (weekly review A, WF-18). Off Linux the four real tests carry
+/// `#[cfg_attr(not(target_os = "linux"), ignore)]`, so the summary counts them as ignored and
+/// this function is never reached there. On Linux a missing Docker or image prints `SKIP:` and,
+/// with `ENDORA_STRICT_TESTS=1`, FAILS (the environment was expected to be capable).
 fn docker_or_skip() -> bool {
     // The backend targets Linux hosts. On macOS the `Auto` order picks `sandbox-exec` first, and
     // Docker Desktop's bind mounts report other owners (git then refuses the repo as "dubious
-    // ownership"), so these Linux attack tests are not run there.
+    // ownership"), so these Linux attack tests are not run there (ignored, with that reason).
     if !cfg!(target_os = "linux") {
-        eprintln!("SKIPPED: the Docker backend tests run on Linux hosts only");
+        eprintln!("SKIP: the Docker backend tests run on Linux hosts only");
         return false;
     }
     let ok = |args: &[&str]| {
@@ -39,9 +45,14 @@ fn docker_or_skip() -> bool {
     if ok(&["version", "--format", "{{.Server.Version}}"]) && ok(&["image", "inspect", &image()]) {
         return true;
     }
-    eprintln!(
-        "SKIPPED: Docker is not usable or image `{}` is not present locally",
+    let why = format!(
+        "Docker is not usable or image `{}` is not present locally",
         image()
+    );
+    eprintln!("SKIP: {why}");
+    assert!(
+        std::env::var_os("ENDORA_STRICT_TESTS").is_none(),
+        "ENDORA_STRICT_TESTS is set and the test cannot run: {why}"
     );
     false
 }
@@ -169,6 +180,10 @@ echo done
 "#;
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the Docker backend is tested on Linux hosts only"
+)]
 fn the_docker_executor_is_isolated_in_every_way_the_boundary_promises() {
     if !docker_or_skip() {
         return;
@@ -251,6 +266,10 @@ fn the_docker_executor_is_isolated_in_every_way_the_boundary_promises() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the Docker backend is tested on Linux hosts only"
+)]
 fn a_call_that_times_out_has_its_container_killed() {
     if !docker_or_skip() {
         return;
@@ -320,6 +339,10 @@ fn spawn_child(lab: &Lab, limit: u64) -> (std::process::Child, String) {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the Docker backend is tested on Linux hosts only"
+)]
 fn a_killed_core_leaves_a_container_that_the_next_start_removes() {
     if !docker_or_skip() {
         return;
@@ -349,6 +372,10 @@ fn a_killed_core_leaves_a_container_that_the_next_start_removes() {
 }
 
 #[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "the Docker backend is tested on Linux hosts only"
+)]
 fn a_killed_core_with_no_next_start_still_ends_the_container_at_the_limit() {
     if !docker_or_skip() {
         return;
