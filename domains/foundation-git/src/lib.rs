@@ -17,9 +17,11 @@
 //!
 //! Sandboxing is this crate's job: every command that touches the repository (the agent, the
 //! tests and our own git calls) runs confined to its own directory, with no network, no reads
-//! outside it and the system paths, an explicit minimal environment and no credentials; the whole
-//! process group is killed when the call ends. With no confinement available the capability
-//! fails closed.
+//! outside it and the system paths, an explicit minimal environment and no credentials; the
+//! command's process group is killed when the call ends (on macOS a child that calls `setsid`
+//! leaves the group and survives the kill, and killing Core outright does not stop the agent:
+//! docs/foundation/TRUST-BOUNDARY.md). With no confinement available the capability fails
+//! closed.
 //!
 //! What decides acceptance is never read from the agent's tree or its `.git`: the base snapshot,
 //! its tree hash and the protected-path rules live in `<scratch>/.meta/<job>/`, which the
@@ -426,7 +428,8 @@ impl GitChange {
     }
 
     /// Runs `argv` in `dir/repo`, confined to `dir`, with the minimal environment and a time
-    /// limit; the whole process group dies when it returns.
+    /// limit; the command's process group is killed when it returns (a macOS `setsid` child
+    /// escapes that kill).
     fn confined(
         &self,
         dir: &Path,
@@ -705,7 +708,8 @@ impl GitChange {
                 ran.all()
             )));
         }
-        // From here on nothing the agent started is alive (its process group was killed).
+        // The agent's process group was killed. A child that left the group (`setsid`, on macOS)
+        // is not covered by that, so this is not a proof that nothing the agent started is alive.
         let said = ran.all();
         self.finish_change(
             &name,

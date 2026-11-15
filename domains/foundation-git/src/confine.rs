@@ -1199,8 +1199,10 @@ fn run_docker(j: &Job<'_>) -> Result<Ran, String> {
     })
 }
 
-/// Runs a command confined, with exactly `env`, and ALWAYS kills its whole process group when it
-/// ends (success, failure or timeout), so nothing it started can write afterwards.
+/// Runs a command confined, with exactly `env`, and ALWAYS kills its process group when it ends
+/// (success, failure or timeout). A child that calls `setsid` (found by independent review on macOS) leaves the group
+/// and survives that kill, still confined but able to outlive the call; the group kill is not a
+/// guarantee that nothing it started can write afterwards.
 ///
 /// # Errors
 /// When no confinement is available, the command cannot start, or it cannot be stopped.

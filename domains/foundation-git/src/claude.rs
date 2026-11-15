@@ -4,10 +4,16 @@
 //! of the crate.
 //!
 //! What the CLI enforces itself (version 2.1.322, see `docs/foundation/README.md`):
-//! - `--max-budget-usd`: stops the run when the spend reaches the cap. The check happens between
-//!   steps, so a run can end ABOVE the cap by up to one step; Core records that as a violation.
-//! - `--max-turns` (hidden from `--help`, present in the binary): stops after that many turns.
-//! - wall-clock: not a CLI flag; the capability kills the whole process group at the deadline.
+//! - `--max-budget-usd`: passed to the CLI. UNVERIFIED: no real run has reached the cap, so how
+//!   far a run can end above it is not measured (a fake CLI that reports a higher cost is only
+//!   a test of how Core records a violation). Core does not trust the flag: it compares the
+//!   cost the CLI reports with the grant and records a violation.
+//! - `--max-turns` (hidden from `--help`, present in the binary): passed to the CLI. One real
+//!   run with `--max-turns 1` reported `num_turns=2` and ended `error_max_turns`: one turn over.
+//!   Nothing else is measured about turns.
+//! - wall-clock: not a CLI flag; the capability kills the process group at the deadline. That
+//!   is tested with a fake CLI only, and on macOS a child that calls `setsid` leaves the group
+//!   and survives the kill (docs/foundation/TRUST-BOUNDARY.md).
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -16,8 +22,9 @@ use endora_foundation::domain::Budget;
 
 /// The most micro-USD per call this executor claims to enforce. The flag takes any amount; this
 /// is the ceiling the owner allowed for one real run (0.50 USD), so a declared maximum above it
-/// is refused by Core as unenforceable. The CLI checks between steps, so a run can end one step
-/// above its cap: `Enforced` means "stops at, or one step above, the grant".
+/// is refused by Core as unenforceable. `Enforced` here means only "the flag is passed and Core
+/// compares the reported cost with the grant afterwards". Whether the CLI stops at the dollar
+/// cap is UNVERIFIED, and the one real turns run overshot its limit by one turn.
 pub const MOST_ENFORCEABLE_MICROS: u64 = 500_000;
 
 /// The fixed system prompt: it names the task and its limits. The per-job instruction follows as
