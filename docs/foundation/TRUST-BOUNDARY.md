@@ -1,18 +1,23 @@
-# Trust boundary (slice 7, 14 Nov 2026)
+Status: CURRENT · reference page
 
-Honest statement of what Core's security rests on. Nothing here is frozen.
+# Trust boundary (14 Nov 2026)
+
+Honest statement of what Core's security rests on. Nothing here is frozen. "Finding N" below refers
+to two independent reviews held in the project's private history; the facts are stated here.
 
 ## D1. The boundary: isolation of untrusted executors
 
 Untrusted executors (an agent, a script an agent wrote) must not be able to read Core's state or
 the owner's credentials. That is done by **process and filesystem isolation**, not by Core's code.
+A capability's declaration (band, tier, maximum cost, facts) is **policy metadata, not the
+boundary**: a capability that lies in it defeats the policy, never the isolation.
 It is verified per target environment: on macOS with `agent_attacks.rs` (macOS only, it never ran on Linux), on Linux with the `docker.rs` attack table:
 
 | Target | Status |
 |---|---|
 | macOS `sandbox-exec` profile | tested: token unreadable, database unopenable, no network |
 | Linux / Docker backend (Linux test host) | tested with the `docker.rs` attack table (secrets, writes outside the job directory, network, no Docker socket, mount and ptrace, fork and memory limits, timeout, hard-kill reaping); the container runs with `--network none` (a hardened container on the default bridge can reach the host's own services and the LAN) |
-| NAS | Docker backend tested with the same `docker.rs` attack table, plus hand-run checks and a control container on the default bridge; the real backend runs with `--network none` (see STABILITY.md) |
+| NAS (the maintainer's storage server) | Docker backend tested with the same `docker.rs` attack table, plus hand-run checks and a control container on the default bridge; the real backend runs with `--network none` (see STABILITY.md) |
 
 A same-user process that is **not** confined can read the owner token file and edit the database
 file. That is documented, not fixed; no application-level compensation is planned.
@@ -43,13 +48,18 @@ removal of the last rows, a chain re-forged by a writer who knows the format, an
 
 ## D4. Spend
 
-- No shipped capability declares `Enforced`. Core **trusts the cost a capability reports**, clamped
+- Three different things. *Declared enforcement* is a capability's own claim (`Enforced { units }`):
+  Core checks the call's maximum is at or under it and passes the granted budget, and does **not**
+  verify it. `git.change` declares `Enforced` only when the config has a `claude-code` line; otherwise
+  it declares `Unenforced` and a zero maximum. *Measured limits*: turns (CLI-enforced with a one-step
+  overshoot, a real run) and wall-clock (the capability's process-group kill, fake CLIs only).
+  *Unverified*: the dollar cap (`--max-budget-usd` is passed; no real run reached it).
+- What holds for dollars today is Core's own: it **trusts the cost a capability reports**, clamped
   to the call's declared maximum; a larger report writes a `core.violation` row and stops the goal.
 - A failed call that reports a cost of 0 is charged 0 (an unknown cost is charged the maximum).
 - Check and intent are one `BEGIN IMMEDIATE` transaction: the reserved maximum counts against both
   caps until the actual cost replaces it, so two processes cannot both pass (`spend_race.rs`).
-- `Enforced` means something only when an executor really limits its own spend; a real-executor
-  test is under way.
+- `Enforced` means something only when an executor really limits its own spend; Core cannot tell.
 
 ## D5. Reading the rest
 

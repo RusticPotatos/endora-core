@@ -18,7 +18,7 @@ the base principles every project shares. What follows is Endora's own.
   user's other work.**
 - **Inspect existing work first.** Do not assume the repo is empty; preserve valid
   existing files, branches, and history.
-- Branch from `develop` (see the branching model in the README). Do not force-push
+- Branch from `main` (the remote has no `develop` branch; see CONTRIBUTING.md). Do not force-push
   or rewrite published history.
 - **Put new things where [docs/where-things-go.md](docs/where-things-go.md) says.**
   Before adding a screen, card, setting, menu entry, file or crate, find its place on

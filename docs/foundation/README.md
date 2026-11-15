@@ -1,4 +1,8 @@
+Status: CURRENT · interfaces are rated EXPERIMENTAL or FROZEN in STABILITY.md · reference page
+
 # Endora foundation (Core)
+
+New here? Start with [docs/start.md](../start.md) (a ten-minute first run). This page is the reference.
 
 Core holds goals, decides what may run, runs it through one port, records what happened, asks the
 owner before work counts as done, and picks up after a crash. It knows no model, no vendor and no
@@ -33,8 +37,10 @@ Every call declares a **band**: `observe` (reads), `reversible` (can be undone),
 `outward_reversible` (leaves the house, can be undone) or `irreversible`. Unclassified counts as
 irreversible, and registration rejects it. Policy rows (owner-granted) cover a band and a **tier**
 (`public`, `internal`, `confidential`, `restricted`). Observe and reversible calls run on a row;
-outward-reversible needs the owner; irreversible never runs. The declaration is the trust boundary:
-review it when you add a capability. The owner's stop switch refuses every call.
+outward-reversible needs the owner; irreversible never runs. A declaration (band, tier, maximum cost,
+facts) is **policy metadata, not the boundary**: the boundary is isolation (see "Trust and what is
+enforced"). A capability that lies in its declaration defeats the policy, not the isolation, so review
+the declaration when you add a capability. The owner's stop switch refuses every call.
 
 Spend: every amount is in **micro-USD** (a `u64`; 1 USD = 1,000,000; the cap flags, `overall-cap`,
 the `claude-code` config line and all output use it). A call declares a **maximum** cost, checked
@@ -62,6 +68,8 @@ token). Exit 0 ok, 1 error, 2 refused by authority (the reason is printed). Owne
 goal add --title T [--why W] --criteria TEXT [--check CALL INPUT FIELD EXPECT]
          [--criteria ...] [--probe NAME] [--scope a,b] [--tier internal] [--cap MICRO_USD]
          [--acceptance owner|auto-observe]
+                            a `--check` belongs to the `--criteria` before it; `--probe NAME`
+                            adds a criterion of its own (so `--criteria` + `--check` + `--probe` = 2)
 routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--auto-accept]
 status                      goals, items, evidence tail, open decisions
 run-due                     fire due routines, start new items, run their checks
@@ -83,6 +91,10 @@ backup --to FILE            consistent copy; restore by pointing --db at it
 capabilities                every registered call with its band, tier and maximum cost
 ```
 
+There is no `--help`. A command Core does not know prints the one-line usage and exits 1; with `--db`
+that also creates the database file. A goal on its own does nothing: `run-due` only works on work
+items, and a routine is what makes them.
+
 `goal add` grants Core the observe-band calls its checks need (the owner wrote them). A routine
 item stays running until you `accept` it (or the routine allows `--auto-accept` for observe work), so
 the routine waits for you. A standing watch can set the goal's **acceptance** to `auto-observe`: an
@@ -92,9 +104,9 @@ accepted as `policy:auto-observe` and the next slot runs; anything else waits fo
 never auto-accepted. The config file is not kept in the repository:
 
 ```
-probe web tcp 172.31.99.10:8080 60                 # name kind target interval-seconds
-probe api http 172.31.99.10:8080/health 60
-probe disk command df -h 300
+probe web tcp 127.0.0.1:8080 60                    # name kind target interval-seconds
+probe api http 127.0.0.1:8080/health 60
+probe slow command sleep 3 300                     # kind `command`: the rest of the line before the interval
 git /var/lib/endora/jobs /srv/template -- sh agent.sh   # scratch root, template, agent command line
 ```
 
@@ -132,20 +144,33 @@ own process is trusted code. Details and the list of known gaps: [TRUST-BOUNDARY
   adds a dependency and no safety); it is never printed, logged or put in an argument or environment
   value. The observe capability's child processes and the git capability's agent get a scrubbed
   environment (minimal `PATH` and `HOME`, plus an allow-list: `probe-env` in the config).
-- **Spend.** Today **no shipped capability declares `Enforced`**: no executor limits its own cost.
-  Core **trusts the cost a capability reports**, clamped to the call's declared maximum (a report
-  above it is a violation row, the item fails, the goal stops). A failed call that reports 0 is
-  charged 0. Before a call Core reserves the maximum against the goal and overall caps in the same
-  transaction that writes the intent, so two processes on one file cannot both pass the check. The
-  cap is a hard limit only for an executor that really enforces its budget; that is being tested.
+- **Spend** has three parts that must not be read as one.
+  1. *Declared enforcement* is a capability's own claim (`BudgetMode::Enforced { units }`). Core
+     checks that the call's maximum is at or under the claim and passes the granted budget; **Core
+     does not verify the claim**. `git.change` declares `Enforced` only when the config has a
+     `claude-code` line; with the default scripted executor it declares `Unenforced` and a zero
+     maximum, and `probe.run` has a zero maximum.
+  2. *Measured limits.* Turns: the Claude Code CLI enforces `--max-turns` with a one-step overshoot
+     (a real run: `--max-turns 1` ended at 2 turns). Wall-clock: the capability's process-group kill,
+     tested with fake CLIs and scripted agents only.
+  3. *Unverified.* The dollar cap: `--max-budget-usd` is passed, but no real run reached it.
+
+  What holds for dollars today is Core's own: it **trusts the cost a capability reports**, clamped to
+  the call's declared maximum (a report above it is a violation row, the item fails, the goal
+  stops). A failed call that reports 0 is charged 0. Before a call Core reserves the maximum against
+  the goal and overall caps in the same transaction that writes the intent, so two processes on one
+  file cannot both pass the check. See "Spend: what is enforced".
 - **Known gap:** a per-call owner approval (`approve-call`) does not exist; an outward-reversible
   call is refused, not asked about. It would be an additive command.
 
 ### Where the isolation is verified
 
+"Linux test host" and "NAS" name the maintainer's own machines (Ubuntu 26.04 and 24.04). They record
+what was tested; you do not need either.
+
 | Environment | Status |
 |---|---|
-| macOS `sandbox-exec` (Apple silicon) | Verified by `agent_attacks.rs`: confined agent cannot read the token file, open or write the database, or accept; and (REVIEW3 finding 9, fixed) cannot signal the engine or pid 1 while it can still signal its own children (`slice5b.rs`, `slice6.rs`). The same script unconfined can read the token and edit the database (the stated boundary). |
+| macOS `sandbox-exec` (Apple silicon) | Verified by `agent_attacks.rs`: confined agent cannot read the token file, open or write the database, or accept; and (a finding of an independent review, fixed) cannot signal the engine or pid 1 while it can still signal its own children (`slice5b.rs`, `slice6.rs`). The same script unconfined can read the token and edit the database (the stated boundary). |
 | Linux Docker backend (Linux test host, Ubuntu 26.04, kernel 7.0, Docker 29, rootful daemon) | Verified by `domains/foundation-git/tests/docker.rs` (attack script: secrets, writes, network, pids, memory, token and database absent, no Docker socket) and by the 27 confinement tests running for real through it. See "The Docker backend" below. |
 | Linux `bwrap` | NOT verified: absent on the Linux test host and the NAS, and user namespaces are AppArmor-restricted there. Argument vector unit-tested; the probe now runs the real flags. |
 | Real executor (Claude Code CLI) on macOS | Three real runs (a fix accepted by the owner, a turn-limit stop, a confinement probe): the sandbox acted before the token layer; see "Real executors" for what was and was not exercised by the agent's own tools. Not run on Linux (the Docker container has no network, so a real agent needs its own design there). |
@@ -188,7 +213,8 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
    people) and, if it ran confined, the `profile` it ran under (a structured evidence column).
 3. Declare the band honestly: Core cannot see inside the call. Observe means it changes nothing.
 4. Build facts only from what the code observed (an exit code, a parsed status), never from text
-   an agent or a remote produced. `Fact::word` takes a `&'static str` for that reason.
+   an agent or a remote produced. A word-valued fact is accepted only if it is in the closed list the
+   call's spec declares (`Field::word(name, &[...])`, each word at most 32 characters of `a-z 0-9 _ -`).
 5. Register it: `core.register(Arc::new(MyCap::new(config)))?`. A duplicate call name, an empty
    name or a missing band is refused with the call's name.
 6. Add it to the command line's `main.rs` behind a config line, add a policy row (`grant`) for each
@@ -226,7 +252,8 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
 
 `domains/foundation-git` can run the **Claude Code CLI** (`claude -p`) as the agent of `git.change`
 (`Options::executor = AgentExecutor::ClaudeCode { binary, model, extra_args }`). It is the first
-executor that is not a script, and the first to declare `Enforced` spend.
+executor that is not a script, and the first to *declare* `Enforced` spend (a claim Core does not
+verify, see "Spend: what is enforced").
 
 **Declared budget.** `git.change` then declares a non-zero maximum (default 300,000 micro-USD =
 0.30 USD, set by `ClaudeLimits`), the turns it accepts (default 8) and `Enforced { units: 500000 }`
@@ -304,3 +331,18 @@ future work.
 - **Dollars:** the CLI accepts `--max-budget-usd`, but no real run came near the cap, so the dollar
   cap is **accepted by the CLI and unproven**. Core's pre-call check against the caps and the
   clamp after the call are what hold today.
+
+## Known deviations from the architecture
+
+The project's design rules (responsibility-based modules, dependencies pointing inward, replaceable
+infrastructure) are stated in [the architecture page](../architecture.md). The code deviates in three
+known places. They are documented, not fixed:
+
+- **Storage has no port.** `application` imports the concrete SQLite `Store` and a `ManualClock`
+  from `infrastructure` (`domains/foundation/src/application/core.rs`, `owner.rs`). The only port is
+  `Capability`. Replacing SQLite would touch the application layer.
+- **Capabilities depend on Core's whole crate.** `foundation-observe` and `foundation-git` depend on
+  `endora-foundation`, including its SQLite store, not on a narrow contract crate.
+- **Domain purity is by convention.** `domain`, `application` and `infrastructure` are modules of one
+  crate whose `Cargo.toml` has `rusqlite` and `sha2`; no compiler rule or test stops a domain file from
+  importing them (today none does).

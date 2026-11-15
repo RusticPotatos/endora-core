@@ -1,10 +1,14 @@
+Status: EXPERIMENTAL · container recipe, built on one Linux host, not deployed
+
 # endora-foundation in a container
 
-A recipe, **written but not built or run** where it was authored. Check it before relying on it.
+A recipe. It was built on a Linux test host (118 MB image, both base images pinned by digest) and its
+healthcheck and the smoke script passed in it; it has **not** been deployed as a service. Check it
+before relying on it (status: EXPERIMENTAL, see `docs/foundation/STABILITY.md`).
 
 - `Dockerfile`: builds `endora-foundation-cli` (`--release --locked`, Rust 1.87) and ships the
   one binary on `debian:bookworm-slim`, as a non-root user, with a volume at `/data`.
-  Pin both base images by digest first (the root `Dockerfile` shows how).
+  Both base images are pinned by digest in the file.
 - `compose.example.yml`: one service, no published ports, a named volume for the database and a
   read-only bind of your config, `restart: unless-stopped`.
 

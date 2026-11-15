@@ -25,11 +25,10 @@ contributions right now are:
 ## Branching and workflow
 
 ```text
-main      → stable public branch (protected)
-develop   → integration branch
+main      → the only long-lived branch; protected; contributors branch from it
 ```
 
-1. Branch from **`develop`**, not `main`. Use a descriptive prefix, e.g.
+1. Branch from **`main`** (there is no `develop` branch on the remote). Use a descriptive prefix, e.g.
    `feat/…`, `fix/…`, `docs/…`.
 2. Keep changes focused. Prefer a **complete vertical slice** over a broad but
    shallow change.
