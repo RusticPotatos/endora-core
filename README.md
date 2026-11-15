@@ -1,4 +1,4 @@
-Status: CURRENT · the foundation; its interfaces are rated in docs/foundation/STABILITY.md (7 FROZEN, 12 EXPERIMENTAL)
+Status: CURRENT · the foundation; its interfaces are rated in docs/foundation/STABILITY.md (6 FROZEN, 13 EXPERIMENTAL)
 
 # Endora
 
@@ -38,7 +38,7 @@ work or not to be relied on), `PLANNED` (not built; never described as if it wer
 | Observe capability: tcp, http and command probes you write in a config file | CURRENT | no code needed |
 | Git capability: a code change by a configured agent, verified on a clean copy, then waits for you | EXPERIMENTAL | `git.publish` is always refused: nothing here publishes |
 | Claude Code CLI as the agent of the git capability | EXPERIMENTAL | macOS only; costs real money; the dollar cap is unverified |
-| Confinement of untrusted agents: macOS `sandbox-exec`, Docker per call on Linux | macOS scripted profile FROZEN; the rest EXPERIMENTAL | Linux `bwrap` is written but not verified on any host tested |
+| Confinement of untrusted agents: macOS `sandbox-exec`, Docker per call on Linux | EXPERIMENTAL (the macOS scripted profile was unfrozen on 15 Nov 2026: an escape was found and fixed, awaiting independent review) | Linux `bwrap` is written but not verified on any host tested |
 | A real agent under the Docker backend | UNSUPPORTED | no network in the container; credential handling is not designed for it |
 | Retiring a goal or a routine | UNSUPPORTED | not implemented: no command closes a goal or deletes a routine; the stop switch halts everything; [Known limits](docs/foundation/README.md#known-limits) |
 | Replacing a lost owner token | UNSUPPORTED | not implemented: keep a second copy of the token file with the same care as the database |

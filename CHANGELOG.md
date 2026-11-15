@@ -53,6 +53,15 @@ its job directory, and paths are written into the macOS profile without escaping
 flags are ignored; a goal or routine cannot be retired and a lost owner token cannot be replaced (see
 [Known limits](docs/foundation/README.md#known-limits)). Nothing in this list is claimed fixed.
 
+### Security (macOS sandbox profile)
+
+- **A confined process could ask LaunchServices to start an unconfined helper** (weekly independent review B,
+  15 Nov 2026). Both macOS profiles now deny `lsopen`, `appleevent-send` and the LaunchServices lookup,
+  preference reads and writes, and the preferences and pasteboard lookups, each with a test
+  (`macos_profile_hardening.rs`). The macOS scripted-profile row is EXPERIMENTAL again until a new independent
+  review; the real-agent profile under the stricter rules is not verified with a real CLI. The docs now name the
+  macOS limits (a `setsid` child survives the group kill, the agent survives a killed Core, no disk or process limits).
+
 ### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))
 
 - **A task is done because its criteria were met and the owner accepted it, not because nobody

@@ -33,7 +33,7 @@ All amounts are micro-USD (1 USD = 1,000,000).
 2. **Measured limits.** *Turns:* the capability passes `--max-turns` to the Claude Code CLI, which does the stopping; Core
    grants turns and does not check them. In the one real run that tested it, `--max-turns 1` ended at
    `num_turns=2` (one turn over). *Wall-clock:* the capability kills the
-   process group at the deadline; tested with fake CLIs and scripted agents only, not a real hang.
+   process group at the deadline (on macOS a child that calls `setsid` escapes the group); tested with fake CLIs and scripted agents only, not a real hang.
 3. **Unverified.** *The dollar cap:* `--max-budget-usd` is passed to the CLI, but no real run reached
    it, so what happens at the cap is unknown.
 

@@ -15,7 +15,7 @@ It is verified per target environment: on macOS with `agent_attacks.rs` (macOS o
 
 | Target | Status |
 |---|---|
-| macOS `sandbox-exec` profile | tested: token unreadable, database unopenable, no network |
+| macOS `sandbox-exec` profile | tested: token unreadable, database unopenable, no network (scripted profile; the real-agent profile allows outbound port 443). After the 15 Nov 2026 fix also tested: no LaunchServices open, no preference or pasteboard access (`macos_profile_hardening.rs`). **EXPERIMENTAL since 15 Nov 2026**: an escape was found and fixed, the fix awaits a new independent review (D2) |
 | Linux / Docker backend (Linux test host) | tested with the `docker.rs` attack table (secrets, writes outside the job directory, network, no Docker socket, mount and ptrace, fork and memory limits, timeout, hard-kill reaping); the container runs with `--network none` (a hardened container on the default bridge can reach the host's own services and the LAN) |
 | NAS (the maintainer's storage server) | Docker backend tested with the same `docker.rs` attack table, plus hand-run checks and a control container on the default bridge; the real backend runs with `--network none` (see STABILITY.md) |
 
@@ -33,9 +33,27 @@ They are **defence in depth against mistakes by trusted code**, not a boundary. 
 - The engine does not detect dropped append-only triggers when it opens a file (finding 4).
 - A credential-less file can be enrolled by whoever runs `init` first (finding 7, setup context).
   `init` now exits 2 when a credential exists. Any command creates the database file before `init`.
-- The macOS sandbox profile starts from `allow default`. Signals to other processes were open
-  (finding 9); both macOS profiles now carry `(deny signal (target others))`, tested. Exec and mach
-  lookups stay open.
+- The macOS sandbox profile starts from `(allow default)` and then denies, so every operation it
+  allows is a potential route. Signals to other processes were open (finding 9); both macOS profiles
+  now carry `(deny signal (target others))`, tested.
+- **A sandbox escape was found on macOS and fixed (weekly independent review B, 15 Nov 2026; the fix
+  awaits a new independent review).** Class: an operation the profile left allowed that makes a service
+  outside the sandbox act for the caller. A confined process could ask LaunchServices to start an
+  unconfined helper, which ran as the owner's user, so the token and the database were reachable.
+  Impact: the isolation above did not hold on macOS against a hostile scripted agent. Fix: both
+  profiles now deny those operations (`lsopen`, `appleevent-send`, the LaunchServices lookup), and
+  also preference reads and writes (a persistent write outside the job directory, and reading another
+  app's settings, through the preferences daemon) and the pasteboard lookup (the owner's clipboard).
+  Each denial has a test. Why the row is EXPERIMENTAL: STABILITY.md.
+- **What stays open on macOS:** exec; every mach lookup not named above (other system helpers stay
+  reachable); under the real-agent profile outbound TCP port 443 to any host. The longer-term fix is
+  to rebuild the profile from `(deny default)` with an allow-list (exec, the system read paths, the job
+  directory); that is not done. The preference and pasteboard denials were not tried with a real
+  Claude Code CLI.
+- **macOS backend limits (found by the same review, not fixed):** a child that calls `setsid` leaves
+  the process group and survives the group kill (it stays confined, but outlives the call); killing
+  Core outright does not stop the agent; there is no limit on disk written or on process count. The
+  Docker backend has pids, memory and cpu limits.
 - Migrations are part of the trusted setup. They refuse a file whose evidence rows already carry
   hashes under an older `user_version` (finding 3), but whoever can run them can edit the file.
 
@@ -52,7 +70,7 @@ removal of the last rows, a chain re-forged by a writer who knows the format, an
   Core checks the call's maximum is at or under it and passes the granted budget, and does **not**
   verify it. `git.change` declares `Enforced` only when the config has a `claude-code` line; otherwise
   it declares `Unenforced` and a zero maximum. *Measured limits*: turns (the CLI does the stopping; one real
-  run overshot by one turn) and wall-clock (the capability's process-group kill, fake CLIs only).
+  run overshot by one turn) and wall-clock (the capability's process-group kill, fake CLIs only; a macOS `setsid` child escapes it).
   *Unverified*: the dollar cap (`--max-budget-usd` is passed; no real run reached it).
 - What holds for dollars today is Core's own: it **trusts the cost a capability reports**, clamped
   to the call's declared maximum; a larger report writes a `core.violation` row and stops the goal.

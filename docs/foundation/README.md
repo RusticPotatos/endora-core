@@ -161,7 +161,7 @@ writes) runs where it cannot read the owner token or open the database. Everythi
 own process is trusted code. Details and the list of known gaps: [TRUST-BOUNDARY.md](TRUST-BOUNDARY.md).
 
 - **Isolation is verified per target.** macOS `sandbox-exec` profile: tested (`agent_attacks.rs`:
-  token unreadable, database unopenable). Linux Docker backend: tested on the Linux test host (see below). NAS:
+  token unreadable, database unopenable); EXPERIMENTAL since 15 Nov 2026, when an independent review found an escape that is now fixed and awaits a new review (TRUST-BOUNDARY.md D2 says what was fixed and what stays open). Linux Docker backend: tested on the Linux test host (see below). NAS:
   Docker backend tested with the `docker.rs` attack table (secrets, writes outside the job directory, network, no Docker socket, mount and ptrace, fork and memory limits, timeout, hard-kill reaping), plus hand-run checks and a bridged control (see STABILITY.md); `agent_attacks.rs` is macOS only. A same-user, unconfined process can read the
   token and edit the database: documented, not fixed.
 - **Application-level checks are defence in depth against mistakes by trusted code, not a boundary.**
@@ -184,8 +184,8 @@ own process is trusted code. Details and the list of known gaps: [TRUST-BOUNDARY
      `claude-code` line; with the default scripted executor it declares `Unenforced` and a zero
      maximum, and `probe.run` has a zero maximum.
   2. *Measured limits.* Turns: the Claude Code CLI is given `--max-turns`; in the one real run that
-     tested it, `--max-turns 1` ended at 2 turns. Wall-clock: the capability's process-group kill,
-     tested with fake CLIs and scripted agents only.
+     tested it, `--max-turns 1` ended at 2 turns. Wall-clock: the capability's process-group kill
+     (a macOS `setsid` child escapes it), tested with fake CLIs and scripted agents only.
   3. *Unverified.* The dollar cap: `--max-budget-usd` is passed, but no real run reached it.
 
   What holds for dollars today is Core's own: it **trusts the cost a capability reports**, clamped to
@@ -203,7 +203,7 @@ what was tested; you do not need either.
 
 | Environment | Status |
 |---|---|
-| macOS `sandbox-exec` (Apple silicon) | Verified by `agent_attacks.rs`: confined agent cannot read the token file, open or write the database, or accept; and (a finding of an independent review, fixed) cannot signal the engine or pid 1 while it can still signal its own children (`slice5b.rs`, `slice6.rs`). The same script unconfined can read the token and edit the database (the stated boundary). |
+| macOS `sandbox-exec` (Apple silicon) | Verified by `agent_attacks.rs`: confined agent cannot read the token file, open or write the database, or accept; and (a finding of an independent review, fixed) cannot signal the engine or pid 1 while it can still signal its own children (`slice5b.rs`, `slice6.rs`). The same script unconfined can read the token and edit the database (the stated boundary). Since 15 Nov 2026: also no LaunchServices open, no preference or pasteboard access (`macos_profile_hardening.rs`); an escape found by an independent review was fixed and awaits a new review. |
 | Linux Docker backend (Linux test host, Ubuntu 26.04, kernel 7.0, Docker 29, rootful daemon) | Verified by `domains/foundation-git/tests/docker.rs` (attack script: secrets, writes, network, pids, memory, token and database absent, no Docker socket) and by the confinement tests running for real through it (an earlier text said "27"; no grouping of the test files gives that number, so it is dropped: run `cargo test -p endora-foundation-git` on a Linux host for the count). See "The Docker backend" below. |
 | Linux `bwrap` | NOT verified: absent on the Linux test host and the NAS, and user namespaces are AppArmor-restricted there. Argument vector unit-tested; the probe now runs the real flags. |
 | Real executor (Claude Code CLI) on macOS | Three real runs (a fix accepted by the owner, a turn-limit stop, a confinement probe): the sandbox acted before the token layer; see "Real executors" for what was and was not exercised by the agent's own tools. Not run on Linux (the Docker container has no network, so a real agent needs its own design there). |
@@ -277,7 +277,15 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
 - **Confinement (macOS `sandbox-exec`; Linux `bwrap` written, not run; Linux Docker verified).** Writes only in the job
   directory; reads only there, the system paths and the files the config names; no network. The
   environment is explicit and minimal (`Options::env_allow` lets named variables through). The
-  whole process group is killed when a call ends.
+  call's process group is killed when it ends (see the macOS limits next).
+- **Known limits of the macOS backend** (a weekly independent review found the first two; not fixed):
+  a child that calls `setsid` leaves the process group, survives the group kill and outlives the call
+  (it stays confined to the job directory); killing Core outright does not stop the agent; there is no
+  limit on disk written or on process count (the Docker backend has pids, memory and cpu limits). The
+  profile is `(allow default)` with denials, so every operation it allows is a potential route: an
+  escape through LaunchServices was found and fixed (it now denies those operations and preference and
+  pasteboard access; the fix awaits independent review), and exec and the other mach lookups stay open.
+  An allow-list rebuild is the longer-term fix. The stricter denials were not tried with a real CLI.
 - **Evidence is capped and redacted.** 16 KB per output field with the full length in a marker;
   private-key blocks, `NAME=value` for secret-looking names and well-known token prefixes become
   `[redacted]` (the lists are `SECRET_NAMES` and `SECRET_PREFIXES` in `confine.rs`).
@@ -301,7 +309,7 @@ granted (cost, turns, seconds from the spec): the smaller of that and the execut
 |---|---|---|---|
 | Dollars | the CLI | `--max-budget-usd <grant>` | cap never reached in any run (all runs cost 0.0002 to 0.0026 USD); overshoot behaviour **not verified** |
 | Turns | the CLI | `--max-turns <n>` (works, but is missing from `--help`) | one real run: `--max-turns 1` reported `num_turns=2`, ended `error_max_turns`, item failed (one turn over; nothing else is measured about turns) |
-| Seconds | the capability | kills the whole process group at the deadline | unit-tested with a fake CLI (a hang is killed; cost unknown, so the maximum is charged) |
+| Seconds | the capability | kills the process group at the deadline (on macOS a `setsid` child escapes the group) | unit-tested with a fake CLI (a hang is killed; cost unknown, so the maximum is charged) |
 
 The actual cost returned to Core is `total_cost_usd` from `--output-format json`, converted to
 micro-USD and rounded **up** (a whole cheap run is 1,500 to 2,600 micro-USD; cents rounded it up to a
@@ -365,7 +373,7 @@ future work.
   turns and the executor's own ceiling, and reports `agent_turns` and `agent_stop` as facts. The CLI does
   the stopping. In the one real run that tested it (CLI 2.1.322), `--max-turns 1` ended with
   `num_turns=2` and `error_max_turns`: one turn over the limit. Nothing else is measured about turns.
-- **Wall-clock:** enforced by the capability's process-group kill at the deadline (and by the
+- **Wall-clock:** enforced by the capability's process-group kill at the deadline (on macOS a child that calls `setsid` escapes the group; and by the
   container's own timeout under Docker). Tested with a fake CLI and scripted agents; not with the
   real CLI hanging.
 - **Dollars:** the CLI accepts `--max-budget-usd`, but no real run came near the cap, so the dollar
