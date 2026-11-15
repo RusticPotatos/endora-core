@@ -1,4 +1,4 @@
-Status: LEGACY · describes the earlier HQ/node product, not the foundation · [legacy index](legacy/README.md)
+Status: LEGACY · describes the earlier HQ/node product, not the foundation; its "one crate per bounded context" rule is HQ's, for the foundation see [architecture.md](architecture.md#where-does-my-code-go) · [legacy index](legacy/README.md)
 
 # Where things go
 

@@ -267,7 +267,7 @@ granted (cost, turns, seconds from the spec): the smaller of that and the execut
 | Limit | Who enforces it | How | Measured (CLI 2.1.322) |
 |---|---|---|---|
 | Dollars | the CLI | `--max-budget-usd <grant>` | cap never reached in any run (all runs cost 0.0002 to 0.0026 USD); overshoot behaviour **not verified** |
-| Turns | the CLI | `--max-turns <n>` (works, but is missing from `--help`) | stops after the turn that exceeds it: `--max-turns 1` reported `num_turns=2`, ended `error_max_turns`, item failed |
+| Turns | the CLI | `--max-turns <n>` (works, but is missing from `--help`) | one real run: `--max-turns 1` reported `num_turns=2`, ended `error_max_turns`, item failed (one turn over; nothing else is measured about turns) |
 | Seconds | the capability | kills the whole process group at the deadline | unit-tested with a fake CLI (a hang is killed; cost unknown, so the maximum is charged) |
 
 The actual cost returned to Core is `total_cost_usd` from `--output-format json`, converted to

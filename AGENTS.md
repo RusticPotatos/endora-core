@@ -1,4 +1,4 @@
-Status: CURRENT · working agreements for assistants and contributors; the "Architecture rules" section is marked LEGACY (HQ), and other parts about HQ, the node and the console describe the LEGACY product
+Status: CURRENT · working agreements for assistants and contributors working on the foundation. Current: "Before you touch anything", the foundation-work bullet, "How to work", and the foundation checks in "Before handoff". LEGACY (HQ), marked in place: the place-new-things-by-map bullet, the "Architecture rules" section, "Use time and model usage carefully" (an HQ-era authorization and habits), and the HQ checks in "Before handoff"
 
 # Working agreements for AI assistants
 
@@ -10,8 +10,9 @@ edit this file, never a copy. For the full picture, read [README.md](README.md),
 [docs/architecture.md](docs/architecture.md), and
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
-This file builds on the owner's global standards, [docs/standards.md](docs/standards.md):
-the base principles every project shares. What follows is Endora's own.
+This file builds on the owner's global standards, [docs/standards.md](docs/standards.md) (labelled LEGACY:
+the HQ team's copy; read it as background): the base principles every project shares. What follows is
+Endora's own.
 
 ## Before you touch anything
 
@@ -24,7 +25,8 @@ the base principles every project shares. What follows is Endora's own.
   or rewrite published history.
 - **Foundation work** (Core, capabilities, the `endora-foundation` command): use the placement guide in
   [docs/architecture.md](docs/architecture.md); `docs/where-things-go.md` is a map of the LEGACY HQ console.
-- **Put new things where [docs/where-things-go.md](docs/where-things-go.md) says.**
+- **LEGACY (HQ) work only: put new things where [docs/where-things-go.md](docs/where-things-go.md) says.**
+  That map is HQ's, including its crate-per-context rule; foundation work does not use it.
   Before adding a screen, card, setting, menu entry, file or crate, find its place on
   that map. If nothing fits, add the place to the map in the same change; never
   invent a spot.
@@ -100,6 +102,9 @@ the base principles every project shares. What follows is Endora's own.
 
 ## Use time and model usage carefully
 
+**LEGACY (HQ).** This section is about the HQ-era collaboration replacement (ADR 0138) and HQ working
+habits. It is kept as history and is not instructions for foundation work.
+
 ### Standing authorization for the collaboration replacement
 
 The owner authorized continuous execution of
@@ -166,6 +171,13 @@ authorization supersedes earlier per-phase approval wording for this work only.
   Cost savings never waive privacy, authorization, TDD or release requirements.
 
 ## Before handoff
+
+For foundation work the handoff gate is `cargo fmt --all -- --check`, `cargo clippy --workspace
+--all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`,
+`sh scripts/foundation-smoke.sh target/debug/endora-foundation`, `sh scripts/check-docs.sh` for any
+documentation change, `node scripts/check-nothing-personal.mjs` and `git diff --check`. The
+`check-console.mjs`, `check-collection-parity.sh` and `check-required.sh` lines and the handheld-terminal
+block below check the LEGACY (HQ) code that is still in the tree; run them when you touch that code.
 
 Run from the workspace root and make sure they pass:
 

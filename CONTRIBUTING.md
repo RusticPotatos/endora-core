@@ -1,4 +1,4 @@
-Status: CURRENT · how to contribute; the foundation is the current system; the "Architecture rules" subsection is marked LEGACY (HQ)
+Status: CURRENT · how to contribute to the foundation (Core, its capabilities and the `endora-foundation` command). Current: "Working on the foundation", "Before you start", "Branching", test-first, the unit, composition and golden tiers, the dependency and ADR rules, "Before you push", commit messages, AI disclosure. LEGACY (HQ), marked in place: "Where we are", the scenario, console-render, live-smoke and eval tiers with their checks, the layering rule, the `endora-domain` remark and the deploy check
 
 # Contributing to Endora
 
@@ -7,6 +7,9 @@ during the project's **foundation stage** and the standards contributions are
 held to. By participating you agree to the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Where we are
+
+**LEGACY (HQ).** This section is the HQ-era framing of a "foundation phase" and links the Constitution, which is
+LEGACY. What is current is under "Working on the foundation" below.
 
 Endora is in its foundation phase: we are establishing principles, architecture,
 and a minimal skeleton — not building product features yet. The most valuable
@@ -62,8 +65,8 @@ We prefer **test-driven development**. Write tests that define new behavior
 
 ### The test tiers, and what each one is for
 
-Fast on purpose — the whole offline suite is **~10s for 460+ tests**, and it has to stay
-that way to be run constantly. Tiers are chosen to match how bugs have actually reached
+Fast on purpose — the HQ-era offline suite was **~10s for 460+ tests** (the workspace has far more
+now), and it has to stay quick enough to be run constantly. Tiers are chosen to match how bugs have actually reached
 production here, not to fill in a pyramid.
 
 | tier | what it covers | where | cost |
@@ -79,6 +82,11 @@ production here, not to fill in a pyramid.
 The first four run in `make ci`. The last two need something CI does not have — a deployed
 node, or a live model — so both are `#[ignore]`d and run deliberately.
 
+**LEGACY (HQ) rows.** *scenario* (the `features/` directories belong to HQ and its node; the foundation has
+none), *console render*, *live smoke* and *eval battery* test the HQ node, its web console and a live model.
+None applies to the foundation, whose behaviour is covered by the tests under `domains/foundation*/tests` and
+`app/foundation/tests`, the smoke script `scripts/foundation-smoke.sh` and `scripts/check-docs.sh`.
+
 **Composition tests exist because two bugs got through with a green suite**, both times
 because the tests exercised a component while production composed a stack: port methods that
 no wrapper passed along, and a table that existed only in the test migration. If a test
@@ -88,6 +96,10 @@ constructs its own wiring, it is not testing the wiring.
 confident hypotheses about a name-matching failure were each supported by a tidy five-line
 fixture and each refuted the moment the test ran against a captured reading of a real house.
 Prefer captured data over invented data for anything that parses or ranks.
+
+#### LEGACY (HQ): the live smoke check, the console check and screen budgets
+
+**LEGACY (HQ).** The paragraphs below describe the HQ node's checks and are kept as history.
 
 **The live smoke check** asserts about real data using the **production rules**, imported
 rather than re-implemented — an invariant with its own copy of a rule is testing the copy.
@@ -138,16 +150,21 @@ budget catches and a review does not. Counted from the *rendered* screen, so a s
 contributed by a nested call counts like one written inline; the person sees no difference.
 Lowering it is the point, and raising it should feel like a decision.
 
+#### Budgets
+
 **Budgets belong in tests, not in a performance tier.** A latency suite has never caught
 anything here, but volume degrading quality has: a tool that returned five kilobytes where a
 timestamp was wanted. Assert budgets — result sizes, round counts — inside the tiers above.
 
 ### Architecture rules (enforced in review)
 
-**LEGACY (HQ).** The layering rule below is the HQ workspace's. For the foundation the rules are in
+**LEGACY (HQ).** The layering rule and the `endora-domain` remark below are the HQ workspace's (no crate
+named `endora-domain` exists in this repository). For the foundation the rules are in
 [docs/architecture.md](docs/architecture.md#where-does-my-code-go) and
 [ADR 0150](docs/adr/0150-current-architecture-the-foundation.md): no mandatory three-layer template; a
-bounded context is not a crate; a capability can be a config line, a module, an adapter or a crate.
+bounded context is not a crate; a capability can be a config line, a module, an adapter or a crate. The
+other bullets (ADRs, compatibility, justified dependencies, `n-1` guidance, no speculative abstractions)
+still apply.
 
 - **Domain-first.** Respect the layering Domain → Application → Infrastructure →
   Interface, with dependencies pointing inward.
@@ -190,8 +207,9 @@ Or run all of them at once with **`make ci`**. See the [Makefile](Makefile) for
 every developer task (`make help`); new machines start with `make bootstrap`.
 CI runs the same checks on Linux and macOS.
 
-If you deploy, follow it with **`make deploy-check`** (or `make smoke`). It is the only tier
-that sees real data, and it takes about two seconds.
+**LEGACY (HQ):** if you deploy the HQ node, follow it with **`make deploy-check`** (or `make smoke`). It is
+the only HQ tier that sees real data, and it takes about two seconds. The foundation has no such deploy
+check; its container recipe is `deploy/foundation/`.
 
 ## Commit messages
 

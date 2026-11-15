@@ -27,8 +27,10 @@ Architecture, not a framework of its own.
 - *Domain isolation.* The foundation's rules run without a database file or a model in tests
   (`Core::in_memory` opens an in-memory SQLite database); `domain/` itself imports no SQLite.
 - *Deliberate interface boundaries.* `Capability` is the one port Core calls the world through.
-- *`unsafe` forbidden* (from 0050's "Rust, and no unsafe"; `#![forbid(unsafe_code)]` in `lib.rs`),
-  unchanged. The language itself is an independent choice (below).
+- *`unsafe` forbidden* (from 0050's "Rust, and no unsafe"). The mechanism is the workspace lint
+  `unsafe_code = "forbid"` (`[workspace.lints.rust]` in the root `Cargo.toml`), which the foundation crates
+  inherit with `[lints] workspace = true`; `domains/foundation` and `shared/kernel` also carry
+  `#![forbid(unsafe_code)]` in `lib.rs`. Unchanged. The language itself is an independent choice (below).
 
 **Superseded decisions** (each quoted from 0050 and checked against its text):
 
@@ -36,8 +38,8 @@ Architecture, not a framework of its own.
   none: a command line over one file, and a config file.
 - *"One container, serving its own console"*: the console embedded in the binary and the one image that
   ships it. The foundation has no console; its container recipe runs the command line.
-- *The per-context layout*: "each context owns its own `domain` / `application` / `infrastructure`", and
-  its list of contexts (`platform`, `capabilities`, `understanding`, `conversation`, `scheduling`). The
+- *The per-context layout*: three layers inside every context (a paragraph under "One process, organized by
+  responsibility"), and its list of contexts (`platform`, `capabilities`, `understanding`, `conversation`, `scheduling`). The
   foundation crates under `domains/` are not among them, and the three layers apply to Core only (below).
 - *"SQLite, behind ports"* is kept as to SQLite and not carried out as to ports: see Known deviations.
 

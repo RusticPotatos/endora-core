@@ -156,7 +156,7 @@ forbid_flat() { # forbid_flat REGEX WHY
     done < "$TMP/phrase_scope" > "$TMP/forbid.out"
     if [ -s "$TMP/forbid.out" ]; then cat "$TMP/forbid.out"; FAILS=$((FAILS + $(wc -l < "$TMP/forbid.out"))); fi
 }
-forbid_flat 'one crate +per +(bounded +)?context|a +crate +per +(bounded +)?context|Endora +follows +[*]*Responsibility-Oriented|Respect +the +layering +Domain' 'a bounded context is not a crate and there is no mandatory three-layer template (docs/architecture.md, ADR 0150)'
+forbid_flat 'one crate +per +(bounded +)?context|a +crate +per +(bounded +)?context|each +context +owns +its +own|Endora +follows +[*]*Responsibility-Oriented|Respect +the +layering +Domain' 'a bounded context is not a crate and there is no mandatory three-layer template (docs/architecture.md, ADR 0150)'
 forbid_flat 'new +crate +under +`?domains/?`? +depending' 'place code by the placement rule: a module is the usual case'
 required() { # required FILE FIXED-PHRASE
     grep -qF -- "$2" "$1" 2>/dev/null || fail "phrases: $1 must contain: $2"
