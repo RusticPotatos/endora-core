@@ -342,7 +342,7 @@ future work.
 ## Known deviations from the architecture
 
 The project's design rules (responsibility-based modules, dependencies pointing inward, replaceable
-infrastructure) are stated in [the architecture page](../architecture.md). The code deviates in three
+infrastructure) are stated in [the architecture page](../architecture.md). The code and its comments deviate in four
 known places. They are documented, not fixed:
 
 - **Storage has no port.** `application` imports the concrete SQLite `Store` and a `ManualClock`
@@ -353,3 +353,4 @@ known places. They are documented, not fixed:
 - **Domain purity is by convention.** `domain`, `application` and `infrastructure` are modules of one
   crate whose `Cargo.toml` has `rusqlite` and `sha2`; no compiler rule or test stops a domain file from
   importing them (today none does).
+- **Stale comments in `domains/foundation-git/src/claude.rs`** (lines 7-9 and 17-20). They say `--max-turns` "stops after that many turns", and that a dollar-capped run "can end ABOVE the cap by up to one step" and that `Enforced` means "stops at, or one step above, the grant". The evidence is narrower: one real run, `--max-turns 1`, ended one turn over; no real run reached the dollar cap, so any dollar overshoot is unverified. The docs follow the evidence; the comments are to be corrected in a later code change (this increment edits no Rust).

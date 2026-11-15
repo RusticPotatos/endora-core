@@ -29,8 +29,9 @@ The foundation (Core and its capabilities) is the current system; the HQ product
 - Before a pull request run: `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
   `cargo test --workspace --all-features`,
-  `sh scripts/foundation-smoke.sh target/debug/endora-foundation`, and, for any documentation change,
-  `sh scripts/check-docs.sh`.
+  `sh scripts/foundation-smoke.sh target/debug/endora-foundation`,
+  `node scripts/check-nothing-personal.mjs`, `git diff --check`, and, for any documentation change,
+  `sh scripts/check-docs.sh`. (`AGENTS.md` "Before handoff" points here.)
 - Documentation describes the implementation. Never write a planned feature in the present tense; give
   every page a first-line `Status:` (CURRENT, EXPERIMENTAL, LEGACY, UNSUPPORTED or PLANNED).
 - A new example is a directory with a command that runs it and an expected output; the page quotes the
@@ -163,8 +164,10 @@ named `endora-domain` exists in this repository). For the foundation the rules a
 [docs/architecture.md](docs/architecture.md#where-does-my-code-go) and
 [ADR 0150](docs/adr/0150-current-architecture-the-foundation.md): no mandatory three-layer template; a
 bounded context is not a crate; a capability can be a config line, a module, an adapter or a crate. The
-other bullets (ADRs, compatibility, justified dependencies, `n-1` guidance, no speculative abstractions)
-still apply.
+other bullets still apply: no infrastructure or UI concerns in the Domain layer (it holds for Core's
+`domain/`, which imports only `endora-kernel`, by convention: see Known deviations in the architecture
+page), models propose and deterministic policy authorizes, ADRs for architecture changes, compatibility,
+justified dependencies, `n-1` guidance, no speculative abstractions.
 
 - **Domain-first.** Respect the layering Domain → Application → Infrastructure →
   Interface, with dependencies pointing inward.

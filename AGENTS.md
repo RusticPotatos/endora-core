@@ -1,4 +1,4 @@
-Status: CURRENT · working agreements for assistants and contributors working on the foundation. Current: "Before you touch anything", the foundation-work bullet, "How to work", and the foundation checks in "Before handoff". LEGACY (HQ), marked in place: the place-new-things-by-map bullet, the "Architecture rules" section, "Use time and model usage carefully" (an HQ-era authorization and habits), and the HQ checks in "Before handoff"
+Status: CURRENT · working agreements for assistants and contributors working on the foundation. Current: "Before you touch anything", the foundation-work bullet, the "Architecture rules" bullets from "No premature microservices" on (including "Models propose; deterministic policy authorizes"), "How to work", and the foundation checks in "Before handoff". LEGACY (HQ), marked in place: the place-new-things-by-map bullet, the first three bullets of "Architecture rules" (ROCA, per-context layers, shared and the orchestration layer), "Use time and model usage carefully" (an HQ-era authorization and habits), and the HQ checks in "Before handoff"
 
 # Working agreements for AI assistants
 
@@ -6,7 +6,7 @@ This is the **canonical** instructions file for AI coding assistants working in
 the Endora repository, following the cross-tool `AGENTS.md` convention.
 `CLAUDE.md` is a symlink to this file, so Claude Code reads the same content —
 edit this file, never a copy. For the full picture, read [README.md](README.md),
-[docs/constitution.md](docs/constitution.md),
+[docs/constitution.md](docs/constitution.md) (LEGACY),
 [docs/architecture.md](docs/architecture.md), and
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -172,10 +172,12 @@ authorization supersedes earlier per-phase approval wording for this work only.
 
 ## Before handoff
 
-For foundation work the handoff gate is `cargo fmt --all -- --check`, `cargo clippy --workspace
---all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features`,
-`sh scripts/foundation-smoke.sh target/debug/endora-foundation`, `sh scripts/check-docs.sh` for any
-documentation change, `node scripts/check-nothing-personal.mjs` and `git diff --check`. The
+For foundation work the handoff gate is the list in
+[CONTRIBUTING.md](CONTRIBUTING.md#working-on-the-foundation) (`cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace
+--all-features`, `sh scripts/foundation-smoke.sh target/debug/endora-foundation`,
+`node scripts/check-nothing-personal.mjs`, `git diff --check`, and `sh scripts/check-docs.sh` for any
+documentation change). The
 `check-console.mjs`, `check-collection-parity.sh` and `check-required.sh` lines and the handheld-terminal
 block below check the LEGACY (HQ) code that is still in the tree; run them when you touch that code.
 

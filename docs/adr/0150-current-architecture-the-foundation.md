@@ -29,8 +29,9 @@ Architecture, not a framework of its own.
 - *Deliberate interface boundaries.* `Capability` is the one port Core calls the world through.
 - *`unsafe` forbidden* (from 0050's "Rust, and no unsafe"). The mechanism is the workspace lint
   `unsafe_code = "forbid"` (`[workspace.lints.rust]` in the root `Cargo.toml`), which the foundation crates
-  inherit with `[lints] workspace = true`; `domains/foundation` and `shared/kernel` also carry
-  `#![forbid(unsafe_code)]` in `lib.rs`. Unchanged. The language itself is an independent choice (below).
+  inherit with `[lints] workspace = true`; `domains/foundation`, `shared/kernel` and `shared/persistence` also carry
+  `#![forbid(unsafe_code)]` in `lib.rs` (the observe, git and command-line crates rely on the workspace
+  lint alone). Unchanged. The language itself is an independent choice (below).
 
 **Superseded decisions** (each quoted from 0050 and checked against its text):
 
@@ -63,7 +64,7 @@ is a Rust trait compiled in, with no wire protocol, schema, SDK, plugin loader o
 
 ## Known deviations
 
-The code departs from the retained principles in three places. They are documented, not fixed
+The code and its comments depart from the retained principles and from the evidence in four places. They are documented, not fixed
 (decision of 15 Nov 2026: no code change and no new abstraction in this increment):
 
 1. **No storage port.** `application` imports the concrete SQLite `Store` and a `ManualClock` from
@@ -71,6 +72,7 @@ The code departs from the retained principles in three places. They are document
 2. **Capability crates depend on Core's whole crate**, including its SQLite store.
 3. **Domain purity is by convention.** The three layers are modules of one crate that depends on
    `rusqlite` and `sha2`; the compiler does not stop a domain file from importing them.
+4. **Stale comments in `domains/foundation-git/src/claude.rs`** (lines 7-9 and 17-20). They say `--max-turns` "stops after that many turns", and that a dollar-capped run "can end ABOVE the cap by up to one step" and that `Enforced` means "stops at, or one step above, the grant". The evidence is narrower: one real run, `--max-turns 1`, ended one turn over; no real run reached the dollar cap, so any dollar overshoot is unverified. The docs follow the evidence; the comments are to be corrected in a later code change (this increment edits no Rust).
 
 ## Consequences
 

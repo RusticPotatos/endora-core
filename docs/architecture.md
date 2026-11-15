@@ -190,6 +190,11 @@ Documented, not fixed (no code change and no new abstraction in this increment):
 3. **Domain purity is by convention.** Every file in `domain/` imports only `endora_kernel`, `std` and its sibling
    domain modules, but `domain`, `application` and `infrastructure` are modules of one crate whose `Cargo.toml`
    lists `rusqlite` and `sha2`, so the compiler cannot enforce it and no test does.
+4. **Stale comments in `domains/foundation-git/src/claude.rs`** (lines 7-9 and 17-20) overstate what was measured: they
+   say `--max-turns` "stops after that many turns" and that a dollar-capped run can end "ABOVE the cap by up to
+   one step" (`Enforced` meaning "stops at, or one step above, the grant"). One real run ended one turn over; no
+   real run reached the dollar cap. The docs follow the evidence; the comments are to be corrected in a later
+   code change.
 
 If a second store, a fake store or another SQLite replacement is needed, extract a port then.
 
