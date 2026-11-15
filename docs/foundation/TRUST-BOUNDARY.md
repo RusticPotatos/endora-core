@@ -19,6 +19,30 @@ It is verified per target environment: on macOS with `agent_attacks.rs` (macOS o
 | Linux / Docker backend (Linux test host) | tested with the `docker.rs` attack table (secrets, writes outside the job directory, network, no Docker socket, mount and ptrace, fork and memory limits, timeout, hard-kill reaping); the container runs with `--network none` (a hardened container on the default bridge can reach the host's own services and the LAN) |
 | NAS (the maintainer's storage server) | Docker backend tested with the same `docker.rs` attack table, plus hand-run checks and a control container on the default bridge; the real backend runs with `--network none` (see STABILITY.md) |
 
+**What the macOS profiles let a confined process read** (everything else is denied, reads of file
+contents and listings; metadata such as `stat` stays open):
+
+- Readable: `/usr`, `/bin`, `/sbin`, `/System`, `/Library`, `/private/var/db`, `/dev`; under
+  `/opt/homebrew` only `bin`, `lib`, `opt`, `Cellar`, `share` and `etc/openssl@3` (Node needs its
+  OpenSSL configuration); the job directory; the files and directories the config names; and, under the
+  real-agent profile only, `/private/etc`.
+- Denied by directory, even though a prefix above them is readable: `/Library/Keychains`,
+  `/Library/Application Support`, `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`,
+  `/opt/homebrew/etc` (except the OpenSSL directory above), the home folders (`/Users`), the temporary
+  folders (`/private/tmp`, `/tmp`, `/private/var/folders`), `/private/var/root`, `/var/root`, `/Volumes`.
+- Denied by name, in both profiles, wherever they lie: the database, its `-journal`, `-wal` and `-shm`
+  files and the owner token file (the command line passes them whenever it runs a git capability). Before
+  15 Nov 2026 only the real-agent profile did this, and only with a `claude-code` line; a database or
+  token kept under a readable prefix such as `/usr/local/var` or `/opt/homebrew/share` was readable to a
+  scripted agent (writes stayed denied). The command line prints a note when one of these paths lies
+  under a prefix the profile can read.
+- Still readable: everything else under the readable prefixes (for example `/usr/local/bin` and the rest
+  of `/usr`, `/Library` outside the denied directories, `/opt/homebrew/share`). A backup or other copy
+  of the database kept there is readable to a confined agent: keep copies under the home folder or a
+  volume (denied) and never under a readable prefix.
+- Paths are written into the profile escaped (quote and backslash); a path with a control character or
+  that is not UTF-8 is refused before the call runs.
+
 A same-user process that is **not** confined can read the owner token file and edit the database
 file. That is documented, not fixed; no application-level compensation is planned.
 

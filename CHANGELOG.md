@@ -61,6 +61,11 @@ flags are ignored; a goal or routine cannot be retired and a lost owner token ca
   (`macos_profile_hardening.rs`). The macOS scripted-profile row is EXPERIMENTAL again until a new independent
   review; the real-agent profile under the stricter rules is not verified with a real CLI. The docs now name the
   macOS limits (a `setsid` child survives the group kill, the agent survives a killed Core, no disk or process limits).
+- **The scripted profile now denies the database, its `-journal`/`-wal`/`-shm` files and the token by name**
+  (weekly review A, WF-A-16), narrows `/opt/homebrew` to `bin`, `lib`, `opt`, `Cellar`, `share`, denies
+  `/usr/local/var`, `/usr/local/etc`, `/opt/homebrew/var`, `/opt/homebrew/etc` and `/Library/Application Support`,
+  prints a note when the database or token lies under a readable prefix, escapes paths in the profile
+  and refuses control characters (WF-A-25).
 
 ### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))
 

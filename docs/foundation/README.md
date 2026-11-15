@@ -286,6 +286,7 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
   escape through LaunchServices was found and fixed (it now denies those operations and preference and
   pasteboard access; the fix awaits independent review), and exec and the other mach lookups stay open.
   An allow-list rebuild is the longer-term fix. The stricter denials were not tried with a real CLI.
+  The readable prefixes, and what is denied by directory and by name, are listed in TRUST-BOUNDARY.md D1.
 - **Evidence is capped and redacted.** 16 KB per output field with the full length in a marker;
   private-key blocks, `NAME=value` for secret-looking names and well-known token prefixes become
   `[redacted]` (the lists are `SECRET_NAMES` and `SECRET_PREFIXES` in `confine.rs`).
