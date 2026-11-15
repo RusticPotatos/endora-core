@@ -150,8 +150,8 @@ own process is trusted code. Details and the list of known gaps: [TRUST-BOUNDARY
      does not verify the claim**. `git.change` declares `Enforced` only when the config has a
      `claude-code` line; with the default scripted executor it declares `Unenforced` and a zero
      maximum, and `probe.run` has a zero maximum.
-  2. *Measured limits.* Turns: the Claude Code CLI enforces `--max-turns` with a one-step overshoot
-     (a real run: `--max-turns 1` ended at 2 turns). Wall-clock: the capability's process-group kill,
+  2. *Measured limits.* Turns: the Claude Code CLI is given `--max-turns`; in the one real run that
+     tested it, `--max-turns 1` ended at 2 turns. Wall-clock: the capability's process-group kill,
      tested with fake CLIs and scripted agents only.
   3. *Unverified.* The dollar cap: `--max-budget-usd` is passed, but no real run reached it.
 
@@ -206,7 +206,10 @@ no-new-privileges --pids-limit 128 --memory 512m --memory-swap 512m --cpus 1 --u
 
 ## Adding a capability (one page)
 
-1. A new crate under `domains/` depending on `endora-foundation` and `endora-kernel`.
+1. Place it by [the placement rule](../architecture.md#where-does-my-code-go): usually one module
+   implementing `Capability` in your own crate or binary; a new crate under `domains/` only for its own
+   dependencies, release rhythm, owner or reuse. Either way it depends on `endora-foundation` and
+   `endora-kernel`.
 2. Implement `Capability`: `offers()` returns one `CallSpec` per call (name, **band**, input and
    output in words, tier, maximum cost); `call(name, input)` returns a `CallOutput` with the actual
    `cost_micros` (micro-USD), `facts` (what your code observed), `result`, `evidence` (text for
@@ -321,10 +324,14 @@ future work.
 - **Units.** Micro-USD everywhere (`u64`, checked arithmetic). Files written in cents are migrated
   (schema 6): caps are multiplied by 10,000; evidence rows are never rewritten, an old row keeps its
   cents and its hash and is read as cents times 10,000.
-- **`Enforced` can overshoot by one step.** It means the executor stops at, or one step above, the
-  grant: a turn limit of 1 stopped at 2 (`num_turns=2`, `error_max_turns`). Core's clamp and violation
-  row are the second line, and they only see what the capability reports.
-- **Turns:** enforced by the executor (`--max-turns`), one-step overshoot, proven by a real run.
+- **What `Enforced` means.** It is the capability's claim that its executor limits its own spend; Core
+  checks the call's maximum against it and does not verify it (see [trust and spend](../trust-and-spend.md)).
+  Core's clamp and violation row are the second line, and they only see what the capability reports.
+- **Turns (measured once).** Core grants turns in the call's budget and does not check them afterwards.
+  The git capability passes `--max-turns <n>` to the Claude Code CLI, `n` being the smaller of the granted
+  turns and the executor's own ceiling, and reports `agent_turns` and `agent_stop` as facts. The CLI does
+  the stopping. In the one real run that tested it (CLI 2.1.322), `--max-turns 1` ended with
+  `num_turns=2` and `error_max_turns`: one turn over the limit. Nothing else is measured about turns.
 - **Wall-clock:** enforced by the capability's process-group kill at the deadline (and by the
   container's own timeout under Docker). Tested with a fake CLI and scripted agents; not with the
   real CLI hanging.

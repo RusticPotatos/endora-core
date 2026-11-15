@@ -30,8 +30,9 @@ All amounts are micro-USD (1 USD = 1,000,000).
    budget; **Core does not verify the claim.** Today `git.change` declares `Enforced` (units 500,000)
    only when the config has a `claude-code` line; with the default scripted executor it declares
    `Unenforced` and a zero maximum. `probe.run` has a zero maximum.
-2. **Measured limits.** *Turns:* the Claude Code CLI enforces `--max-turns` with a one-step overshoot (a
-   real run with `--max-turns 1` ended at `num_turns=2`). *Wall-clock:* the capability kills the
+2. **Measured limits.** *Turns:* the capability passes `--max-turns` to the Claude Code CLI, which does the stopping; Core
+   grants turns and does not check them. In the one real run that tested it, `--max-turns 1` ended at
+   `num_turns=2` (one turn over). *Wall-clock:* the capability kills the
    process group at the deadline; tested with fake CLIs and scripted agents only, not a real hang.
 3. **Unverified.** *The dollar cap:* `--max-budget-usd` is passed to the CLI, but no real run reached
    it, so what happens at the cap is unknown.

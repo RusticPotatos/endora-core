@@ -1,4 +1,4 @@
-Status: CURRENT · working agreements for assistants and contributors; the parts about HQ, the node and the console describe the LEGACY product
+Status: CURRENT · working agreements for assistants and contributors; the "Architecture rules" section is marked LEGACY (HQ), and other parts about HQ, the node and the console describe the LEGACY product
 
 # Working agreements for AI assistants
 
@@ -30,6 +30,13 @@ the base principles every project shares. What follows is Endora's own.
   invent a spot.
 
 ## Architecture rules
+
+- **LEGACY (HQ).** The first three bullets below describe the HQ workspace (a crate per bounded context,
+  three layers in each) and call it ROCA. For the foundation the rules are in
+  [docs/architecture.md](docs/architecture.md#where-does-my-code-go) and
+  [ADR 0150](docs/adr/0150-current-architecture-the-foundation.md): no mandatory three-layer template; a
+  bounded context is not a crate; a capability can be a config line, a module, an adapter or a crate.
+  The bullets from "No premature microservices" on still apply.
 
 - Endora follows **Responsibility-Oriented Clean Architecture (ROCA)** — a
   domain-first modular monolith organized **by responsibility**, not by layer

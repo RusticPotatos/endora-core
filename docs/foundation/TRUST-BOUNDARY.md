@@ -51,8 +51,8 @@ removal of the last rows, a chain re-forged by a writer who knows the format, an
 - Three different things. *Declared enforcement* is a capability's own claim (`Enforced { units }`):
   Core checks the call's maximum is at or under it and passes the granted budget, and does **not**
   verify it. `git.change` declares `Enforced` only when the config has a `claude-code` line; otherwise
-  it declares `Unenforced` and a zero maximum. *Measured limits*: turns (CLI-enforced with a one-step
-  overshoot, a real run) and wall-clock (the capability's process-group kill, fake CLIs only).
+  it declares `Unenforced` and a zero maximum. *Measured limits*: turns (the CLI does the stopping; one real
+  run overshot by one turn) and wall-clock (the capability's process-group kill, fake CLIs only).
   *Unverified*: the dollar cap (`--max-budget-usd` is passed; no real run reached it).
 - What holds for dollars today is Core's own: it **trusts the cost a capability reports**, clamped
   to the call's declared maximum; a larger report writes a `core.violation` row and stops the goal.

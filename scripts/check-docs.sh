@@ -137,6 +137,27 @@ forbid 'a separate crate behind one trait|one crate per integration' 'a capabili
 forbid 'without a database or a model' 'Core::in_memory opens an in-memory SQLite database; say "without a database file"'
 forbid 'REVIEW[0-9]' 'dangling reference: no such document is in the tree'
 forbid '(^|[^a-z])the Director([^a-z]|$)' 'dangling reference to a private role'
+# Old HQ rules ("one crate per bounded context", the mandatory layering, "Endora follows ROCA") may stay in a
+# section only if its first line is "LEGACY (HQ)" (optionally in bold); such a section, up to the next heading of
+# the same or a higher level, is skipped; so is everything from a heading that starts "LEGACY:" to the end of the file. The text is joined across line breaks, so a wrapped phrase is found.
+visible() { # visible FILE: the file's text without LEGACY (HQ)-marked sections, newlines as spaces
+    awk '/^```/ {fence = !fence}
+         !fence && /^#+ +LEGACY:/ { skip = 1; skiplvl = 0; print; next }
+         !fence && /^#+ / { lvl = match($0, /[^#]/) - 1
+                            if (skip && lvl <= skiplvl) skip = 0
+                            if (!skip) { head = lvl; pending = 1 } ; print; next }
+         pending && NF { pending = 0; if ($0 ~ /^[-*[:space:]]*LEGACY \(HQ\)/) { skip = 1; skiplvl = head; next } }
+         !skip { print }' "$1" | tr '\n' ' '
+}
+forbid_flat() { # forbid_flat REGEX WHY
+    while IFS= read -r f; do
+        hit=$(visible "$f" | grep -oiE -- "$1" | head -n 1)
+        [ -z "$hit" ] || printf 'FAIL phrases: %s: "%s"   <- forbidden outside a LEGACY (HQ) section: %s\n' "$f" "$hit" "$2"
+    done < "$TMP/phrase_scope" > "$TMP/forbid.out"
+    if [ -s "$TMP/forbid.out" ]; then cat "$TMP/forbid.out"; FAILS=$((FAILS + $(wc -l < "$TMP/forbid.out"))); fi
+}
+forbid_flat 'one crate +per +(bounded +)?context|a +crate +per +(bounded +)?context|Endora +follows +[*]*Responsibility-Oriented|Respect +the +layering +Domain' 'a bounded context is not a crate and there is no mandatory three-layer template (docs/architecture.md, ADR 0150)'
+forbid_flat 'new +crate +under +`?domains/?`? +depending' 'place code by the placement rule: a module is the usual case'
 required() { # required FILE FIXED-PHRASE
     grep -qF -- "$2" "$1" 2>/dev/null || fail "phrases: $1 must contain: $2"
 }

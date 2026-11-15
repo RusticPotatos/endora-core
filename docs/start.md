@@ -305,7 +305,9 @@ accept) and **recover** (the restart). Next:
   There is no `--help`: an unknown command prints a one-line usage and exits 1, and with `--db` it also
   creates a database file (the schema, no rows).
 - **`this command needs the owner token`** (exit 2): pass `--token-file`, or set
-  `ENDORA_OWNER_TOKEN_FILE` to the path `init` wrote.
+  `ENDORA_OWNER_TOKEN_FILE` to the path `init` wrote. If the variable is set but empty or names a missing
+  file, the message is instead `cannot read the owner token file <path>: entity not found` (exit 2; an
+  empty variable leaves the path blank).
 - **`run-due` prints nothing**: no routine exists, or none is due. The routine's slot is 300 seconds.
 - **`accept 9` prints `storage backend error: Query returned no rows`**: there is no item 9. It is the
   engine's raw error for an unknown id, not corruption.

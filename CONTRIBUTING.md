@@ -1,4 +1,4 @@
-Status: CURRENT · how to contribute; the foundation is the current system, HQ-era material is LEGACY
+Status: CURRENT · how to contribute; the foundation is the current system; the "Architecture rules" subsection is marked LEGACY (HQ)
 
 # Contributing to Endora
 
@@ -143,6 +143,11 @@ anything here, but volume degrading quality has: a tool that returned five kilob
 timestamp was wanted. Assert budgets — result sizes, round counts — inside the tiers above.
 
 ### Architecture rules (enforced in review)
+
+**LEGACY (HQ).** The layering rule below is the HQ workspace's. For the foundation the rules are in
+[docs/architecture.md](docs/architecture.md#where-does-my-code-go) and
+[ADR 0150](docs/adr/0150-current-architecture-the-foundation.md): no mandatory three-layer template; a
+bounded context is not a crate; a capability can be a config line, a module, an adapter or a crate.
 
 - **Domain-first.** Respect the layering Domain → Application → Infrastructure →
   Interface, with dependencies pointing inward.

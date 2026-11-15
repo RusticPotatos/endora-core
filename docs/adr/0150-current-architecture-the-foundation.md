@@ -27,9 +27,10 @@ Architecture, not a framework of its own.
 - *Domain isolation.* The foundation's rules run without a database file or a model in tests
   (`Core::in_memory` opens an in-memory SQLite database); `domain/` itself imports no SQLite.
 - *Deliberate interface boundaries.* `Capability` is the one port Core calls the world through.
-- *Rust, `unsafe` forbidden* ("Rust, and no unsafe" in 0050), unchanged.
+- *`unsafe` forbidden* (from 0050's "Rust, and no unsafe"; `#![forbid(unsafe_code)]` in `lib.rs`),
+  unchanged. The language itself is an independent choice (below).
 
-**Superseded decisions** (each is a section of 0050, checked against its text):
+**Superseded decisions** (each quoted from 0050 and checked against its text):
 
 - *"HTTP + JSON, versioned, with SSE for liveness"* as the application protocol. The foundation has
   none: a command line over one file, and a config file.
