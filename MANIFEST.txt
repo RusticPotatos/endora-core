@@ -35,6 +35,7 @@ app/foundation/src/main.rs
 app/foundation/src/probes.rs
 app/foundation/tests/agent_attacks.rs
 app/foundation/tests/cli.rs
+app/foundation/tests/recover_liveness.rs
 app/hq/Cargo.toml
 app/hq/build.rs
 app/hq/src/api.rs
@@ -694,6 +695,7 @@ domains/foundation/src/domain/hold.rs
 domains/foundation/src/domain/mod.rs
 domains/foundation/src/infrastructure/chain.rs
 domains/foundation/src/infrastructure/clock.rs
+domains/foundation/src/infrastructure/holders.rs
 domains/foundation/src/infrastructure/legacy_evidence.rs
 domains/foundation/src/infrastructure/mod.rs
 domains/foundation/src/infrastructure/random.rs
@@ -713,6 +715,7 @@ domains/foundation/tests/fixtures/schema_slice4.sql
 domains/foundation/tests/micro_usd.rs
 domains/foundation/tests/owner_proof.rs
 domains/foundation/tests/recover_interrupted.rs
+domains/foundation/tests/recover_liveness.rs
 domains/foundation/tests/registration.rs
 domains/foundation/tests/schema_version.rs
 domains/foundation/tests/spend.rs

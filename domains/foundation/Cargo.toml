@@ -18,5 +18,11 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # edge, not a new crate); used in `application` only, never in the domain.
 sha2 = "0.10"
 
+# Process-lifetime `flock` on the holder files (`infrastructure/holders.rs`), through rustix's safe
+# API (the workspace forbids `unsafe`). Already in the lock file at 0.38.44 (the terminal client
+# uses it): no new crate.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "0.38", default-features = false, features = ["fs", "std"] }
+
 [lints]
 workspace = true

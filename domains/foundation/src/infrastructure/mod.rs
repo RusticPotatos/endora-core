@@ -2,6 +2,7 @@
 
 mod chain;
 mod clock;
+mod holders;
 mod legacy_evidence;
 mod random;
 mod store;

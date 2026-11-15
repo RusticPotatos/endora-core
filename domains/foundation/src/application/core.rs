@@ -478,6 +478,9 @@ impl Core {
 
     /// Routine items a dead process left `running` whose checks have not been met: each is to be
     /// re-checked and closed by [`Core::check_watch`], so a routine never waits on one forever.
+    /// An item a LIVE process is running (its holder, see `infrastructure::holders`) is left
+    /// alone; each item returned has been taken over for this process, so no other recovering
+    /// process returns it too.
     ///
     /// # Errors
     /// [`AppError::Repository`].
@@ -490,7 +493,7 @@ impl Core {
                     .criteria(it.id)?
                     .iter()
                     .any(|k| k.met_by.is_none() && k.criterion.check.is_some());
-            if waiting {
+            if waiting && self.store.adopt(it.id)? {
                 out.push(it.id);
             }
         }
@@ -1212,6 +1215,11 @@ impl Core {
     /// failed explicitly. An item out of attempts fails. Every other one goes back to `open`
     /// to be resumed; its evidence stays. Call it once at start, before any runner starts.
     ///
+    /// An item a LIVE process is running is not "left" by anyone and is not touched: each item
+    /// names its holder (a process-lifetime lock the OS drops when the process dies, see
+    /// `infrastructure::holders`), and only an item whose holder is dead, unrecorded (written
+    /// by an older build) or this process itself is settled.
+    ///
     /// # Errors
     /// [`AppError::Repository`].
     pub fn recover(&self) -> Res<Vec<Recovered>> {
@@ -1220,7 +1228,8 @@ impl Core {
 
     /// Like [`Core::recover`], but only for running items a dead process cut off inside a call
     /// (an allowed intent with no result). A running item that merely awaits the owner's
-    /// acceptance is left alone, so a command-line run can call it on every start.
+    /// acceptance is left alone, so a command-line run can call it on every start. An item a
+    /// live process holds is left alone too (see [`Core::recover`]).
     ///
     /// # Errors
     /// [`AppError::Repository`].
@@ -1234,11 +1243,16 @@ impl Core {
             if only_cut_off && self.store.unsettled_intents(it.id)?.is_empty() {
                 continue;
             }
-            let risky = self
-                .store
-                .unsettled_intents(it.id)?
-                .iter()
-                .any(|e| e.band > Reversibility::Observe);
+            // A live process running the item settles it itself; only a dead holder's is ours.
+            if !self.store.adopt(it.id)? {
+                continue;
+            }
+            let it = self.store.item(it.id)?;
+            let unsettled = self.store.unsettled_intents(it.id)?;
+            if only_cut_off && unsettled.is_empty() {
+                continue;
+            }
+            let risky = unsettled.iter().any(|e| e.band > Reversibility::Observe);
             let (now, why) = if risky {
                 (ItemState::Failed, "interrupted inside a call above the observe band: unknown whether it took effect".to_owned())
             } else if it.attempts >= MAX_ATTEMPTS {

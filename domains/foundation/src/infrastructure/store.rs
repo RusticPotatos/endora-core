@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params, types::ValueRef};
 use sha2::{Digest, Sha256};
 
 use super::chain;
+use super::holders::{Held, Holders};
 use super::legacy_evidence;
 use crate::domain::{
     AcceptancePolicy, ActorKind, Check, Criterion, Evidence, Goal, GoalId, ItemId, ItemState, Kind,
@@ -76,7 +77,7 @@ CREATE TRIGGER IF NOT EXISTS firings_no_replace BEFORE INSERT ON firings
 type Migration = fn(&Connection) -> Res<()>;
 
 /// The ordered history: step `n` takes a file from version `n-1` to `n`.
-const MIGRATIONS: [Migration; 7] = [
+const MIGRATIONS: [Migration; 8] = [
     migrate_to_slice4_shape,
     migrate_slice5a_watch_columns,
     migrate_actor_kind,
@@ -84,6 +85,7 @@ const MIGRATIONS: [Migration; 7] = [
     migrate_evidence_chain,
     migrate_micro_usd,
     migrate_evidence_profile,
+    migrate_item_holder,
 ];
 
 /// The first schema version that has the hash chain (see [`refuse_laundering`]).
@@ -205,6 +207,13 @@ fn migrate_evidence_profile(c: &Connection) -> Res<()> {
     add_column(c, "evidence", "profile", "TEXT")
 }
 
+/// Version 8: which process runs a started item (the name of its holder file, see `holders`).
+/// NULL for every older item and for an item not running: recovery then behaves as it always did.
+/// Not part of the evidence chain (items are not).
+fn migrate_item_holder(c: &Connection) -> Res<()> {
+    add_column(c, "items", "holder", "TEXT")
+}
+
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -292,6 +301,8 @@ pub struct ItemCriterion {
 /// The one SQLite file.
 pub struct Store {
     db: Db,
+    /// Who runs a started item (see `holders`); `None` for a private in-memory file.
+    holders: Option<Holders>,
 }
 
 fn tier_to(t: Tier) -> i64 {
@@ -322,7 +333,10 @@ impl Store {
     /// [`RepositoryError::Backend`].
     pub fn open(path: &str) -> Res<Self> {
         let db = Db::open(path)?;
-        let store = Self { db };
+        let store = Self {
+            db,
+            holders: Holders::for_db(path),
+        };
         let c = store.db.lock()?;
         migrate(&c)?;
         drop(c);
@@ -595,17 +609,72 @@ impl Store {
         if to == ItemState::Done {
             return Err(corrupt("done is reached only through acceptance"));
         }
+        // A running item names this process as its holder; any other state names nobody.
+        let holder = match (&self.holders, to) {
+            (Some(h), ItemState::Running) => Some(h.own_name()?),
+            _ => None,
+        };
         let c = self.db.lock()?;
         let from = read_state(&c, id.0)?;
         may_move(from, to).map_err(corrupt)?;
         let n = c.execute(
-            "UPDATE items SET state=?1, reason=?2, attempts = attempts + ?3 WHERE id=?4 AND state=?5",
-            params![to.name(), reason, i64::from(to == ItemState::Running), id.0, from.name()],
+            "UPDATE items SET state=?1, reason=?2, attempts = attempts + ?3, holder=?6 WHERE id=?4 AND state=?5",
+            params![to.name(), reason, i64::from(to == ItemState::Running), id.0, from.name(), holder],
         ).map_err(backend)?;
         if n != 1 {
             return Err(corrupt("the item changed under the move"));
         }
         Ok(())
+    }
+
+    /// Takes over a RUNNING item for this process, if no other live process runs it: `true` when
+    /// this process now holds it (it was held by a dead process, by none, or already by this
+    /// process) and so may recover or re-check it; `false` when a live process holds it or it is
+    /// not running. The take-over is one compare-and-set on the recorded holder, so two
+    /// recovering processes cannot both win, and the winner is itself the live holder others see.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn adopt(&self, id: ItemId) -> Res<bool> {
+        let Some(h) = &self.holders else {
+            return Ok(true);
+        };
+        let was: Option<Option<String>> = self
+            .db
+            .lock()?
+            .query_row(
+                "SELECT holder FROM items WHERE id=?1 AND state='running'",
+                [id.0],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(backend)?;
+        let Some(was) = was else {
+            return Ok(false);
+        };
+        let guard = match was.as_deref().map(|name| (name, h.probe(name))) {
+            Some((_, Held::Alive)) => return Ok(false),
+            Some((_, Held::Dead(g))) => g,
+            None => None,
+        };
+        let me = h.own_name()?;
+        if was.as_deref() == Some(me.as_str()) {
+            return Ok(true);
+        }
+        let n = self
+            .db
+            .lock()?
+            .execute(
+                "UPDATE items SET holder=?1 WHERE id=?2 AND state='running' AND holder IS ?3",
+                params![me, id.0, was],
+            )
+            .map_err(backend)?;
+        if n == 1 {
+            if let Some(g) = guard {
+                g.remove();
+            }
+        }
+        Ok(n == 1)
     }
 
     /// Closes a running item as done, once an acceptance has been authorised.
@@ -615,7 +684,7 @@ impl Store {
     pub(crate) fn accept_item(&self, id: ItemId, by: &str, now: i64) -> Res<()> {
         let c = self.db.lock()?;
         let n = c.execute(
-            "UPDATE items SET state='done', accepted_by=?1, accepted_ms=?2 WHERE id=?3 AND state='running'",
+            "UPDATE items SET state='done', accepted_by=?1, accepted_ms=?2, holder=NULL WHERE id=?3 AND state='running'",
             params![by, now, id.0],
         ).map_err(backend)?;
         if n != 1 {
