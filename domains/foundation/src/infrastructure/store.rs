@@ -439,14 +439,34 @@ impl Store {
     /// Applies a routine's plan in ONE transaction: records every missed slot, creates the one
     /// item (with its own copy of the goal's criteria) unless the previous one is still open,
     /// records that slot, and moves the routine's next due time. A crash leaves all of it or
-    /// none; the primary key on (routine, slot) makes a second firing of a slot impossible.
+    /// none. The plan was made from `r` before the transaction: when another process has moved
+    /// the routine since (its `next_due_ms` is no longer the one the plan started from), that
+    /// process already fired this slot and the plan is stale, so nothing is written and the
+    /// outer `None` says so (the caller skips the routine); never a second item for one slot.
     ///
     /// # Errors
     /// [`RepositoryError::Backend`].
-    pub(crate) fn apply_plan(&self, r: &Routine, plan: &Plan, now: i64) -> Res<Option<ItemId>> {
+    pub(crate) fn apply_plan(
+        &self,
+        r: &Routine,
+        plan: &Plan,
+        now: i64,
+    ) -> Res<Option<Option<ItemId>>> {
         let c = self.db.lock()?;
         c.execute_batch("BEGIN IMMEDIATE").map_err(backend)?;
-        let done = apply_plan_in(&c, r, plan, now);
+        let done = (|| {
+            let due: i64 = c
+                .query_row(
+                    "SELECT next_due_ms FROM routines WHERE id=?1",
+                    [r.id.0],
+                    |x| x.get(0),
+                )
+                .map_err(backend)?;
+            if due != r.next_due_ms {
+                return Ok(None);
+            }
+            apply_plan_in(&c, r, plan, now).map(Some)
+        })();
         match &done {
             Ok(_) => c.execute_batch("COMMIT").map_err(backend)?,
             Err(_) => {
@@ -1004,6 +1024,21 @@ impl Store {
     /// [`RepositoryError::Backend`] or `Corrupt`.
     pub fn unsettled_intents(&self, item: ItemId) -> Res<Vec<Evidence>> {
         self.evidence_where("item_id=?1 AND kind='intent' AND id NOT IN (SELECT intent_id FROM evidence WHERE intent_id IS NOT NULL)", [item.0])
+    }
+
+    /// Allowed intents of `item` with no result record that were recorded since the item's latest
+    /// `core.start` row: the calls of the CURRENT attempt that may or may not have run. An
+    /// earlier attempt's call that never got a result was already recovered (that is what put
+    /// the item back to `open` for this attempt) and the append-only evidence cannot close it, so
+    /// it must not make every later pass recover the item again. An item with no `core.start`
+    /// row counts every unsettled call. [`Store::unsettled_intents`] (all attempts) and
+    /// [`Store::unsettled_calls`] (spend: assume the worst for every call without a result) are
+    /// unchanged.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`] or `Corrupt`.
+    pub fn unsettled_intents_this_attempt(&self, item: ItemId) -> Res<Vec<Evidence>> {
+        self.evidence_where("item_id=?1 AND kind='intent' AND id NOT IN (SELECT intent_id FROM evidence WHERE intent_id IS NOT NULL) AND id > COALESCE((SELECT MAX(id) FROM evidence WHERE item_id=?1 AND kind='control' AND call='core.start'), 0)", [item.0])
     }
 
     /// Bands of the item's allowed calls.

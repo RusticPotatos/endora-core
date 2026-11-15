@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use endora_kernel::{AppError, Clock, DomainError, Reversibility, Tier};
+use endora_kernel::{AppError, Clock, DomainError, RepositoryError, Reversibility, Tier};
 use sha2::{Digest, Sha256};
 
 use super::owner::OwnerProof;
@@ -21,6 +21,9 @@ pub const VERIFIER: &str = "core";
 
 /// How many times a runner may start one item before an interruption fails it for good.
 pub const MAX_ATTEMPTS: u32 = 3;
+
+/// The [`AppError::Conflict`] code of [`Core::start`] when another process took the item first.
+pub const ITEM_TAKEN: &str = "item-taken";
 
 type Res<T> = Result<T, AppError>;
 
@@ -593,7 +596,10 @@ impl Core {
             if plan.latest.is_none() {
                 continue;
             }
-            let item = self.store.apply_plan(&r, &plan, now)?;
+            // `None`: another process fired this slot between the read above and the write.
+            let Some(item) = self.store.apply_plan(&r, &plan, now)? else {
+                continue;
+            };
             out.push(Fired {
                 routine: r.id,
                 item,
@@ -697,9 +703,31 @@ impl Core {
     /// Starts an item: `open` to `running`, counting an attempt.
     ///
     /// # Errors
-    /// [`AppError::Repository`] when the item cannot start from where it is.
+    /// [`AppError::Conflict`] with code [`ITEM_TAKEN`] when the item is no longer open, which
+    /// is what a lost race with another process looks like (the caller may skip the item);
+    /// [`AppError::Repository`] for anything else.
     pub fn start(&self, actor: &Actor, item: ItemId) -> Res<()> {
-        self.store.move_item(item, ItemState::Running, None)?;
+        match self.store.move_item(item, ItemState::Running, None) {
+            Ok(()) => {}
+            // Another process got there first (it listed the same open item and started it, or
+            // started and finished it, between this process's listing and its start): the item
+            // is simply no longer open. That is not damaged data, and nothing was written.
+            Err(e @ RepositoryError::Corrupt(_)) => {
+                let now = self.store.item(item)?.state;
+                if now == ItemState::Open {
+                    return Err(e.into());
+                }
+                return Err(AppError::Conflict {
+                    code: ITEM_TAKEN,
+                    message: format!(
+                        "item {} is no longer open: another process took it (it is {})",
+                        item.0,
+                        now.name()
+                    ),
+                });
+            }
+            Err(e) => return Err(e.into()),
+        }
         self.note(
             Some(item),
             "core.start",
@@ -1225,7 +1253,7 @@ impl Core {
                 .all(|b| b <= Reversibility::Observe);
             if !by_check
                 || !observe_only
-                || !self.store.unsettled_intents(it.id)?.is_empty()
+                || !self.store.unsettled_intents_this_attempt(it.id)?.is_empty()
                 || !self.store.adopt(it.id)?
             {
                 continue;
@@ -1280,7 +1308,7 @@ impl Core {
     fn recover_where(&self, only_cut_off: bool) -> Res<Vec<Recovered>> {
         let mut out = Vec::new();
         for it in self.store.items_in(ItemState::Running)? {
-            if only_cut_off && self.store.unsettled_intents(it.id)?.is_empty() {
+            if only_cut_off && self.store.unsettled_intents_this_attempt(it.id)?.is_empty() {
                 continue;
             }
             // A live process running the item settles it itself; only a dead holder's is ours.
@@ -1288,7 +1316,7 @@ impl Core {
                 continue;
             }
             let it = self.store.item(it.id)?;
-            let unsettled = self.store.unsettled_intents(it.id)?;
+            let unsettled = self.store.unsettled_intents_this_attempt(it.id)?;
             if only_cut_off && unsettled.is_empty() {
                 continue;
             }

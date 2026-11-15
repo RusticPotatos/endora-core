@@ -714,6 +714,7 @@ domains/foundation/tests/fixtures/schema_slice2.sql
 domains/foundation/tests/fixtures/schema_slice4.sql
 domains/foundation/tests/micro_usd.rs
 domains/foundation/tests/owner_proof.rs
+domains/foundation/tests/recover_attempts.rs
 domains/foundation/tests/recover_interrupted.rs
 domains/foundation/tests/recover_liveness.rs
 domains/foundation/tests/registration.rs

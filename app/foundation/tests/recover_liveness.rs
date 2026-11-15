@@ -150,6 +150,17 @@ fn slow_lab(name: &str) -> (Lab, PathBuf, PathBuf) {
 
 /// As [`slow_lab`]; with `Some(file)` the database is that RELATIVE name (`--db file`).
 fn slow_lab_db(name: &str, rel: Option<&str>) -> (Lab, PathBuf, PathBuf) {
+    slow_lab_with(name, rel, Some("auto-observe"), "1")
+}
+
+/// The general form: `acceptance` is the goal's `--acceptance` (`None` = the default, the owner
+/// accepts) and `every` the routine's period in seconds.
+fn slow_lab_with(
+    name: &str,
+    rel: Option<&str>,
+    acceptance: Option<&str>,
+    every: &str,
+) -> (Lab, PathBuf, PathBuf) {
     let dir = fresh_dir(name);
     let log = dir.join("probe.log");
     let release = dir.join("release");
@@ -171,18 +182,13 @@ fn slow_lab_db(name: &str, rel: Option<&str>) -> (Lab, PathBuf, PathBuf) {
         lab = lab.relative(file);
     }
     lab.init();
-    let o = lab.run(&[
-        "goal",
-        "add",
-        "--title",
-        "slow watch",
-        "--probe",
-        "slow",
-        "--acceptance",
-        "auto-observe",
-    ]);
+    let mut goal = vec!["goal", "add", "--title", "slow watch", "--probe", "slow"];
+    if let Some(a) = acceptance {
+        goal.extend(["--acceptance", a]);
+    }
+    let o = lab.run(&goal);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    let o = lab.run(&["routine", "add", "--goal", "1", "--every", "1"]);
+    let o = lab.run(&["routine", "add", "--goal", "1", "--every", every]);
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     (lab, log, release)
 }
@@ -554,4 +560,346 @@ fn only_a_lowercase_file_colon_prefix_is_a_uri_and_a_plain_file_of_that_name_ope
         assert_eq!(o.status.code(), Some(0), "{plain}: {}", text(&o));
     }
     assert!(lab.dir.join("FILE:x.db").exists() || lab.dir.join("File:x.db").exists());
+}
+
+// ---- recovery counts attempts (review of the integrated branch, F1 and F2) -----------------------
+
+/// How many `core.recover` rows the file holds, from the CLI's own evidence listing.
+fn recover_rows(lab: &Lab) -> usize {
+    lab.evidence().matches("core.recover").count()
+}
+
+/// Kills `a` (SIGKILL, no clean-up of any kind) once its probe has started `n` times in all.
+fn kill_in_probe(mut a: Child, log: &Path, n: usize) {
+    wait_until("the probe to start", || starts(log) == n);
+    a.kill().unwrap();
+    let _ = a.wait();
+}
+
+/// The tutorial's step 7 and then more of the same: an item interrupted once whose re-run met its
+/// criteria waits for the owner, however many `run-due` follow, and can still be accepted.
+#[test]
+fn a_recovered_item_that_met_its_criteria_stays_waiting_over_further_run_dues() {
+    let (lab, log, release) = slow_lab_with("again", None, None, "300");
+    kill_in_probe(lab.spawn(&["run-due"]), &log, 1);
+    std::fs::write(&release, b"go").unwrap();
+    let b = lab.run(&["run-due"]);
+    let said = text(&b);
+    assert_eq!(b.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("recovered item 1 -> open: interrupted on attempt 1"),
+        "{said}"
+    );
+    assert!(said.contains("item 1: 1/1 criteria met"), "{said}");
+    for pass in 0..3 {
+        let o = lab.run(&["run-due"]);
+        let said = text(&o);
+        assert_eq!(o.status.code(), Some(0), "pass {pass}: {said}");
+        assert!(
+            !said.contains("recovered"),
+            "pass {pass} recovered it again: {said}"
+        );
+    }
+    assert_eq!(
+        recover_rows(&lab),
+        1,
+        "false core.recover rows:\n{}",
+        lab.evidence()
+    );
+    let status = lab.status();
+    assert!(
+        status.contains("[running]") && status.contains("attempts 2"),
+        "{status}"
+    );
+    let o = lab.run(&["accept", "1"]);
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(lab.status().contains("[done]"));
+    assert_eq!(lab.run(&["verify-evidence"]).status.code(), Some(0));
+}
+
+/// The same under `serve`, whose own ticks may adopt its own items: three ticks (and more) leave
+/// the waiting item alone.
+#[test]
+fn serve_ticks_leave_a_recovered_item_that_met_its_criteria_waiting() {
+    let (lab, log, release) = slow_lab_with("again-serve", None, None, "300");
+    kill_in_probe(lab.spawn(&["run-due"]), &log, 1);
+    std::fs::write(&release, b"go").unwrap();
+    let mut serve = lab.spawn(&["serve", "--every", "1"]);
+    std::thread::sleep(Duration::from_millis(4500)); // ticks at 0, 1, 2, 3 and 4 s
+    assert!(serve.try_wait().unwrap().is_none(), "serve is still up");
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &serve.id().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (code, out) = finish(serve);
+    assert_eq!(code, Some(0), "{out}");
+    assert_eq!(out.matches("recovered item").count(), 1, "{out}");
+    assert_eq!(recover_rows(&lab), 1, "{}", lab.evidence());
+    let status = lab.status();
+    assert!(
+        status.contains("[running]") && status.contains("attempts 2"),
+        "{status}"
+    );
+}
+
+/// What the fix must not weaken: an item killed inside its call three times in a row fails.
+#[test]
+fn an_item_killed_inside_its_call_three_times_still_fails_after_three_attempts() {
+    let (lab, log, release) = slow_lab_with("thrice", None, None, "300");
+    kill_in_probe(lab.spawn(&["run-due"]), &log, 1);
+    // Each later run-due recovers the one before and starts the item again (attempts 2, 3).
+    for n in [2, 3] {
+        kill_in_probe(lab.spawn(&["run-due"]), &log, n);
+    }
+    std::fs::write(&release, b"go").unwrap();
+    let o = lab.run(&["run-due"]);
+    let said = text(&o);
+    assert_eq!(o.status.code(), Some(0), "{said}");
+    assert!(
+        said.contains("recovered item 1 -> failed: interrupted again after 3 attempts"),
+        "{said}"
+    );
+    assert_eq!(recover_rows(&lab), 3, "{}", lab.evidence());
+    let status = lab.status();
+    assert!(
+        status.contains("[failed]") && status.contains("attempts 3"),
+        "{status}"
+    );
+    assert_eq!(lab.run(&["verify-evidence"]).status.code(), Some(0));
+}
+
+/// F2: several overlapping `run-due`, all listing the same open items, race to start them. A
+/// lost race is skipped, not "corrupt stored data": every process exits 0, every item starts and
+/// runs exactly once, and the chain is intact.
+#[test]
+fn overlapping_run_dues_skip_a_lost_start_and_every_item_runs_once() {
+    const ITEMS: usize = 6;
+    let dir = fresh_dir("race");
+    let log = dir.join("probe.log");
+    let release = dir.join("release");
+    let script = dir.join("slow.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "echo \"start $$\" >> {log}\ni=0\nwhile [ ! -e {release} ] && [ $i -lt 600 ]; do /bin/sleep 0.1; i=$((i+1)); done\n",
+            log = log.display(),
+            release = release.display()
+        ),
+    )
+    .unwrap();
+    let lab = Lab::at(
+        dir,
+        &format!("probe slow command sh {} 60\n", script.display()),
+    );
+    lab.init();
+    for g in 1..=ITEMS {
+        let o = lab.run(&[
+            "goal",
+            "add",
+            "--title",
+            &format!("g{g}"),
+            "--probe",
+            "slow",
+        ]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        let o = lab.run(&["routine", "add", "--goal", &g.to_string(), "--every", "300"]);
+        assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    }
+    let procs: Vec<Child> = (0..ITEMS).map(|_| lab.spawn(&["run-due"])).collect();
+    // Wait until every item has started, or every process has ended (the failure case).
+    let t = Instant::now();
+    let mut procs = procs;
+    while starts(&log) < ITEMS && t.elapsed() < Duration::from_secs(30) {
+        if procs.iter_mut().all(|c| c.try_wait().unwrap().is_some()) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    std::fs::write(&release, b"go").unwrap();
+    let mut said = String::new();
+    for (i, c) in procs.into_iter().enumerate() {
+        let (code, out) = finish(c);
+        assert_eq!(code, Some(0), "process {i} exited {code:?}: {out}");
+        assert!(!out.contains("corrupt stored data"), "process {i}: {out}");
+        said.push_str(&out);
+    }
+    assert_eq!(starts(&log), ITEMS, "{:?}", lines(&log));
+    let status = lab.status();
+    assert_eq!(status.matches("attempts 1").count(), ITEMS, "{status}");
+    assert!(!status.contains("attempts 2"), "{status}");
+    assert_eq!(lab.run(&["verify-evidence"]).status.code(), Some(0));
+    eprintln!(
+        "lost races skipped: {}",
+        said.matches(": skipped: item ").count()
+    );
+}
+
+/// A storm of overlapping `run-due` with random SIGKILLs, repeated (`ENDORA_STORM_REPS`, default
+/// 10): per repetition 8 goals (half owner-accepted, half `auto-observe`), 6 staggered `run-due`,
+/// one or two killed at random, then recovery passes and two more that must change nothing.
+/// Whatever the timing: no false `core.recover` row (one row per call really cut off, none for
+/// an item whose holder was alive or whose criteria were met), no item run twice unless a kill
+/// really cut its call, no exit status other than 0 (or the kill), the chain intact.
+#[test]
+fn a_storm_of_overlapping_run_dues_and_kills_leaves_no_false_recovery() {
+    let reps: usize = std::env::var("ENDORA_STORM_REPS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(10);
+    const GOALS: usize = 8;
+    let (mut kills, mut runs, mut recovered, mut cut) = (0usize, 0usize, 0i64, 0i64);
+    for rep in 0..reps {
+        let dir = fresh_dir(&format!("storm{rep}"));
+        let mut cfg = String::new();
+        for g in 1..=GOALS {
+            let script = dir.join(format!("p{g}.sh"));
+            std::fs::write(
+                &script,
+                format!(
+                    "echo \"start $$\" >> {}\n/bin/sleep 0.6\n",
+                    dir.join(format!("p{g}.log")).display()
+                ),
+            )
+            .unwrap();
+            cfg.push_str(&format!("probe p{g} command sh {} 60\n", script.display()));
+        }
+        let lab = Lab::at(dir.clone(), &cfg);
+        lab.init();
+        for g in 1..=GOALS {
+            let mut a = vec!["goal", "add", "--title", "storm", "--probe"];
+            let p = format!("p{g}");
+            a.push(&p);
+            if g % 2 == 1 {
+                a.extend(["--acceptance", "auto-observe"]);
+            }
+            assert_eq!(lab.run(&a).status.code(), Some(0));
+            let o = lab.run(&["routine", "add", "--goal", &g.to_string(), "--every", "300"]);
+            assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+        }
+        // A cheap deterministic generator: the schedule differs per repetition, and a failure can
+        // be re-run with the same repetition number (the OS still adds its own timing).
+        let mut x =
+            0x9E37_79B9_7F4A_7C15_u64 ^ (rep as u64 + 1).wrapping_mul(0xD1B5_4A32_D192_ED03);
+        let mut next = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n
+        };
+        let mut wave: Vec<Child> = Vec::new();
+        for _ in 0..6 {
+            wave.push(lab.spawn(&["run-due"]));
+            std::thread::sleep(Duration::from_millis(80 + next(120)));
+        }
+        let mut killed = Vec::new();
+        for _ in 0..(1 + next(2)) {
+            std::thread::sleep(Duration::from_millis(100 + next(500)));
+            let live: Vec<usize> = (0..wave.len())
+                .filter(|i| !killed.contains(i) && wave[*i].try_wait().unwrap().is_none())
+                .collect();
+            if live.is_empty() {
+                break;
+            }
+            let v = live[usize::try_from(next(live.len() as u64)).unwrap()];
+            wave[v].kill().unwrap();
+            killed.push(v);
+        }
+        kills += killed.len();
+        for (i, c) in wave.into_iter().enumerate() {
+            let (code, out) = finish(c);
+            runs += 1;
+            if killed.contains(&i) {
+                continue;
+            }
+            assert_eq!(
+                code,
+                Some(0),
+                "rep {rep}: run-due {i} exited {code:?}: {out}"
+            );
+            assert!(!out.contains("corrupt stored data"), "rep {rep}: {out}");
+        }
+        // Recovery passes, then two that must be quiet.
+        for pass in 0..3 {
+            let o = lab.run(&["run-due"]);
+            assert_eq!(
+                o.status.code(),
+                Some(0),
+                "rep {rep} pass {pass}: {}",
+                text(&o)
+            );
+        }
+        let settled = recover_rows_all(&lab);
+        for pass in 0..2 {
+            let o = lab.run(&["run-due"]);
+            let said = text(&o);
+            assert_eq!(o.status.code(), Some(0), "rep {rep}: {said}");
+            assert!(
+                !said.contains("recovered"),
+                "rep {rep} quiet pass {pass}: {said}"
+            );
+        }
+        assert_eq!(
+            recover_rows_all(&lab),
+            settled,
+            "rep {rep}: rows after quiet passes"
+        );
+        // The file: one recover row per call really cut off, and per item exactly one finished call.
+        let c = rusqlite::Connection::open_with_flags(
+            &lab.db,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let items: Vec<(i64, String)> = c
+            .prepare("SELECT id, state FROM items ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(items.len(), GOALS, "rep {rep}");
+        for (id, st) in &items {
+            let n = |sql: &str| -> i64 { c.query_row(sql, [id], |r| r.get(0)).unwrap() };
+            let intents = n("SELECT COUNT(*) FROM evidence WHERE item_id=?1 AND kind='intent'");
+            let unsettled = n(
+                "SELECT COUNT(*) FROM evidence WHERE item_id=?1 AND kind='intent' AND id NOT IN (SELECT intent_id FROM evidence WHERE intent_id IS NOT NULL)",
+            );
+            let recovers =
+                n("SELECT COUNT(*) FROM evidence WHERE item_id=?1 AND call='core.recover'");
+            assert_eq!(
+                recovers, unsettled,
+                "rep {rep} item {id}: a false (or missing) core.recover row"
+            );
+            assert_eq!(
+                intents - unsettled,
+                1,
+                "rep {rep} item {id}: not exactly one finished call"
+            );
+            assert!(
+                st == "done" || st == "running",
+                "rep {rep} item {id} is {st}"
+            );
+            if unsettled == 0 {
+                assert_eq!(intents, 1, "rep {rep} item {id} ran twice with no kill");
+            }
+            recovered += recovers;
+            cut += unsettled;
+        }
+        assert_eq!(
+            lab.run(&["verify-evidence"]).status.code(),
+            Some(0),
+            "rep {rep}"
+        );
+    }
+    eprintln!(
+        "storm: {reps} repetitions, {runs} run-due, {kills} kills, {cut} calls cut off, {recovered} recover rows (equal), 0 false"
+    );
+}
+
+fn recover_rows_all(lab: &Lab) -> usize {
+    text(&lab.run(&["evidence"]))
+        .matches("core.recover")
+        .count()
 }

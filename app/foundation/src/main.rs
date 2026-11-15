@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use signal_hook::consts::{SIGINT, SIGTERM};
 
+use endora_foundation::application::core::ITEM_TAKEN;
 use endora_foundation::application::{
     Acceptance, Core, NewGoal, NewItem, Outcome, OwnerProof, WatchEnd,
 };
@@ -25,7 +26,7 @@ use endora_foundation_git::{
     AgentExecutor, ClaudeCode, ClaudeLimits, Config as GitConfig, Confinement, GitChange, Options,
     canonical_deny_paths, mac_profile_can_read,
 };
-use endora_kernel::{Clock, Reversibility, Tier};
+use endora_kernel::{AppError, Clock, Reversibility, Tier};
 
 use probes::{Kind, Probe, Probes};
 
@@ -562,7 +563,17 @@ fn run_due(core: &Core) -> Out {
     }
     for (id, routine, fresh) in todo {
         if fresh {
-            core.start(&runner, id).map_err(err)?;
+            match core.start(&runner, id) {
+                Ok(()) => {}
+                // Another process listed the same open item and started it first. Nothing was
+                // written here; the item is theirs. Skip it and carry on (exit status is not
+                // affected): a lost race on one item is not a failure of the run.
+                Err(AppError::Conflict { code, message }) if code == ITEM_TAKEN => {
+                    println!("item {}: skipped: {message}", id.0);
+                    continue;
+                }
+                Err(e) => return Err(err(e)),
+            }
         }
         let (met, end) = core.check_watch(id).map_err(err)?;
         println!(
