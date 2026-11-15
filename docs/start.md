@@ -95,14 +95,14 @@ endora-foundation run-due
 $ endora-foundation goal add --title "Web answers" --why "the local web port must accept connections" --probe web --acceptance owner
 goal 1
 $ endora-foundation run-due
-(no output: the goal has no routine, so there is no item)
+no routines: a goal needs a routine to make items
 ```
 
 - `--title` and `--why` say what and why; `--probe web` adds the criterion "probe `web` is healthy"
   with its check (a tcp probe is healthy when `up` is `true`); `--acceptance owner` means a person
   accepts the result (the default; the alternative `auto-observe` is for standing watches).
 - `goal add` also grants Core the right to make the one read-only call its check needs.
-- `run-due` ("run what is due") printed **nothing**, exit 0. That is not a failure: `run-due` works on
+- `run-due` ("run what is due") said `no routines: ...`, exit 0. That is not a failure: `run-due` works on
   work items, and a goal creates none. Something has to create items, and that is a routine.
 
 ## 3. A routine gives the goal a rhythm
@@ -320,15 +320,17 @@ accept) and **recover** (the restart). Next:
 ## If something goes wrong
 
 - **`no database: pass --db <path> or set ENDORA_FOUNDATION_DB`**: the settings in step 0 are missing.
-  There is no `--help` and no `--version`: an unknown command prints a one-line usage and exits 1, and with
-  `--db` it also creates a database file (the schema, no rows). An unknown flag is ignored, not rejected.
+  `endora-foundation --help` lists every command, option, environment variable and exit code, and
+  `endora-foundation --version` prints the version and the schema; neither opens a database. An unknown
+  command, option or extra word is refused with exit 1 and named, and creates no database file.
 - **`this command needs the owner token`** (exit 2): pass `--token-file`, or set
   `ENDORA_OWNER_TOKEN_FILE` to the path `init` wrote. If the variable is set but empty or names a missing
   file, the message is instead `cannot read the owner token file <path>: entity not found` (exit 2; an
   empty variable leaves the path blank).
-- **`run-due` prints nothing**: no routine exists, or none is due. The routine's slot is 300 seconds.
-- **`accept 9` prints `storage backend error: Query returned no rows`**: there is no item 9. It is the
-  engine's raw error for an unknown id, not corruption.
+- **`run-due` prints `no routines: ...` or `nothing due (N routines)`**: no routine exists, or none is due.
+  The routine's slot is 300 seconds.
+- **`accept 9` prints `no item 9`** (exit 1): there is no item 9. The same words answer `decline`,
+  `confirm-criterion` and `evidence --item`; `no goal N` and `no routine N` answer the commands that name one.
 - **`not a probe in the config`**: the `--probe` name is not a line in `foundation.conf`, or Core was
   started without `--config`.
 - Stop the listener (Ctrl-C in the second terminal) and delete the demo directory when you are done.

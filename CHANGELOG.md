@@ -30,6 +30,38 @@ There is **no release of the foundation**: the workspace version label is inheri
   [SECURITY.md](SECURITY.md) (the old text is [docs/legacy/SECURITY-HQ.md](docs/legacy/SECURITY-HQ.md)),
   `scripts/check-docs.sh` and `scripts/foundation-size.sh`.
 
+### Added and changed (the command line, weekly independent review A findings 07, 08, 15, 18, 22)
+
+All in the composition root (`app/foundation`); no change to Core, no new exit code (0 ok, 1 error, 2 refused).
+
+- **Added:** `endora-foundation --help` (`-h`, `help`, `<command> --help`) and `--version` print to stdout, exit 0 and
+  open no database (`--db x.db --help` no longer creates `x.db`). The help lists every command, option, the environment
+  variables and the exit codes. `status --short` leaves out the evidence tail.
+- **Changed, a deliberate hardening of a FROZEN surface:** a command line is checked before the database is opened. An
+  unknown option (`--bogus-flag`), an option without its value, an extra word, or an unknown command is refused with
+  **exit 1** naming it (`unknown option --cpa for goal add`). Before, an unknown option was silently ignored (a mistyped
+  `--cap` or `--acceptance` gave the goal the default) and an unknown command created a database file. The command names,
+  the documented options and their meaning are unchanged; only a word that never meant anything is now an error. Exit 1
+  (the documented "error") was chosen over 2 ("refused by authority") so that a script that treats 2 as "the owner token is
+  needed" is not misled. A caller that passed a stray word to a command will now fail and must remove it.
+- **Changed:** `confirm-criterion ITEM 0` is refused (`criteria are numbered from 1`); it used to confirm criterion 1.
+- **Changed (messages and exit codes of mistakes):** an unknown item, goal, routine or criterion says `no item 9`,
+  `no goal 99`, `no routine 3`, `item 1 has 1 criterion: there is no criterion 7` (exit 1) instead of `storage backend
+  error: Query returned no rows` or `FOREIGN KEY constraint failed`; `evidence --item 999` exits 1 (it printed an empty line
+  and exited 0); a negative `--cap` or `--max-failures` says it must not be negative; an impossible move says what state the
+  item is in (`item 3 is already failed`, exit 1 for `decline`; `accept` of an item that is not running stays a refusal, exit 2,
+  and now names the state) and never `corrupt stored data: cannot transition from failed to failed`; `publish` always exits 2,
+  prints `refused:` once, and does so for an item that does not exist; `run-due` with nothing to do prints `no routines: a
+  goal needs a routine to make items` or `nothing due (N routines)` (it printed nothing; `serve` stays quiet).
+- **Tests:** process tests for each of the above, and for `resume-goal` (stopped through the cost-violation path: exit 2
+  without the token, 0 with it, the goal takes calls again). The reviewer's mutation (`resume-goal` made a no-op) now fails a
+  test. The four Docker tests are `ignore`d off Linux (the summary shows them as ignored instead of passed) and, on Linux,
+  fail under `ENDORA_STRICT_TESTS=1` when Docker or the image is missing.
+- **Not changed:** the command-probe result text (it would change stored evidence); the four helper binaries are documented
+  in the foundation README, not removed; comments in `domains/foundation-git` now state only what is verified about the
+  dollar cap, the turn cap and the group kill (comment-only).
+- **Docs:** the skip line of an overlapping `run-due` is quoted as the binary prints it (`... (it is running)`).
+
 ### Changed (the HQ product is LEGACY)
 
 - The HQ node, console, team and the other pre-foundation code stay in the tree and keep building and

@@ -60,7 +60,8 @@ code; text an agent or a remote wrote can never be one.
 
 `endora-foundation [--db FILE] [--config FILE] [--token-file FILE] <command>` (or
 `ENDORA_FOUNDATION_DB`, `ENDORA_FOUNDATION_CONFIG`, `ENDORA_OWNER_TOKEN_FILE`: a PATH, never the
-token). Exit 0 ok, 1 error, 2 refused by authority (the reason is printed). Owner commands
+token; `init` also takes `--token-out FILE`). Exit 0 ok, 1 error (including a mistake in the command
+line), 2 refused by authority (the reason is printed). Owner commands
 (`goal add`, `routine add|resume`, `git-task`, `overall-cap`, `accept`, `decline`, `confirm-criterion`,
 `resume`, `resume-goal`) need the token file and exit 2 without it or with a wrong one.
 
@@ -70,8 +71,10 @@ goal add --title T [--why W] --criteria TEXT [--check CALL INPUT FIELD EXPECT]
          [--acceptance owner|auto-observe]
                             a `--check` belongs to the `--criteria` before it; `--probe NAME`
                             adds a criterion of its own (so `--criteria` + `--check` + `--probe` = 2)
-routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--auto-accept]
-status                      goals, items, evidence tail, open decisions
+routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--max-failures N]
+            [--auto-accept]
+routine resume ID           lift the pause after repeated failures (owner)
+status [--short]            goals, items, evidence tail (--short: without it), open decisions
 run-due                     fire due routines, start new items, run their checks
 serve --every SECONDS       run-due in a loop (a container's command); SIGTERM ends it cleanly
 git-task [--goal ID] [--repo PATH] --instruction T --test-cmd CMD [--cap MICRO_USD]
@@ -93,10 +96,16 @@ capabilities                every registered call with its band, tier and maximu
                             capitalised, `tier=Internal`; the `--tier` flag takes lower case, `internal`)
 ```
 
-There is no `--help` and no `--version`. A command Core does not know prints the one-line usage and exits 1;
-every command opens the database first, so with `--db` (or `ENDORA_FOUNDATION_DB`) that also creates the
-database file. A flag Core does not know is **ignored**, not rejected: a mistyped `--cap` or `--acceptance`
-gives the goal the default (zero cap, owner acceptance), so read `status` after `goal add`. A goal on its own does nothing: `run-due` only works on work
+`endora-foundation --help` (or `-h`, or `help`; also `<command> --help`) prints this command block, the
+environment variables and the exit codes to stdout, and `endora-foundation --version` prints
+`endora-foundation <version> (schema <n>)`. Both exit 0 and open **no** database file, even with `--db`. Every
+command line is checked before the database is opened: a command, option or extra word Core does not know is
+refused with exit 1 and named (`unknown option --cpa for goal add`, `unexpected argument ...`,
+`unknown command ...`), and nothing is created. An unknown item, goal, routine or criterion says so
+(`no item 9`, `no goal 99`, `item 1 has 1 criterion: there is no criterion 7`; exit 1), a move the item's
+state does not allow says what the state is (`item 3 is already failed`; exit 1 for `decline`, and `accept`
+stays a refusal, exit 2), and `run-due` with nothing to do says so (`nothing due (N routines)` or `no routines:
+a goal needs a routine to make items`). `status --short` leaves out the evidence tail. A goal on its own does nothing: `run-due` only works on work
 items, and a routine is what makes them.
 
 `goal add` grants Core the observe-band calls its checks need (the owner wrote them). A routine
@@ -152,7 +161,15 @@ Running it long-term: [../operate.md](../operate.md).
   read-only ones too (`status`, `evidence`, `verify-evidence`, `capabilities`), opens the file read-write
   and runs the pending schema migrations (the current schema is version 8). An older binary then refuses
   the file, and there is no downgrade path.
-- **No machine-readable output, no `--help`, no `--version`.** See "The command line" above.
+- **No machine-readable output.** `--help` and `--version` exist (see "The command line" above); there is
+  no JSON mode, and `status --json` is refused as an unknown option.
+- **Four helper binaries are built with the crates and are not part of the product.** `foundation-status`
+  (domains/foundation) and `foundation-git-status` (domains/foundation-git) print what `endora-foundation
+  status` prints, read-only; nothing in the repository runs them. `foundation-run` (foundation-observe) and
+  `foundation-git-run` (foundation-git) are the runners that the process tests start and kill
+  (`CARGO_BIN_EXE_...` in `slice1.rs`, `slice2.rs`, `slice5b.rs`); they are test harnesses, not tools to
+  run. They are left where they are because moving them means editing the Core and capability crates,
+  which a command-line change does not do; **use `endora-foundation`**.
 
 ## Trust and what is enforced
 

@@ -25,7 +25,7 @@ endora-foundation serve --every 60                            # run-due every 60
   settles items "a dead process left running" and leaves an item a live process is running alone (each
   running item names the lock file of its process), so a second `run-due`, a `serve` tick or a `git-task`
   beside it does not take that item over. Overlapping runs race for the same open items: the process that loses skips
-  that item (`item N: skipped: item N is no longer open: another process took it (running)`) and carries on, and
+  that item (`item N: skipped: item N is no longer open: another process took it (it is running)`) and carries on, and
   `run-due` exits 0 when nothing else is wrong (a lost race on one item is not a failure of the run). Nothing more
   is claimed. What is and is not claimed:
   [TRUST-BOUNDARY.md D4b](foundation/TRUST-BOUNDARY.md#d4b-several-processes-on-one-database).
@@ -39,7 +39,7 @@ endora-foundation serve --every 60                            # run-due every 60
 ## Watch it
 
 There is **no machine-readable status**: `status` prints plain text, and `status --json` is not an
-option (unknown flags are ignored, so it prints the same text and exits 0). Not implemented. What you can
+option (an unknown option is refused: `unknown option --json for status`, exit 1). Not implemented. What you can
 rely on is the exit code (0 ok, 1 error, 2 refused by authority) and, in the text, these things:
 
 - `ITEMS`: a `[failed]` line with its reason; `[running]` with every criterion met waits for you

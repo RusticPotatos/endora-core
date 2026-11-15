@@ -203,7 +203,7 @@ the same observe call twice). After the fix:
 - **Overlapping `run-due` processes (fixed 15 Nov 2026).** Several `run-due` that start together or a second
   apart list the same open items and race to start them, and to fire the same routine slot. Exactly one wins each;
   the loser skips that item (it prints `item N: skipped: item N is no longer open: another process took it
-  (running)`) or that routine slot (silently) and goes on to the next, and `run-due` exits 0 when nothing else is
+  (it is running)`) or that routine slot (silently) and goes on to the next, and `run-due` exits 0 when nothing else is
   wrong. Before the fix the loser exited 1 with `corrupt stored data: cannot transition from running to running`
   (or `firings are append-only`), which did not mean damaged data. In code, `Core::start` returns
   `AppError::Conflict` with the code `item-taken`. Tested with real processes: six started together over six open

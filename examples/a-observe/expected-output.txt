@@ -5,7 +5,7 @@ owner credential created; the token is in owner.token
 $ endora-foundation goal add --title "Web answers" --why "the local web port must accept connections" --probe web --acceptance owner
 goal 1
 $ endora-foundation run-due
-(no output: the goal has no routine, so there is no item)
+no routines: a goal needs a routine to make items
 # 3. a routine gives the goal a rhythm
 $ endora-foundation routine add --goal 1 --every 300 --title "check web"
 routine 1

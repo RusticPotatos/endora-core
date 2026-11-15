@@ -85,7 +85,6 @@ say "\$ endora-foundation init --token-out owner.token"
 say "# 2. a goal alone does nothing"
 ep goal add --title "Web answers" --why "the local web port must accept connections" --probe web --acceptance owner
 ep run-due
-say "(no output: the goal has no routine, so there is no item)"
 
 say "# 3. a routine gives the goal a rhythm"
 ep routine add --goal 1 --every 300 --title "check web"

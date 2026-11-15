@@ -63,6 +63,7 @@ sh scripts/foundation-smoke.sh target/debug/endora-foundation # an end-to-end sm
 ```
 
 Then do it by hand, one command at a time, with every flag explained: [docs/start.md](docs/start.md).
+`target/debug/endora-foundation --help` lists every command, option, environment variable and exit code (it opens no database); `--version` prints the version and schema.
 
 ## Where to go
 
