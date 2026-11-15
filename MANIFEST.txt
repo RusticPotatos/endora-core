@@ -666,6 +666,7 @@ domains/foundation-git/src/confine.rs
 domains/foundation-git/src/lib.rs
 domains/foundation-git/tests/common/mod.rs
 domains/foundation-git/tests/docker.rs
+domains/foundation-git/tests/macos_profile_hardening.rs
 domains/foundation-git/tests/slice2.rs
 domains/foundation-git/tests/slice5b.rs
 domains/foundation-git/tests/slice6.rs

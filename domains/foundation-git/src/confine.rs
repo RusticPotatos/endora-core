@@ -209,6 +209,24 @@ const MAC_DENY: [&str; 8] = [
     "/Volumes",
 ];
 
+/// Operations denied because the profile starts from `(allow default)`: each one lets a confined
+/// process ask a service that runs outside the sandbox to act for it (weekly review B, WF-01 and
+/// WF-04). Each line was tried on its own on macOS 26: `(deny lsopen)` is the one that stops
+/// LaunchServices from starting an applet the agent built (the other two alone did not);
+/// `(deny appleevent-send)` and the LaunchServices mach lookup are belt and braces for asking an
+/// already running app to act; `user-preference-*` or the cfprefsd lookups alone each stop
+/// preference reads and writes (both are kept); the pasteboard lookup is the only line that closes
+/// the pasteboard. Mach lookups and exec otherwise stay open (see TRUST-BOUNDARY.md).
+const MAC_ROUTE_DENY: &str = concat!(
+    "(deny lsopen)(deny appleevent-send)",
+    "(deny user-preference-read)(deny user-preference-write)",
+    "(deny mach-lookup",
+    " (global-name \"com.apple.coreservices.launchservicesd\")",
+    " (global-name \"com.apple.cfprefsd.daemon\")",
+    " (global-name \"com.apple.cfprefsd.agent\")",
+    " (global-name \"com.apple.pasteboard.1\"))",
+);
+
 fn q(p: &Path) -> String {
     format!("(subpath \"{}\")", p.display())
 }
@@ -222,6 +240,7 @@ pub fn mac_profile(dir: &Path, reads: &Reads) -> String {
     let mut p = String::from(
         "(version 1)(allow default)(deny signal (target others))(deny network*)(deny file-write*)",
     );
+    p.push_str(MAC_ROUTE_DENY);
     let _ = write!(
         p,
         "(allow file-write* {} (literal \"/dev/null\") (literal \"/dev/dtracehelper\"))",
