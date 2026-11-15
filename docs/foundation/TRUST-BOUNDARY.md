@@ -208,8 +208,9 @@ the same observe call twice). After the fix:
   (or `firings are append-only`), which did not mean damaged data. In code, `Core::start` returns
   `AppError::Conflict` with the code `item-taken`. Tested with real processes: six started together over six open
   items (every item starts and runs once, all exit 0, chain intact) and storms of staggered `run-due` with random
-  `kill -9` (10 repetitions in the test suite: no false `core.recover` row, no item run twice unless a kill cut its
-  call, no exit status but 0 or the kill). Not claimed: that overlapping runs share the work evenly or in any order.
+  `kill -9` (10 repetitions in the test suite: no false `core.recover` row; no call run again beyond the number of
+  kills, each of which can cost one call, either cut off and recovered, or finished but not yet marked met and
+  re-checked as a dead holder's routine item; no exit status but 0 or the kill). Not claimed: that overlapping runs share the work evenly or in any order.
   One runner process remains the design.
 - **Interfaces.** Recovery of interrupted work is a new EXPERIMENTAL row in [STABILITY.md](STABILITY.md) (the
   freeze table had none; the README had said CURRENT) until a new independent review of this fix.

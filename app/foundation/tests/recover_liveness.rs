@@ -741,8 +741,9 @@ fn overlapping_run_dues_skip_a_lost_start_and_every_item_runs_once() {
 /// 10): per repetition 8 goals (half owner-accepted, half `auto-observe`), 6 staggered `run-due`,
 /// one or two killed at random, then recovery passes and two more that must change nothing.
 /// Whatever the timing: no false `core.recover` row (one row per call really cut off, none for
-/// an item whose holder was alive or whose criteria were met), no item run twice unless a kill
-/// really cut its call, no exit status other than 0 (or the kill), the chain intact.
+/// an item whose holder was alive or whose criteria were met), no call run again beyond the number
+/// of kills (a kill can cost one call: cut off, or died before its criterion was marked met), no
+/// exit status other than 0 (or the kill), the chain intact.
 #[test]
 fn a_storm_of_overlapping_run_dues_and_kills_leaves_no_false_recovery() {
     let reps: usize = std::env::var("ENDORA_STORM_REPS")
@@ -852,6 +853,7 @@ fn a_storm_of_overlapping_run_dues_and_kills_leaves_no_false_recovery() {
             rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
         )
         .unwrap();
+        let mut extra = 0i64;
         let items: Vec<(i64, String)> = c
             .prepare("SELECT id, state FROM items ORDER BY id")
             .unwrap()
@@ -872,21 +874,27 @@ fn a_storm_of_overlapping_run_dues_and_kills_leaves_no_false_recovery() {
                 recovers, unsettled,
                 "rep {rep} item {id}: a false (or missing) core.recover row"
             );
-            assert_eq!(
-                intents - unsettled,
-                1,
-                "rep {rep} item {id}: not exactly one finished call"
+            let finished = intents - unsettled;
+            assert!(
+                finished >= 1,
+                "rep {rep} item {id}: no finished call after the recovery passes"
             );
             assert!(
                 st == "done" || st == "running",
                 "rep {rep} item {id} is {st}"
             );
-            if unsettled == 0 {
-                assert_eq!(intents, 1, "rep {rep} item {id} ran twice with no kill");
-            }
+            // A call that ran again is a call a kill cut off (an unsettled intent, recovered), or
+            // one whose process died between its result row and the "criterion met" mark (the
+            // stuck-watch re-check of a dead holder's routine item). Neither happens without a kill.
+            extra += (finished - 1) + unsettled;
             recovered += recovers;
             cut += unsettled;
         }
+        assert!(
+            extra <= i64::try_from(killed.len()).unwrap(),
+            "rep {rep}: {extra} calls ran again but only {} processes were killed (a live item ran twice)",
+            killed.len()
+        );
         assert_eq!(
             lab.run(&["verify-evidence"]).status.code(),
             Some(0),
