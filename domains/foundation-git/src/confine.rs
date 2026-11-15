@@ -183,6 +183,10 @@ pub struct Reads {
     pub dirs: Vec<PathBuf>,
     /// Single files (for example the agent script named in the config).
     pub files: Vec<PathBuf>,
+    /// Paths denied by name after the system allow, whatever prefix they lie under (the owner's
+    /// database and token file; the macOS profile adds the `-journal`, `-wal` and `-shm` files of
+    /// each). The scripted and the real-agent profile both honour it.
+    pub deny: Vec<PathBuf>,
 }
 
 /// System paths every command may read (read-only on both platforms).
@@ -198,8 +202,15 @@ const SYSTEM_READ: [&str; 7] = [
 
 /// Places the macOS profile denies explicitly (it also denies everything not allowed, so these
 /// are belt and braces against a later allow that happens to cover them).
-const MAC_DENY: [&str; 8] = [
+const MAC_DENY: [&str; 13] = [
     "/Library/Keychains",
+    // Where a package manager or an installer keeps service data and configuration (an owner may
+    // keep a database, a token or a backup there): denied as a whole, not left to file placement.
+    "/Library/Application Support",
+    "/usr/local/var",
+    "/usr/local/etc",
+    "/opt/homebrew/var",
+    "/opt/homebrew/etc",
     "/Users",
     "/private/tmp",
     "/tmp",
@@ -227,8 +238,79 @@ const MAC_ROUTE_DENY: &str = concat!(
     " (global-name \"com.apple.pasteboard.1\"))",
 );
 
+/// The parts of `/opt/homebrew` a confined command may read.
+const HOMEBREW_READ: [&str; 5] = ["bin", "lib", "opt", "Cellar", "share"];
+
+/// `/opt/homebrew/etc` is denied, but Homebrew's Node reads its OpenSSL configuration there and
+/// exits with an error without it; this one directory is allowed again after the deny.
+const HOMEBREW_OPENSSL: &str = "/opt/homebrew/etc/openssl@3";
+
+/// A path as an SBPL string literal body: backslash and double quote escaped, so a path can never
+/// end the literal and add rules of its own (weekly review A, WF-A-25).
+fn esc(p: &Path) -> String {
+    p.to_string_lossy()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+}
+
 fn q(p: &Path) -> String {
-    format!("(subpath \"{}\")", p.display())
+    format!("(subpath \"{}\")", esc(p))
+}
+
+/// `(deny file-read-data ...)` for paths named by the owner, each with its SQLite sidecar files
+/// (`-journal`, `-wal`, `-shm`); empty when there is nothing to deny.
+fn deny_by_name(paths: &[PathBuf]) -> String {
+    use std::fmt::Write as _;
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("(deny file-read-data");
+    for d in paths {
+        let _ = write!(out, " {}", q(d));
+        for side in ["-journal", "-wal", "-shm"] {
+            let mut n = d.clone().into_os_string();
+            n.push(side);
+            let _ = write!(out, " {}", q(Path::new(&n)));
+        }
+    }
+    out.push(')');
+    out
+}
+
+/// Rejects a path the macOS profile cannot carry safely: not UTF-8, or holding a control
+/// character (a newline would end the rule). Quotes and backslashes are escaped, not rejected.
+///
+/// # Errors
+/// Names the path and the reason.
+pub fn check_profile_path(p: &Path) -> Result<(), String> {
+    let Some(s) = p.to_str() else {
+        return Err(format!(
+            "the path {} is not UTF-8: the sandbox profile cannot carry it",
+            p.display()
+        ));
+    };
+    if s.chars().any(char::is_control) {
+        return Err(format!(
+            "the path {s:?} holds a control character: the sandbox profile cannot carry it"
+        ));
+    }
+    Ok(())
+}
+
+/// Would the macOS profile let a confined command read `p`, before any by-name deny? (A
+/// start-up warning uses it: a database, token or backup kept there is placement-dependent.)
+#[must_use]
+pub fn mac_profile_can_read(p: &Path) -> Option<String> {
+    let denied = MAC_DENY.iter().any(|d| p.starts_with(d));
+    if denied {
+        return None;
+    }
+    let homebrew = HOMEBREW_READ.map(|d| format!("/opt/homebrew/{d}"));
+    SYSTEM_READ
+        .iter()
+        .map(|s| (*s).to_owned())
+        .chain(homebrew)
+        .find(|a| p.starts_with(a))
 }
 
 /// The macOS `sandbox-exec` profile for a job directory (already canonical).
@@ -255,8 +337,11 @@ pub fn mac_profile(dir: &Path, reads: &Reads) -> String {
     for s in SYSTEM_READ {
         let _ = write!(p, " (subpath \"{s}\")");
     }
+    // Only the toolchain parts of Homebrew, never its `var` or `etc` (service data, configuration).
     if Path::new("/opt/homebrew").exists() {
-        p.push_str(" (subpath \"/opt/homebrew\")");
+        for d in HOMEBREW_READ {
+            let _ = write!(p, " (subpath \"/opt/homebrew/{d}\")");
+        }
     }
     p.push(')');
     p.push_str("(deny file-read-data");
@@ -264,12 +349,16 @@ pub fn mac_profile(dir: &Path, reads: &Reads) -> String {
         let _ = write!(p, " (subpath \"{d}\")");
     }
     p.push(')');
+    if Path::new("/opt/homebrew").exists() {
+        let _ = write!(p, "(allow file-read-data (subpath \"{HOMEBREW_OPENSSL}\"))");
+    }
+    p.push_str(&deny_by_name(&reads.deny));
     let _ = write!(p, "(allow file-read-data {}", q(dir));
     for d in &reads.dirs {
         let _ = write!(p, " {}", q(d));
     }
     for f in &reads.files {
-        let _ = write!(p, " (literal \"{}\")", f.display());
+        let _ = write!(p, " (literal \"{}\")", esc(f));
     }
     p.push(')');
     p
@@ -321,19 +410,14 @@ pub fn mac_profile_real_agent(dir: &Path, reads: &Reads, deny: &[PathBuf]) -> St
         "(allow network-outbound (remote tcp \"*:443\") (literal \"/private/var/run/mDNSResponder\"))",
     );
     p.push_str("(allow file-read-data (subpath \"/private/etc\"))");
-    if !deny.is_empty() {
-        p.push_str("(deny file-read-data");
-        for d in deny {
-            let _ = write!(p, " (subpath \"{}\")", d.display());
-        }
-        p.push(')');
-    }
+    let named: Vec<PathBuf> = deny.iter().chain(&reads.deny).cloned().collect();
+    p.push_str(&deny_by_name(&named));
     let _ = write!(p, "(allow file-read-data {}", q(dir));
     for d in &reads.dirs {
         let _ = write!(p, " {}", q(d));
     }
     for f in &reads.files {
-        let _ = write!(p, " (literal \"{}\")", f.display());
+        let _ = write!(p, " (literal \"{}\")", esc(f));
     }
     p.push(')');
     p
@@ -952,6 +1036,18 @@ fn run_docker(j: &Job<'_>) -> Result<Ran, String> {
 pub fn run(j: &Job<'_>) -> Result<Ran, String> {
     let mut cmd = match j.confinement {
         Confinement::MacSandbox => {
+            let named: &[PathBuf] = match j.profile {
+                Profile::Scripted => &[],
+                Profile::RealAgent { deny } => deny,
+            };
+            let mut all: Vec<&Path> = vec![j.dir, j.cwd];
+            all.extend(j.reads.dirs.iter().map(PathBuf::as_path));
+            all.extend(j.reads.files.iter().map(PathBuf::as_path));
+            all.extend(j.reads.deny.iter().map(PathBuf::as_path));
+            all.extend(named.iter().map(PathBuf::as_path));
+            for p in all {
+                check_profile_path(p)?;
+            }
             let mut c = Command::new("sandbox-exec");
             let profile = match j.profile {
                 Profile::Scripted => mac_profile(j.dir, j.reads),
@@ -1029,6 +1125,7 @@ mod tests {
         let reads = Reads {
             dirs: vec!["/opt/toolchain".into()],
             files: vec!["/srv/agent.sh".into()],
+            ..Reads::default()
         };
         let a = bwrap_args(dir, &dir.join("repo"), &reads);
         for flag in [
@@ -1070,6 +1167,7 @@ mod tests {
         let reads = Reads {
             dirs: vec!["/Users/x/.rustup".into()],
             files: vec!["/Users/x/lab/agent.sh".into()],
+            ..Reads::default()
         };
         let p = mac_profile(Path::new("/private/tmp/job"), &reads);
         assert!(p.contains("(deny file-read-data)") && p.contains("(deny network*)"));

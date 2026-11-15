@@ -15,7 +15,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use endora_foundation_git::{Reads, mac_profile, mac_profile_real_agent};
+use endora_foundation_git::{Reads, check_profile_path, mac_profile, mac_profile_real_agent};
 
 const LSREGISTER: &str = "/System/Library/Frameworks/CoreServices.framework/Frameworks/\
 LaunchServices.framework/Support/lsregister";
@@ -241,9 +241,16 @@ fn the_hardened_profiles_still_run_sh_git_and_osacompile() {
             eprintln!("note: no command line tools, the git step is skipped");
             ""
         };
+        // Homebrew's Node reads its OpenSSL config under /opt/homebrew/etc, which is denied except
+        // for that one directory: it must still start.
+        let node = if Path::new("/opt/homebrew/bin/node").exists() {
+            "/opt/homebrew/bin/node -e 'process.exit(0)' || exit 96\n"
+        } else {
+            ""
+        };
         let script = format!(
             "/bin/sh -c 'echo sh-ok > sh.txt' || exit 91\n{git}\
-             osacompile -o t.app -e 'return 1' || exit 95\n"
+             osacompile -o t.app -e 'return 1' || exit 95\n{node}"
         );
         let (code, text) = lab.confined(&profile, &script);
         assert_eq!(code, 0, "{name}: an ordinary tool failed ({code}): {text}");
@@ -315,4 +322,142 @@ fn a_confined_process_cannot_reach_the_pasteboard_service() {
             "{name}: a confined process used the pasteboard service: {out}"
         );
     }
+}
+
+/// WF-A-16: the owner's database and token are denied by name in the scripted profile too, each
+/// with its SQLite sidecars, after the system allow and before the job allow, wherever they lie;
+/// the prefixes where service data and configuration live are denied whole; Homebrew is no longer
+/// readable as a whole. Plain text: checked on every platform.
+#[test]
+fn both_profiles_deny_the_database_and_token_by_name_and_the_service_data_prefixes() {
+    let job = Path::new(JOB);
+    let reads = Reads {
+        deny: vec![
+            "/usr/local/var/endora/core.db".into(),
+            "/Library/Application Support/endora/owner.token".into(),
+        ],
+        ..Reads::default()
+    };
+    let profiles = [
+        ("scripted", mac_profile(job, &reads)),
+        ("real-agent", mac_profile_real_agent(job, &reads, &[])),
+    ];
+    for (name, p) in profiles {
+        let after_system = p.find("(allow file-read-data (literal \"/\")").unwrap();
+        let job_allow = p
+            .rfind(&format!("(allow file-read-data (subpath \"{JOB}\")"))
+            .unwrap();
+        for f in [
+            "/usr/local/var/endora/core.db",
+            "/usr/local/var/endora/core.db-journal",
+            "/usr/local/var/endora/core.db-wal",
+            "/usr/local/var/endora/core.db-shm",
+            "/Library/Application Support/endora/owner.token",
+        ] {
+            let at = p
+                .rfind(&format!("(subpath \"{f}\")"))
+                .unwrap_or_else(|| panic!("{name}: no deny for {f}"));
+            assert!(
+                after_system < at && at < job_allow,
+                "{name}: {f} is not denied between the system allow and the job allow"
+            );
+        }
+        for d in [
+            "/usr/local/var",
+            "/usr/local/etc",
+            "/opt/homebrew/var",
+            "/opt/homebrew/etc",
+            "/Library/Application Support",
+        ] {
+            assert!(
+                p.contains(&format!("(subpath \"{d}\")")),
+                "{name}: {d} is not denied"
+            );
+        }
+        assert!(
+            !p.contains("(subpath \"/opt/homebrew\")"),
+            "{name}: all of /opt/homebrew is readable"
+        );
+    }
+}
+
+/// WF-A-25: a path can never end the profile's string literal and add rules of its own. Quote and
+/// backslash are escaped; a newline (or any control character) is refused; parentheses sit inside
+/// a literal and are harmless. One check per hostile character.
+#[test]
+fn hostile_characters_in_a_path_cannot_alter_the_profile() {
+    for (what, bad) in [
+        ("double quote", "/x\") (allow file-write* (subpath \"/"),
+        ("backslash", "/x\\\") (allow file-write* (subpath \"/"),
+        ("parenthesis", "/x) (allow file-write* (subpath \"/"),
+    ] {
+        let p = mac_profile(Path::new(bad), &Reads::default());
+        // The profile text must not contain the injected rule outside a string literal: every
+        // quote that came from the path is preceded by a backslash.
+        assert!(
+            !p.contains("(allow file-write* (subpath \"/\")"),
+            "{what}: the path injected an allow rule: {p}"
+        );
+        let real = mac_profile_real_agent(Path::new(bad), &Reads::default(), &[bad.into()]);
+        assert!(
+            !real.contains("(allow file-write* (subpath \"/\")"),
+            "{what}: real-agent"
+        );
+    }
+    assert!(check_profile_path(Path::new("/ok/with space (1)")).is_ok());
+    assert!(
+        check_profile_path(Path::new("/bad\nnewline")).is_err(),
+        "newline"
+    );
+    assert!(
+        check_profile_path(Path::new("/bad\rreturn")).is_err(),
+        "carriage return"
+    );
+    assert!(check_profile_path(Path::new("/bad\0nul")).is_err(), "nul");
+}
+
+/// WF-A-25 behaviour: a job directory whose name holds a quote, a backslash and parentheses is
+/// still confined to itself (writes inside work, a write to a sibling named in the path is denied)
+/// and the profile is not malformed.
+#[test]
+fn a_job_directory_named_with_hostile_characters_is_confined_to_itself() {
+    if skip("hostile directory name") {
+        return;
+    }
+    let mut lab = Lab::new("hostile");
+    let sibling = lab.out.clone();
+    let hostile = lab.root.join(format!(
+        "job\") (allow file-write* (subpath \"{}\") (x\\y",
+        sibling.display()
+    ));
+    std::fs::create_dir_all(&hostile).unwrap();
+    lab.job = hostile.canonicalize().unwrap();
+    let profile = mac_profile(&lab.job, &Reads::default());
+    let marker = sibling.join("m.txt");
+    let script = format!(
+        "echo ok > inside.txt || exit 71\necho x > '{}' && exit 72\nexit 0\n",
+        marker.display()
+    );
+    let (code, text) = lab.confined(&profile, &script);
+    assert_eq!(code, 0, "exit {code}: {text}");
+    assert!(
+        lab.job.join("inside.txt").exists(),
+        "no write inside the job directory"
+    );
+    assert!(
+        !marker.exists(),
+        "a write outside the job directory got through"
+    );
+}
+
+/// The start-up note: which paths lie under a prefix the profile can read.
+#[test]
+fn the_startup_note_names_a_readable_prefix_and_stays_quiet_for_denied_ones() {
+    use endora_foundation_git::mac_profile_can_read;
+    assert!(mac_profile_can_read(Path::new("/opt/homebrew/share/endora/c.db")).is_some());
+    assert!(mac_profile_can_read(Path::new("/usr/local/bin/x")).is_some());
+    assert!(mac_profile_can_read(Path::new("/opt/homebrew/var/c.db")).is_none());
+    assert!(mac_profile_can_read(Path::new("/usr/local/var/c.db")).is_none());
+    assert!(mac_profile_can_read(Path::new(concat!("/Us", "ers/x/c.db"))).is_none());
+    assert!(mac_profile_can_read(Path::new("/srv/c.db")).is_none());
 }

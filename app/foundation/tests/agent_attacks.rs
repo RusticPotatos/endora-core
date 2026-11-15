@@ -324,3 +324,134 @@ fn an_agent_cannot_spoof_the_owner_or_accept_its_own_work() {
         "the forged acceptance has no evidence row (a consistency check would show it)"
     );
 }
+
+/// Weekly review A, WF-A-16: the owner's database and token kept under a prefix the profile
+/// allows for reading (`/opt/homebrew/share`, where Homebrew's own files live) must still be
+/// unreadable to a scripted agent, by name; and a copy kept under `/opt/homebrew/var` (service
+/// data) is unreadable by directory. Needs a writable Homebrew prefix; otherwise it says SKIP.
+#[test]
+fn an_agent_cannot_read_a_database_or_token_kept_under_an_allowed_prefix() {
+    let brew = Path::new("/opt/homebrew");
+    let writable = |d: &str| {
+        let t = brew
+            .join(d)
+            .join(format!("sec1-probe-{}", std::process::id()));
+        let ok = std::fs::create_dir(&t).is_ok();
+        let _ = std::fs::remove_dir(&t);
+        ok
+    };
+    if !writable("share") || !writable("var") {
+        eprintln!("SKIP: no writable /opt/homebrew/share and /opt/homebrew/var on this Mac");
+        return;
+    }
+    struct Cleanup(Vec<PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for d in &self.0 {
+                let _ = std::fs::remove_dir_all(d);
+            }
+        }
+    }
+    let lab = Lab::new("a16");
+    let tag = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos())
+    );
+    let share = brew.join("share").join(format!("sec1-a16-{tag}"));
+    let var = brew.join("var").join(format!("sec1-a16-{tag}"));
+    let _clean = Cleanup(vec![share.clone(), var.clone()]);
+    std::fs::create_dir_all(&share).unwrap();
+    std::fs::create_dir_all(&var).unwrap();
+    let canary = format!("canary-{tag}");
+    std::fs::write(var.join("copy.txt"), &canary).unwrap();
+    let db = share.join("live.db");
+    let token = share.join("owner.token");
+    let tpl = lab.dir.join("template");
+    std::fs::create_dir_all(&tpl).unwrap();
+    std::fs::write(tpl.join("lib.sh"), "add() { echo $(( $1 - $2 )); }\n").unwrap();
+    std::fs::write(
+        tpl.join("test.sh"),
+        ". ./lib.sh\n[ \"$(add 2 3)\" = 5 ] || { echo FAIL; exit 1; }\necho PASS\n",
+    )
+    .unwrap();
+    let agent = lab.dir.join("agent.sh");
+    std::fs::write(
+        &agent,
+        format!(
+            "printf 'add() {{ echo $(( $1 + $2 )); }}\\n' > lib.sh\n\
+             cat '{t}' > t.out 2> t.err; echo $? > t.exit\n\
+             /usr/bin/sqlite3 '{d}' 'select count(*) from owner_credential' > d.out 2>&1; echo $? > d.exit\n\
+             cat '{c}' > c.out 2> c.err; echo $? > c.exit\n",
+            t = token.display(),
+            d = db.display(),
+            c = var.join("copy.txt").display()
+        ),
+    )
+    .unwrap();
+    let cfg = lab.dir.join("foundation.conf");
+    std::fs::write(
+        &cfg,
+        format!(
+            "git {} {} -- sh {}\n",
+            lab.dir.join("scratch").display(),
+            tpl.display(),
+            agent.display()
+        ),
+    )
+    .unwrap();
+    let init = lab.cli(
+        &db,
+        &cfg,
+        None,
+        &["init", "--token-out", token.to_str().unwrap()],
+    );
+    assert_eq!(init.status.code(), Some(0), "{}", text(&init));
+    let secret = std::fs::read_to_string(&token).unwrap().trim().to_owned();
+    let g = lab.cli(&db, &cfg, Some(&token), &GOAL);
+    assert_eq!(g.status.code(), Some(0), "{}", text(&g));
+    let t = lab.cli(
+        &db,
+        &cfg,
+        Some(&token),
+        &[
+            "git-task",
+            "--goal",
+            "1",
+            "--repo",
+            tpl.to_str().unwrap(),
+            "--instruction",
+            "fix add",
+            "--test-cmd",
+            "sh test.sh",
+        ],
+    );
+    let job = std::fs::read_dir(lab.dir.join("scratch"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path().join("repo"))
+        .find(|p| p.join("t.exit").exists())
+        .unwrap_or_else(|| panic!("the agent did not run: {}", text(&t)));
+    let r = |f: &str| read(&job, f);
+    println!(
+        "a16: token exit={} database exit={} copy exit={}",
+        r("t.exit"),
+        r("d.exit"),
+        r("c.exit")
+    );
+    assert_ne!(
+        r("t.exit"),
+        "0",
+        "the token under an allowed prefix was read"
+    );
+    assert!(!r("t.out").contains(&secret));
+    assert_ne!(
+        r("d.exit"),
+        "0",
+        "the database under an allowed prefix was opened"
+    );
+    assert_ne!(r("c.exit"), "0", "a copy under /opt/homebrew/var was read");
+    assert!(!r("c.out").contains(&canary));
+}

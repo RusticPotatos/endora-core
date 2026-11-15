@@ -53,8 +53,8 @@ pub use claude::{
 use claude::{Report, granted};
 pub use confine::{
     Confinement, DEFAULT_IMAGE, DockerCall, EVIDENCE_CAP, Profile, Reads, SECRET_NAMES,
-    SECRET_PREFIXES, bwrap_args, cap_text, detect, docker_args, mac_profile,
-    mac_profile_real_agent, reap_containers, redact,
+    SECRET_PREFIXES, bwrap_args, cap_text, check_profile_path, detect, docker_args, mac_profile,
+    mac_profile_can_read, mac_profile_real_agent, reap_containers, redact,
 };
 use confine::{Job, Ran};
 
@@ -111,7 +111,8 @@ pub struct Options {
     /// to the `ClaudeCode` child as `CLAUDE_CODE_OAUTH_TOKEN` (never in an argument, evidence or
     /// a file inside the job). Default: none.
     pub credential_file: Option<PathBuf>,
-    /// Paths the real-agent profile denies by name (the token file, the database).
+    /// Paths both macOS profiles deny reading by name (the token file, the database; the profile
+    /// adds each one's `-journal`, `-wal` and `-shm` files), whatever prefix they lie under.
     pub deny_paths: Vec<PathBuf>,
 }
 
@@ -388,6 +389,7 @@ impl GitChange {
         Reads {
             dirs: self.options.read_dirs.clone(),
             files,
+            deny: self.options.deny_paths.clone(),
         }
     }
 

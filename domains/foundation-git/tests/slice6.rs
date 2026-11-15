@@ -322,6 +322,7 @@ fn the_real_agent_profile_allows_only_outbound_443_and_denies_secrets_by_name() 
     let reads = Reads {
         dirs: vec![],
         files: vec!["/Users/x/bin/claude".into()],
+        deny: vec![],
     };
     let p = mac_profile_real_agent(
         Path::new("/private/tmp/job"),
