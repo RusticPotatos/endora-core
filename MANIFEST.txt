@@ -1002,6 +1002,7 @@ scripts/bench-model.py
 scripts/check-collection-parity.sh
 scripts/check-console.mjs
 scripts/check-core-origin.sh
+scripts/check-docs.sh
 scripts/check-image-privacy.sh
 scripts/check-nothing-personal.mjs
 scripts/check-owner-values.mjs
