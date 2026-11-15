@@ -89,7 +89,8 @@ verify-evidence             recompute the evidence hash chain; exit 1 naming the
 evidence --item ID          every record about an item, in full
 backup --to FILE            consistent copy (mode 600; missing parent directories are created; an
                             existing FILE is never overwritten); restore by pointing --db at it
-capabilities                every registered call with its band, tier and maximum cost
+capabilities                every registered call with its band, tier and maximum cost (the tier prints
+                            capitalised, `tier=Internal`; the `--tier` flag takes lower case, `internal`)
 ```
 
 There is no `--help` and no `--version`. A command Core does not know prints the one-line usage and exits 1;

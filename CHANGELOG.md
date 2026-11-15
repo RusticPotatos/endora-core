@@ -7,6 +7,52 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (the foundation, EXPERIMENTAL)
+
+This entry describes the branch `docs/developer-docs-v1`; `main` does not carry it until it is merged.
+There is **no release of the foundation**: the workspace version label is inherited from the HQ product.
+
+- **The foundation: a local-first core for autonomous work.** `endora-foundation` (Core) holds goals,
+  routines, work items and criteria, decides what may run (bands, tiers, default deny, a stop switch, spend
+  caps in micro-USD), runs calls through one `Capability` port, writes an intent and a result to an
+  append-only evidence table with a supplemental hash chain, requires the owner's acceptance before work
+  counts as done, and settles items a dead process left running. Two capabilities ship: `endora-foundation-observe`
+  (tcp, http and command probes from a config file) and `endora-foundation-git` (a code change by a
+  configured agent, verified on a clean copy, then waits for the owner; `git.publish` is always refused),
+  with confinement by macOS `sandbox-exec` or a Docker container per call on Linux. The command line is
+  `endora-foundation` (`app/foundation`); a container recipe is in `deploy/foundation/`.
+- **Stability.** Seven interfaces are FROZEN (additive changes only) and twelve EXPERIMENTAL, rated in
+  [docs/foundation/STABILITY.md](docs/foundation/STABILITY.md). Everything else is EXPERIMENTAL. A real
+  agent (the Claude Code CLI) is supported on macOS only, costs real money, and its dollar cap is unverified.
+- **Documentation.** The pages are rewritten around the foundation and every page carries a `Status:`
+  line; the HQ product's documents are kept and labelled LEGACY ([docs/legacy/](docs/legacy/README.md)).
+  New: a first-run tutorial with a checked example, [docs/operate.md](docs/operate.md), a rewritten
+  [SECURITY.md](SECURITY.md) (the old text is [docs/legacy/SECURITY-HQ.md](docs/legacy/SECURITY-HQ.md)),
+  `scripts/check-docs.sh` and `scripts/foundation-size.sh`.
+
+### Changed (the HQ product is LEGACY)
+
+- The HQ node, console, team and the other pre-foundation code stay in the tree and keep building and
+  passing their tests, but are **unsupported**. The entries below this one are HQ work and are kept as
+  written.
+
+### Security review status of the foundation (as of this branch)
+
+Fixed in this branch's code (stated in [docs/foundation/TRUST-BOUNDARY.md](docs/foundation/TRUST-BOUNDARY.md)):
+signals to other processes are denied in both macOS sandbox profiles (an earlier independent review's
+finding 9, tested); `init` exits 2 when an owner credential already exists; migrations refuse a file
+whose evidence rows already carry hashes under an older schema version (finding 3).
+
+Open in this branch, as documented there and in the independent review of 15 Nov 2026 (reading and
+running, not exploit tests): `OwnerProof` is not bound to a database or process (finding 2);
+`Core::fail` accepts any actor (finding 10); dropped append-only triggers are not detected on open
+(finding 4); a credential-less file can be enrolled by whoever runs `init` first (finding 7); the dollar
+cap of the real-executor path is unverified; **suspected, not yet tested:** on macOS the sandbox's read
+scope depends on where the database and token are kept, nothing bounds how much an executor writes into
+its job directory, and paths are written into the macOS profile without escaping; unknown command-line
+flags are ignored; a goal or routine cannot be retired and a lost owner token cannot be replaced (see
+[Known limits](docs/foundation/README.md#known-limits)). Nothing in this list is claimed fixed.
+
 ### Added (owner acceptance of in-review work, [ADR 0149](docs/adr/0149-owner-acceptance-of-in-review-work.md))
 
 - **A task is done because its criteria were met and the owner accepted it, not because nobody
