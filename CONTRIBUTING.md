@@ -15,6 +15,22 @@ contributions right now are:
 - small, focused improvements to documentation and the workspace skeleton,
 - clarifying issues and questions.
 
+## Working on the foundation
+
+The foundation (Core and its capabilities) is the current system; the HQ product is LEGACY.
+
+- Start with [docs/architecture.md](docs/architecture.md) (the placement guide: config line, one module,
+  adapter, new crate, new context) and [ADR 0150](docs/adr/0150-current-architecture-the-foundation.md).
+- Before a pull request run: `cargo fmt --all -- --check`,
+  `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
+  `cargo test --workspace --all-features`,
+  `sh scripts/foundation-smoke.sh target/debug/endora-foundation`, and, for any documentation change,
+  `sh scripts/check-docs.sh`.
+- Documentation describes the implementation. Never write a planned feature in the present tense; give
+  every page a first-line `Status:` (CURRENT, EXPERIMENTAL, LEGACY, UNSUPPORTED or PLANNED).
+- A new example is a directory with a command that runs it and an expected output; the page quotes the
+  expected file (see `examples/a-observe/`).
+
 ## Before you start
 
 - **Open an issue before any large or architectural change.** Align on direction

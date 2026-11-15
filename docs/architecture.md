@@ -1,4 +1,202 @@
-# Endora Architecture
+Status: CURRENT · the foundation's architecture; the HQ-era text after the divider near the end is LEGACY
+
+# Architecture
+
+*Audience: contributors and developers building on the foundation.* The decision record is
+[ADR 0150](adr/0150-current-architecture-the-foundation.md) (Proposed); this page is the working
+description and the evidence.
+
+Endora is a responsibility-oriented modular monolith using established Domain-Driven Design and Clean
+Architecture principles. Core owns durable work, authority and evidence; capabilities own their
+implementations and integrations. Dependencies point inward, keeping the domain independent of
+infrastructure and vendors. The structure follows responsibility: it is not a template. Core uses
+`domain` / `application` / `infrastructure` modules because it owns durable state, policy, execution
+and recovery; a small capability can be one Rust module; a bounded context is not a crate.
+
+## The six responsibilities, as the code names them
+
+`domains/foundation/src/lib.rs` says "Six verbs and nothing else": **hold**, **decide**, **run**,
+**record**, **require**, **recover**. Where each lives:
+
+| Verb | Code |
+|---|---|
+| hold | `domain/hold.rs` (goals, items, `Fact`, `FactValue`); `Core::add_goal`, `add_item`, `add_routine`, `fire_due` |
+| decide | `domain/decide.rs` (`PolicyRow`, the decision table), `domain/contract.rs` (`CallSpec`, `Budget`); `Core::grant`, `stop`, `call` |
+| run | `application/ports.rs` (`Capability`, the one port); `Core::call` is the only path to a capability |
+| record | `domain/evidence.rs`, `infrastructure/chain.rs` (hash chain); an intent before the call, a result after |
+| require | `domain/accept.rs`; `Core::accept`, `decline`, `confirm_criterion`, `settle_by_policy` |
+| recover | `Core::recover_interrupted`, called at the start of `run-due` |
+
+## The crates as they are
+
+Checked with `cargo metadata` (normal edges; the foundation crates share only `endora-kernel` and
+`endora-persistence` with the LEGACY HQ crates, and no HQ crate depends on a foundation crate).
+
+```mermaid
+flowchart BT
+  kernel["endora-kernel<br/>ids, time, errors, Reversibility, Tier"]
+  persistence["endora-persistence<br/>SQLite handle"]
+  subgraph corebox["endora-foundation (Core)"]
+    domain["domain<br/>goals, policy, acceptance, evidence rules"]
+    infra["infrastructure<br/>SQLite store, hash chain, clock"]
+    app["application<br/>Core engine, the Capability port"]
+  end
+  observe["endora-foundation-observe<br/>probe.run"]
+  git["endora-foundation-git<br/>git.prepare, change, verify, publish (refused)"]
+  cli["endora-foundation-cli<br/>the endora-foundation binary"]
+  persistence --> kernel
+  domain --> kernel
+  infra --> domain
+  infra --> persistence
+  app --> domain
+  app -. "known shortcut: Store is concrete" .-> infra
+  observe --> corebox
+  observe --> kernel
+  git --> corebox
+  git --> kernel
+  git -. "dev only" .-> observe
+  cli --> corebox
+  cli --> git
+  cli --> observe
+  cli --> persistence
+  linkStyle 5 stroke:#d00,stroke-width:2px,stroke-dasharray:4 3
+```
+
+The dashed red edge points outward and contradicts "dependencies point inward": see
+[Known deviations](#known-deviations). Capabilities depend on Core's crate, not the reverse. The
+`app/foundation` crate is the composition root: it parses the command line and the config file and
+wires the capabilities in (`app/foundation/src/main.rs`).
+
+## What an integration must satisfy today
+
+Nothing about Endora's internal structure is imposed on an integration. What it must satisfy is exactly
+this, and nothing more is specified:
+
+- **The contract: a Rust trait.** `Capability` (`domains/foundation/src/application/ports.rs`):
+  `offers()` returns one `CallSpec` per call, with an honest band, tier, maximum cost, seconds and turns,
+  typed input and fact fields and a budget mode; `call(name, input)` (or `call_budgeted`, which also
+  receives the granted `Budget`) returns a `CallOutput` (cost in micro-USD, facts, result text, evidence
+  text, optional profile) or a `CallFailure`. Core calls only through that trait and checks the inputs
+  and facts against the declaration. The trait is **EXPERIMENTAL** (the "call spec" row of
+  [STABILITY.md](foundation/STABILITY.md)): building on it today means building on an interface that
+  may change.
+- **Security expectations.** An untrusted executor runs confined (macOS `sandbox-exec`, or Docker per
+  call on Linux). The boundary is isolation; your declaration is policy metadata that Core trusts. A fact
+  must come from something your code observed, never from text an agent or a remote wrote; a word-valued
+  fact must be one of the closed list your spec declares.
+- **Tests.** A scripted stand-in: no model, no network, no paid API.
+
+**Not specified:** no wire protocol, no schema file for `CallSpec` or `CallOutput`, no process or RPC
+contract, no plugin loader, no language SDK, no conformance suite, no published crate or version
+policy. There is no way to register a capability without compiling it into a Rust binary that depends
+on `endora-foundation`. A tool written in another language can be reached today only by (a) a
+`probe NAME command ...` config line (read-only; the fact is the exit code), (b) the git capability's
+agent command (any executable, run confined), or (c) a Rust adapter that starts it. This is not a plugin
+system.
+
+## Where does my code go?
+
+Stop at the first yes.
+
+1. **A config line.** An existing capability already does it (a probe of kind `tcp`, `http` or
+   `command`). Write a line in the config file. No code, no crate.
+2. **One module.** A small capability (a call or a few, little state, no heavy dependencies) is one Rust
+   module implementing `Capability`, in your own crate or binary. No `domain` / `application` /
+   `infrastructure` folders are required: responsibility, not a template, determines structure.
+3. **An adapter on the existing contract.** You expose an existing tool, service or agent runtime: write
+   an adapter (a module or a small crate) that implements `Capability` and keeps every IO detail inside
+   it. The tool can be in any language if the adapter owns the process, file or network boundary to it.
+4. **A new crate.** Only for its own dependencies, release rhythm, owner or reuse, as `foundation-git`
+   is (2,789 lines in `src`, confinement code, its own `serde_json` dependency, its own security
+   surface). A crate is a packaging decision, not a design status. `foundation-observe` is 470 lines.
+5. **A new bounded context.** Only where the thing owns domain concepts and behaviour with their own
+   invariants and state (Core itself: goals, authority, evidence, recovery). A bounded context is not a
+   crate: it can be a module or a folder, and a crate can hold part of one or several small ones. If it
+   only calls the world on Core's behalf, it is a capability (1 to 4).
+
+Layers: `domain` / `application` / `infrastructure` are justified for Core only. Neither capability
+follows the template, and both pass their tests. Other responsibilities: durable goal, work and evidence
+rules, authority tables, spend rules and recovery go in Core (`domains/foundation/src/domain`);
+anything that touches the world is a capability; process and command-line wiring and the config grammar
+go in `app/foundation`; shared ids, time and errors go in `shared/kernel` only if genuinely
+cross-cutting.
+
+## The evidence for this architecture: the Git capability
+
+The architecture claims that a capability can be added and hardened without changing Core. The test of
+that claim is the git capability (`domains/foundation-git`), added after the observe capability, then
+hardened with fresh-copy acceptance, confinement, a Docker backend and a real agent executor. Exactly
+what holds:
+
+**Holds (structural, checkable in this public repository).** Core's source and tests do not reference
+the capability crates:
+
+```text
+$ grep -rnE "foundation[_-](git|observe)" domains/foundation
+$ echo $?
+1
+```
+
+(no match; exit 1). Core's own dependencies are `endora-kernel`, `endora-persistence`, `rusqlite` and
+`sha2` (`domains/foundation/Cargo.toml`); `serde_json` is the git crate's own. Core's tests use scripted
+stand-ins (`registration.rs`, `budget.rs`, `micro_usd.rs`). One test file, `call_routing.rs`, gives a
+stand-in the call name `probe.run` to test routing; that is a name, not a dependency.
+
+**Holds (from commit history, not checkable in the public repository).** Adding the capability changed
+files only under `domains/foundation-git` (5 files; Core source 0, Core tests 0, CLI 0). Ten later commits
+that hardened it changed only that directory plus three one-line command-line config edits; none changed
+a Core source file for the capability's own logic. The commits are in the project's private history. **The
+public history has one squashed commit** holding the foundation, so these counts cannot be reproduced
+from it.
+
+**Does not hold: the contract did not stay still.** The *capability contract* that Core exposes was
+widened six times while the git capability was built, in commits that also touched the git crate:
+
+| Widening (commit subject, paraphrased) | Core lines changed: domain / application / infrastructure |
+|---|---|
+| registration rejects duplicate names, empty names and undeclared bands | 0 / 34 / 0 |
+| a call declares a maximum cost and returns the actual cost | 25 / 95 / 49 |
+| a check reads a named fact, never text | 93 / 30 / 41 |
+| declared call shapes and executor-declared spend enforcement (`Enforced`, `call_budgeted`, `Budget`) | 338 / 195 / 0 |
+| typed actors, owner token and `OwnerProof` | 252 / 447 / 127 |
+| micro-USD; spec-declared seconds and turns; a structured `profile` column (schema 6 and 7) | 73 / 137 / 166 |
+
+That is about 780 changed lines in Core's `domain` alone (781 by the table). The changes came from what the
+git capability and the real executor taught (cost, facts, budgets, turns, profile) and from independent
+reviews (authority, typed actors). So the accurate claim is: **the git capability, with confinement,
+Docker and the real agent, was added and hardened without changing Core for the capability's own logic,
+but the capability contract was widened six times under it, and today's Core domain is the result of
+those widenings.** The first version of the contract was not sufficient for the second capability's
+real needs. This is one capability and one maintainer; it is evidence, not proof, that a third
+capability would need no change.
+
+## Known deviations
+
+Documented, not fixed (no code change and no new abstraction in this increment):
+
+1. **No storage port.** `application` imports the concrete `Store` and `ManualClock` from
+   `infrastructure` (`application/core.rs`: `use crate::infrastructure::{ChainReport, ManualClock, Store}`;
+   `application/owner.rs`: `use crate::infrastructure::{hex, os_random}`). The only port is `Capability`.
+   `ManualClock`, a test clock, is exported from `infrastructure` and used by `Core::in_memory`. The
+   early design records said storage is reached through application-defined ports; it is not.
+2. **Capabilities depend on Core's whole crate**, including its SQLite store, not on a narrow contract
+   crate.
+3. **Domain purity is by convention.** Every file in `domain/` imports only `endora_kernel`, `std` and its sibling
+   domain modules, but `domain`, `application` and `infrastructure` are modules of one crate whose `Cargo.toml`
+   lists `rusqlite` and `sha2`, so the compiler cannot enforce it and no test does.
+
+If a second store, a fake store or another SQLite replacement is needed, extract a port then.
+
+---
+
+## LEGACY: the HQ architecture (original text, kept unchanged below)
+
+**Status: LEGACY.** Everything below describes Endora HQ and the node, the earlier product. In it, "the
+node is the trust boundary" is an HQ-era statement: in the foundation the boundary is isolation of
+untrusted executors, not any process of Core's ([trust and spend](trust-and-spend.md)). The text was
+last reconciled with the code on 2026-10-20 and is not updated.
+
+## HQ architecture (LEGACY)
 
 > Describes the shape of the system and the boundaries it enforces. Implementation
 > grows one vertical slice at a time. Last reconciled with the code 2026-10-20

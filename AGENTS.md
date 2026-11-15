@@ -20,6 +20,8 @@ the base principles every project shares. What follows is Endora's own.
   existing files, branches, and history.
 - Branch from `main` (the remote has no `develop` branch; see CONTRIBUTING.md). Do not force-push
   or rewrite published history.
+- **Foundation work** (Core, capabilities, the `endora-foundation` command): use the placement guide in
+  [docs/architecture.md](docs/architecture.md); `docs/where-things-go.md` is a map of the LEGACY HQ console.
 - **Put new things where [docs/where-things-go.md](docs/where-things-go.md) says.**
   Before adding a screen, card, setting, menu entry, file or crate, find its place on
   that map. If nothing fits, add the place to the map in the same change; never

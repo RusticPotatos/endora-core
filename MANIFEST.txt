@@ -24,6 +24,7 @@ GOVERNANCE.md
 LICENSE
 Makefile
 NOTICE
+README.md
 SECURITY.md
 THIRD-PARTY-NOTICES.md
 app/cli/Cargo.toml
@@ -340,6 +341,7 @@ deploy/foundation/README.md
 deploy/foundation/compose.example.yml
 deploy/worksite/managed-settings.json
 docker-compose.yml
+docs/README.md
 docs/adr/0050-the-shape-of-the-system.md
 docs/adr/0051-where-the-boundary-is.md
 docs/adr/0052-what-it-knows-about-you.md
@@ -439,6 +441,7 @@ docs/adr/0145-core-console-contract.md
 docs/adr/0146-console-forwards-cores-session.md
 docs/adr/0147-full-system-bundle.md
 docs/adr/0148-the-house-watch.md
+docs/adr/0150-current-architecture-the-foundation.md
 docs/adr/README.md
 docs/adr/archive/0001-modular-monolith.md
 docs/adr/archive/0002-rust-authoritative-core.md
@@ -573,7 +576,9 @@ docs/roadmap.md
 docs/standards.md
 docs/start.md
 docs/terminal-console.md
+docs/terminology.md
 docs/testing.md
+docs/trust-and-spend.md
 docs/where-things-go.md
 domains/capabilities/Cargo.toml
 domains/capabilities/features/an-images-tags-from-its-registry.feature

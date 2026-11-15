@@ -5,6 +5,10 @@ architectural decision: its context, the decision itself, the consequences, and
 the alternatives that were considered. ADRs are short, immutable once accepted,
 and numbered in sequence.
 
+Records 0001 to 0149 describe the HQ-era system and are history, kept as written. The current architecture
+is [0150](0150-current-architecture-the-foundation.md) (Proposed), which says which principles of
+[0050](0050-the-shape-of-the-system.md) are retained and which decisions are superseded.
+
 ## What they add up to
 
 Eighty-eight records stand, all accepted but three still proposed (marked in the *Consolidates*
@@ -335,6 +339,7 @@ of an existing record and take the next number.
 | [0147](0147-full-system-bundle.md) | Core's standalone configuration and the full-system bundle | — |
 | [0148](0148-the-house-watch.md) | The house watch: a machine outside the NAS that watches it, and a second Pi-hole | - |
 | [0149](0149-owner-acceptance-of-in-review-work.md) | The owner accepts work that nobody reviews: `accept` and `send_back` on the card, an `acceptance` policy | - |
+| [0150](0150-current-architecture-the-foundation.md) | Current architecture: the foundation. What of 0050 is retained, what is superseded, what is independent; known deviations. **Proposed** | - |
 
 The forty-nine decisions these consolidate are in [archive/](archive/) — kept in full,
 because the reasoning that produced a rule is the reason it survives an argument later.
