@@ -1,0 +1,44 @@
+# PROPOSED workflow, not active: it lives outside .github on purpose. See docs/ci/README.md.
+# To apply it, move it to .github/workflows/foundation.yml (needs a token with the `workflow` scope).
+#
+# It runs only the foundation gate (scripts/gate-foundation.sh): fmt, clippy -D warnings and tests of the
+# foundation crates, the foundation smoke script and the docs/example check. It does NOT run the legacy
+# workspace tests and not the legacy `--remote` step that ci.yml carries.
+name: Foundation
+
+on:
+  push:
+    branches: ["fix/**", "feat/**", "foundation-v1", "docs/**"]
+  pull_request:
+    branches: ["fix/**", "feat/**", "foundation-v1", "docs/**"]
+
+concurrency:
+  group: foundation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  foundation:
+    name: foundation gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      # Pinned by tag, not by commit sha: the existing workflows in this repository pin by tag
+      # (actions/checkout@v7 in ci.yml) and no sha can be verified offline from them. Pin to a sha
+      # when this file is applied, if the owner wants that.
+      - uses: actions/checkout@v4
+
+      # The release rust-toolchain.toml pins (same step as ci.yml), so the gate checks what ships.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install "$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)" --profile minimal --component rustfmt,clippy
+
+      - name: Foundation gate
+        run: sh scripts/gate-foundation.sh

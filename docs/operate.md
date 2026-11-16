@@ -88,6 +88,10 @@ Stop every running endora-foundation process (serve, git-task, cron runs) before
 2. install the new binary and start it on the live file (it migrates once, in one transaction);
 3. to roll back, restore that untouched copy with the old binary.
 
+## Check the foundation alone
+
+`sh scripts/gate-foundation.sh [--strict]` runs fmt, clippy `-D warnings`, the tests, `scripts/foundation-smoke.sh` and `scripts/check-docs.sh` for the foundation crates only, and prints `FOUNDATION: passed=N failed=N ignored=N` followed by `legacy workspace tests: NOT RUN by this script`: the counts are not a workspace count, and the legacy checks (`scripts/gate.sh`, CI) are separate. `--strict` also fails a skipped confirmation test and any ignored test. It has been run on one Mac only; the Linux and NAS runs are not done, and the proposed workflow in [ci/README.md](ci/README.md) has not run on GitHub Actions.
+
 ## Known issues
 
 Found by an independent review of 15 Nov 2026 and checked here. The recovery and overlapping-`run-due` findings are fixed (see the changelog); the rest are not.

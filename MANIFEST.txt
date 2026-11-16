@@ -496,6 +496,8 @@ docs/adr/archive/README.md
 docs/api/console-v1.json
 docs/api/console-v1.md
 docs/architecture.md
+docs/ci/README.md
+docs/ci/foundation.proposed.yml
 docs/constitution.md
 docs/core-origin.md
 docs/direction-reset.md

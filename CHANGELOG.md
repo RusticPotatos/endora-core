@@ -30,6 +30,11 @@ There is **no release of the foundation**: the workspace version label is inheri
   [SECURITY.md](SECURITY.md) (the old text is [docs/legacy/SECURITY-HQ.md](docs/legacy/SECURITY-HQ.md)),
   `scripts/check-docs.sh` and `scripts/foundation-size.sh`.
 
+### Added (a foundation-only gate)
+
+- `scripts/gate-foundation.sh` checks the foundation crates alone (fmt, clippy `-D warnings`, tests, the foundation smoke script and the docs/example check) and prints `FOUNDATION: passed=N failed=N ignored=N` and `legacy workspace tests: NOT RUN by this script`, so a foundation result is never read as a workspace count. `--strict` fails a skipped confirmation test (`ENDORA_STRICT_TESTS=1`) and any ignored test. `scripts/gate-foundation-self-test.sh` shows it fails when it should.
+- `docs/ci/foundation.proposed.yml` is a proposed GitHub Actions workflow for it, kept outside `.github` until the owner applies it (`docs/ci/README.md`). It has not run on GitHub Actions, and the script has not been run on Linux.
+
 ### Added and changed (the command line, weekly independent review A findings 07, 08, 15, 18, 22)
 
 All in the composition root (`app/foundation`); no change to Core, no new exit code (0 ok, 1 error, 2 refused).
