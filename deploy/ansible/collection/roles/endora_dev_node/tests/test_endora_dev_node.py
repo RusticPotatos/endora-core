@@ -81,7 +81,7 @@ class SandboxEgress(unittest.TestCase):
     def test_the_pi_itself_is_not(self):
         for port in (22, 53, 2375):
             self.assertEqual(
-                self.fw.verdict(SANDBOX, "172.31.250.1", port, interface="br-sandbox"), "DROP"
+                self.fw.verdict(SANDBOX, "192.0.2.10", port, interface="br-sandbox"), "DROP"
             )
 
 

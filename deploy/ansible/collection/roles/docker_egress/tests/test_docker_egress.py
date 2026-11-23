@@ -129,7 +129,7 @@ class EgressPolicy(unittest.TestCase):
     def test_the_host_itself_is_unreachable(self):
         self.applied(MAIL)
         self.assertEqual(
-            self.fw.verdict("172.31.250.5", "172.31.250.1", 22, interface="br-mailmirror"), "DROP"
+            self.fw.verdict("172.31.250.5", "192.0.2.10", 22, interface="br-mailmirror"), "DROP"
         )
 
     def test_other_containers_traffic_is_not_touched(self):

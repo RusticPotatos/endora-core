@@ -374,12 +374,12 @@ also the house's second Pi-hole. The role is `endora_watch`; its README has the 
    Install the ntfy app on your phone and subscribe to that topic on ntfy.sh
    (`security find-generic-password -s endora-core-alert-topic -w` shows it).
 4. **The inventory.** In `deploy/ansible`, copy `inventory.watch.example.yml` to
-   `inventory.watch.local.yml` (git-ignored) and fill in the addresses and checks.
+   `inventory.nas.example.test.yml` (git-ignored) and fill in the addresses and checks.
 5. **Run it**, dry first:
 
    ```sh
-   ansible-playbook -i inventory.watch.local.yml watch.yml --check --diff --ask-become-pass
-   ansible-playbook -i inventory.watch.local.yml watch.yml --diff --ask-become-pass
+   ansible-playbook -i inventory.nas.example.test.yml watch.yml --check --diff --ask-become-pass
+   ansible-playbook -i inventory.nas.example.test.yml watch.yml --diff --ask-become-pass
    ```
 
    "House watch started" arrives on your phone within a minute.

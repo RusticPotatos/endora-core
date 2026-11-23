@@ -68,11 +68,11 @@ newest 20 are kept.
 
 ## Running it
 
-From `deploy/ansible`, with `inventory.watch.local.yml` (from `inventory.watch.example.yml`):
+From `deploy/ansible`, with `inventory.nas.example.test.yml` (from `inventory.watch.example.yml`):
 
 ```sh
-ansible-playbook -i inventory.watch.local.yml watch.yml --check --diff
-ansible-playbook -i inventory.watch.local.yml watch.yml --diff
+ansible-playbook -i inventory.nas.example.test.yml watch.yml --check --diff
+ansible-playbook -i inventory.nas.example.test.yml watch.yml --diff
 ```
 
 On the machine: `systemctl list-timers core-watch.timer`, `journalctl -u core-watch` (a line

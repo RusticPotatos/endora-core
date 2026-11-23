@@ -1,7 +1,7 @@
-# The house watch, for watch.yml. Copy this to inventory.watch.local.yml beside it (git-ignored,
+# The house watch, for watch.yml. Copy this to inventory.nas.example.test.yml beside it (git-ignored,
 # as is every *.local.yml file) and put your real values there, never here:
 #
-#   cp inventory.watch.example.yml inventory.watch.local.yml
+#   cp inventory.watch.example.yml inventory.nas.example.test.yml
 #
 # YAML rather than INI: an INI inventory's [group:vars] are always strings, and the checks are a
 # list. The alert topic is a secret (anyone who knows it can read it): keep it out of the file
