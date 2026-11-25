@@ -129,6 +129,7 @@ probe api http 127.0.0.1:8080/health 60
 probe slow command sleep 3 300                     # kind `command`: the rest of the line before the interval
 git /var/lib/endora/jobs /srv/template -- sh agent.sh   # scratch root, template, agent command line
 action restart-web reversible touch /var/lib/endora/restart-web   # name, `reversible` (any other word is refused), command
+registry-host hub.docker.com                       # enables the read-only registry.tags call; only an allow-listed host loads
 ```
 
 Real-executor lines (see "Real executors"):
@@ -147,6 +148,18 @@ command probe (scrubbed environment) with fact `exit`. It runs only through `rep
 that goal's watch fails, once per failure episode ([ADR 0151](../adr/0151-a-repair-policy-for-a-failed-watch.md)):
 the goal's scope must name `action.run`, the stop switch and the cap refuse it, and the item waits for the
 owner after the re-check. A goal with no repair behaves as before.
+
+`registry-host hub.docker.com` registers `registry.tags <image> <pin>` (two input lines), an observe-band
+call at zero cost that reads the public Docker Hub tags of one image over https, with no credential and
+no redirect, at most five pages of 100 tags, and states whether a newer stable tag of the pin's own
+family exists. Its one fact is `update` (`available` or `current`); the newest tag's name is in the
+result text only. An `rc`, `beta`, `alpha`, `pre`, `dev`, `nightly`, `snapshot` or `canary` tag is
+skipped, so is a tag of another family (`-alpine` against a plain pin), a `v` prefix is ignored, and an
+`-lsNN` rebuild of the same version is `current`. A fetch error, an unreadable page, an unparseable or
+prerelease pin, or no tag of the pin's family is a failed call with no fact, never a guess. It changes
+nothing: no pin edit, no `git.change`, no push. Only `hub.docker.com` is allow-listed; any other host
+makes the config refuse to load. A goal or routine for it is written as with a probe (`--scope
+registry.tags`, a check on `update` equal to `current`).
 
 ## Known limits
 

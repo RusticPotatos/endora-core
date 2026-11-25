@@ -19,6 +19,16 @@ tagged release.
   frozen synthetic set of 20 incidents reaches 18 verified, 2 refused, 0 unsupported accepted (the replies are
   authored, so this measures the checks, not a model). Back up before upgrading. See ADR 0153.
 
+### Added (foundation: `registry.tags`, a read-only image-tag observer, EXPERIMENTAL)
+
+- A config line `registry-host hub.docker.com` registers the call `registry.tags <image> <pin>`: observe band,
+  zero cost, one https GET (no credential, no redirect, at most five pages) behind a `TagSource` port. Its fact
+  is `update` (`available` or `current`) for the newest stable tag of the pin's own family (prereleases, other
+  families and non-version tags skipped, a `v` prefix ignored, an `-lsNN` rebuild of the same version is
+  `current`). A fetch or parse error, or no tag of the family, is a failed call and never a guessed fact.
+  Only `hub.docker.com` is allow-listed; another host makes the config refuse to load. `endora-foundation-observe`
+  gains `serde_json` and `ureq`, both already in the workspace (no new crate in the lock). No schema change.
+
 ### Added (foundation: owner notices on change, local sink only, EXPERIMENTAL)
 
 - A watch that has failed 3 checks in a row for at least 10 minutes makes ONE `failing` notice; its next

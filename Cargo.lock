@@ -928,6 +928,8 @@ version = "0.12.0"
 dependencies = [
  "endora-foundation",
  "endora-kernel",
+ "serde_json",
+ "ureq",
 ]
 
 [[package]]

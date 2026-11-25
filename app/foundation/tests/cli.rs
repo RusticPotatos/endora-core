@@ -2106,3 +2106,37 @@ fn an_action_declared_irreversible_or_outward_is_refused_when_the_config_loads()
         assert!(!db.exists(), "a refused config opened no database");
     }
 }
+
+#[test]
+fn a_registry_host_outside_the_allow_list_is_refused_when_the_config_loads() {
+    let lab = Lab::new("registry-config");
+    let db = lab.dir.join("live.db");
+    for host in ["evil.example.com", "ghcr.io", "hub.docker.com.evil.example"] {
+        let cfg = lab.config(&format!("registry-host {host}"));
+        let o = lab.run_plain(&db, &cfg, &["capabilities"]);
+        assert_ne!(code(&o), 0, "{host}: {}", text(&o));
+        assert!(text(&o).contains("not allowed"), "{host}: {}", text(&o));
+        assert!(!db.exists(), "a refused config opened no database");
+    }
+}
+
+#[test]
+fn an_allowed_registry_host_offers_registry_tags_as_observe_and_no_host_offers_nothing() {
+    let lab = Lab::new("registry-offer");
+    let db = lab.dir.join("live.db");
+    let cfg = lab.config("registry-host hub.docker.com");
+    let o = lab.run_plain(&db, &cfg, &["capabilities"]);
+    assert_eq!(code(&o), 0, "{}", text(&o));
+    let line = text(&o)
+        .lines()
+        .find(|l| l.contains("registry.tags"))
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("{}", text(&o)));
+    assert!(line.contains("observe"), "{line}");
+
+    let db2 = lab.dir.join("none.db");
+    let cfg2 = lab.config("probe web tcp 127.0.0.1:9 60");
+    let o2 = lab.run_plain(&db2, &cfg2, &["capabilities"]);
+    assert_eq!(code(&o2), 0, "{}", text(&o2));
+    assert!(!text(&o2).contains("registry.tags"), "{}", text(&o2));
+}

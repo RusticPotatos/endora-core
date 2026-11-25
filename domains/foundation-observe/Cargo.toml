@@ -11,6 +11,10 @@ authors.workspace = true
 [dependencies]
 endora-foundation = { path = "../foundation" }
 endora-kernel = { path = "../../shared/kernel" }
+# registry.tags: the tags page is JSON; serde_json is already in the workspace.
+serde_json = "1"
+# registry.tags: the one https GET to Docker Hub (already in the workspace, no new crate in the lock).
+ureq = "3.4"
 
 [lints]
 workspace = true

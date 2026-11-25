@@ -7,6 +7,7 @@
 //! something real to be refused, and so the refusal can be shown to have no effect.
 
 pub mod owner;
+pub mod registry;
 pub mod scrub;
 
 use std::io::{Read, Write};
