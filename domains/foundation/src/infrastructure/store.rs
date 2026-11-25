@@ -10,9 +10,9 @@ use super::chain;
 use super::holders::{Held, Holders};
 use super::legacy_evidence;
 use crate::domain::{
-    AcceptancePolicy, ActorKind, Check, Criterion, Evidence, Goal, GoalId, ItemId, ItemState, Kind,
-    Notice, NoticeState, Plan, PolicyRow, Repair, Routine, RoutineId, WorkItem, hold::may_move,
-    notice_key,
+    AcceptancePolicy, ActorKind, Check, Citation, Criterion, Diagnosis, DiagnosisOutcome, Evidence,
+    Goal, GoalId, ItemId, ItemState, Kind, Notice, NoticeState, Plan, PolicyRow, Repair, Routine,
+    RoutineId, WorkItem, hold::may_move, notice_key,
 };
 
 type Res<T> = Result<T, RepositoryError>;
@@ -78,7 +78,7 @@ CREATE TRIGGER IF NOT EXISTS firings_no_replace BEFORE INSERT ON firings
 type Migration = fn(&Connection) -> Res<()>;
 
 /// The ordered history: step `n` takes a file from version `n-1` to `n`.
-const MIGRATIONS: [Migration; 11] = [
+const MIGRATIONS: [Migration; 12] = [
     migrate_to_slice4_shape,
     migrate_slice5a_watch_columns,
     migrate_actor_kind,
@@ -90,6 +90,7 @@ const MIGRATIONS: [Migration; 11] = [
     migrate_routine_retired,
     migrate_repairs,
     migrate_notices,
+    migrate_diagnoses,
 ];
 
 /// The first schema version that has the hash chain (see [`refuse_laundering`]).
@@ -250,6 +251,21 @@ fn migrate_notices(c: &Connection) -> Res<()> {
            routine_id INTEGER NOT NULL REFERENCES routines(id), routine_title TEXT NOT NULL,
            state TEXT NOT NULL CHECK (state IN ('failing','recovered')), at_ms INTEGER NOT NULL,
            delivered_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0, acked_ms INTEGER) STRICT;",
+    )
+    .map_err(backend)
+}
+
+/// Version 12: a failed watch item's advisory diagnosis (ADR 0153). One new table and nothing
+/// else: no existing table or row is touched. Not on the evidence chain and not in the restore
+/// dump of decided state (`DUMPED`): a diagnosis is advice a model proposed and code checked, never
+/// something the foundation decides from. An older build refuses a file at this version, so a
+/// rollback restores the backup taken before the upgrade.
+fn migrate_diagnoses(c: &Connection) -> Res<()> {
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS diagnoses (
+           item_id INTEGER PRIMARY KEY REFERENCES items(id),
+           outcome TEXT NOT NULL CHECK (outcome IN ('verified','not_found','refused','unavailable')),
+           answer TEXT, citations TEXT NOT NULL, faults TEXT NOT NULL, at_ms INTEGER NOT NULL) STRICT;",
     )
     .map_err(backend)
 }
@@ -696,6 +712,108 @@ impl Store {
             )
             .map_err(backend)?;
         Ok((made == 1).then(|| c.last_insert_rowid()))
+    }
+
+    /// The failed watch items (newest first, at most `limit`) that have no diagnosis yet.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub fn undiagnosed_failed_items(&self, limit: usize) -> Res<Vec<ItemId>> {
+        let c = self.db.lock()?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut stmt = c
+            .prepare(
+                "SELECT id FROM items WHERE state='failed' AND routine_id IS NOT NULL
+                 AND id NOT IN (SELECT item_id FROM diagnoses) ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map([limit], |r| Ok(ItemId(r.get(0)?)))
+            .map_err(backend)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(backend)
+    }
+
+    /// Keeps a diagnosis. One per item: a second for the same item changes nothing.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub fn add_diagnosis(&self, d: &Diagnosis) -> Res<()> {
+        let c = self.db.lock()?;
+        let cites: Vec<[&str; 2]> = d
+            .citations
+            .iter()
+            .map(|x| [x.doc.as_str(), x.quote.as_str()])
+            .collect();
+        c.execute(
+            "INSERT OR IGNORE INTO diagnoses (item_id, outcome, answer, citations, faults, at_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                d.item.0,
+                d.outcome.name(),
+                d.answer,
+                serde_json::to_string(&cites).map_err(backend)?,
+                serde_json::to_string(&d.faults).map_err(backend)?,
+                d.at_ms
+            ],
+        )
+        .map(|_| ())
+        .map_err(backend)
+    }
+
+    /// An item's diagnosis, if one was kept.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`]; `Corrupt` for a stored outcome this build does not know.
+    pub fn diagnosis(&self, item: ItemId) -> Res<Option<Diagnosis>> {
+        Ok(self.diagnoses_where("item_id=?1", [item.0])?.pop())
+    }
+
+    /// Every kept diagnosis, oldest item first.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`]; `Corrupt` for a stored outcome this build does not know.
+    pub fn diagnoses(&self) -> Res<Vec<Diagnosis>> {
+        self.diagnoses_where("1=1", [])
+    }
+
+    fn diagnoses_where<P: rusqlite::Params>(&self, cond: &str, p: P) -> Res<Vec<Diagnosis>> {
+        let c = self.db.lock()?;
+        let mut stmt = c
+            .prepare(&format!(
+                "SELECT item_id, outcome, answer, citations, faults, at_ms FROM diagnoses WHERE {cond} ORDER BY item_id"
+            ))
+            .map_err(backend)?;
+        let rows = stmt
+            .query_map(p, |r| {
+                Ok((
+                    r.get::<_, i64>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, i64>(5)?,
+                ))
+            })
+            .map_err(backend)?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (item, outcome, answer, cites, faults, at_ms) = row.map_err(backend)?;
+            let outcome = DiagnosisOutcome::from_name(&outcome)
+                .ok_or_else(|| corrupt(format!("unknown diagnosis outcome `{outcome}`")))?;
+            let cites: Vec<[String; 2]> = serde_json::from_str(&cites).map_err(corrupt)?;
+            out.push(Diagnosis {
+                item: ItemId(item),
+                outcome,
+                answer,
+                citations: cites
+                    .into_iter()
+                    .map(|[doc, quote]| Citation { doc, quote })
+                    .collect(),
+                faults: serde_json::from_str(&faults).map_err(corrupt)?,
+                at_ms,
+            });
+        }
+        Ok(out)
     }
 
     /// The outbox, oldest first: every notice, or only those the owner has not acknowledged.

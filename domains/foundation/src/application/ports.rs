@@ -109,3 +109,18 @@ pub trait NoticeSink {
     /// A short reason; the notice is then retried on the next tick.
     fn deliver(&self, notice: &Notice) -> Result<(), String>;
 }
+
+/// The one port to a model for advisory diagnosis (ADR 0153): a prompt in, a reply out.
+///
+/// It is NOT a capability: it is never offered, never decided, and its reply is never acted on.
+/// Core asks it only to write advice beside a failed watch item, then checks the reply itself
+/// (`domain::diagnosis`). Only a LOCAL implementation is built: the composition root wires one
+/// when the owner's config line names it, and without that line there is none. A model that is
+/// not on this machine is a new outward capability and is the owner's to authorise.
+pub trait DiagnosisModel {
+    /// Sends the prompt and returns the model's reply text.
+    ///
+    /// # Errors
+    /// A short reason when the model could not be reached or did not answer.
+    fn ask(&self, prompt: &str) -> Result<String, String>;
+}

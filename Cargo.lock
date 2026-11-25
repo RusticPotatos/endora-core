@@ -894,6 +894,7 @@ dependencies = [
  "endora-persistence",
  "rusqlite",
  "rustix 0.38.44",
+ "serde_json",
  "sha2",
 ]
 
@@ -907,6 +908,7 @@ dependencies = [
  "endora-kernel",
  "endora-persistence",
  "rusqlite",
+ "serde_json",
  "signal-hook",
 ]
 

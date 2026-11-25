@@ -7,6 +7,7 @@
 //! opened: an unknown command, option or extra word is refused (exit 1) naming itself.
 
 mod actions;
+mod diagnosis;
 mod probes;
 
 /// Set when a write to stdout failed (a closed pipe, a full disk): the exit code then says so.
@@ -94,6 +95,10 @@ struct Settings {
     /// `notice-file <path>`: the append-only LOCAL file owner notices are written to (ADR 0152).
     /// There is no network sink: a future one is a new `NoticeSink` the owner has authorised.
     notice_file: Option<PathBuf>,
+    /// `diagnosis-model ollama HOST:PORT MODEL`: the LOCAL model that writes advisory diagnoses of
+    /// failed watches (ADR 0153). Absent by default, and then nothing is ever asked; the host must
+    /// be a loopback address. Not a capability: its reply is checked and kept as advice only.
+    diagnosis_model: Option<diagnosis::Ollama>,
 }
 
 /// Reads the line-based config: `probe <name> <tcp|http|command> <target...> <interval-seconds>`
@@ -183,6 +188,9 @@ fn read_config(path: &Path) -> Result<Settings, String> {
             Some("claude-credential") if t.len() == 2 => s.credential = Some(t[1].into()),
             Some("claude-arg") if t.len() == 2 => s.claude_args.push(t[1].to_owned()),
             Some("notice-file") if t.len() == 2 => s.notice_file = Some(t[1].into()),
+            Some("diagnosis-model") if t.len() == 4 && t[1] == "ollama" => {
+                s.diagnosis_model = Some(diagnosis::Ollama::new(t[2], t[3]).map_err(|m| at(&m))?);
+            }
             Some(other) => return Err(at(&format!("cannot read `{other}`"))),
         }
     }
@@ -341,6 +349,7 @@ const SPECS: &[Spec] = &[
     spec("publish", &[], &[], &["ITEM"]),
     spec("notices ack", &[], &[], &["ID"]),
     spec("notices", &[("--all", 0)], &[], &[]),
+    spec("diagnoses", &[], &[], &[]),
     spec("run-due", &[], &[], &[]),
     spec("serve", &[("--every", 1)], &["--every"], &[]),
     spec(
@@ -425,6 +434,11 @@ environment:
   ENDORA_FOUNDATION_CONFIG            the capabilities config, when --config is not given
   ENDORA_OWNER_TOKEN_FILE             the path of the owner token file, when --token-file is not given
   ENDORA_FOUNDATION_EXECUTOR_IMAGE    the container image of the Docker confinement backend
+
+diagnoses: a config line `diagnosis-model ollama 127.0.0.1:PORT MODEL` lets run-due and serve ask that LOCAL
+model why the newest failed watch failed, and keeps the answer only if its quotes are verbatim in the
+item's own evidence and a strict check says yes. It is advice: `diagnoses` lists it; nothing acts on it.
+Off unless the line is there; a host that is not this machine is refused.
 
 notices: a config line `notice-file PATH` makes run-due and serve append each notice to PATH (a local,
 append-only file, one line per notice, never twice). Without it notices wait in the database for
@@ -1146,7 +1160,49 @@ fn run_due(core: &Core, s: &Settings) -> Result<bool, Fail> {
         }
     }
     acted |= tell_owner(core, s)?;
+    acted |= diagnose_tick(core, s)?;
     Ok(acted)
+}
+
+/// The most failed watches diagnosed in one tick: a model call is slow, and advice can wait.
+const DIAGNOSES_PER_TICK: usize = 1;
+
+/// One advisory-diagnosis tick, only when the config names a local model: diagnoses the newest
+/// failed watch item that has none. A diagnosis is advice beside the item; it changes nothing
+/// the foundation decides, records or runs. Without the config line this asks nothing.
+fn diagnose_tick(core: &Core, s: &Settings) -> Result<bool, Fail> {
+    let Some(model) = &s.diagnosis_model else {
+        return Ok(false);
+    };
+    let n = core
+        .diagnose_failed(model, DIAGNOSES_PER_TICK)
+        .map_err(err)?;
+    if n > 0 {
+        println!("diagnoses: {n} written (list them with `diagnoses`)");
+    }
+    Ok(n > 0)
+}
+
+/// `diagnoses`: the kept advisory diagnoses, one line each. Advice, never an instruction.
+fn diagnoses_list(core: &Core) -> Out {
+    let all = core.store().diagnoses().map_err(err)?;
+    if all.is_empty() {
+        println!("no diagnoses");
+        return Ok(());
+    }
+    for d in all {
+        let said = d
+            .answer
+            .as_deref()
+            .map_or_else(|| d.faults.join("; "), str::to_owned);
+        let said: String = said
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(200)
+            .collect();
+        println!("item {} [{}] {said} (advisory)", d.item.0, d.outcome.name());
+    }
+    Ok(())
 }
 
 /// One notice tick: make the notices that are due, then give the undelivered ones to the local
@@ -1566,6 +1622,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
         (Some("serve"), _) => serve(core, s, w),
         (Some("notices"), Some("ack")) => notices_ack(core, auth, w),
         (Some("notices"), _) => notices_list(core, w),
+        (Some("diagnoses"), _) => diagnoses_list(core),
         (Some("status"), _) => status(core, w),
         (Some("accept"), _) => {
             let proof = auth.prove(core)?;

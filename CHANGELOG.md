@@ -7,6 +7,18 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (foundation: advisory diagnosis of a failed watch, model OFF by default, EXPERIMENTAL)
+
+- A failed watch item can carry one advisory diagnosis built from its own evidence: a model proposes an answer
+  with quotes, code checks every quote is verbatim in the (scrubbed) evidence and that no cited line gives
+  orders, and a fail-closed entailment check refuses an answer its quote does not state. Unsupported, unreadable
+  or unreachable outcomes are kept as refused or unavailable, with no answer. It never feeds `decide`, a repair,
+  an acceptance or a notice, and is not on the evidence chain. `diagnoses` lists them. The model is a port; the
+  local Ollama adapter exists but nothing runs unless the config has `diagnosis-model ollama 127.0.0.1:PORT MODEL`
+  (loopback only). Schema 12 adds one table (`diagnoses`), tested against a real schema-11 file. A replay of a
+  frozen synthetic set of 20 incidents reaches 18 verified, 2 refused, 0 unsupported accepted (the replies are
+  authored, so this measures the checks, not a model). Back up before upgrading. See ADR 0153.
+
 ### Added (foundation: owner notices on change, local sink only, EXPERIMENTAL)
 
 - A watch that has failed 3 checks in a row for at least 10 minutes makes ONE `failing` notice; its next

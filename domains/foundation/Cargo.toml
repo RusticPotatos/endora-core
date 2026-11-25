@@ -17,6 +17,9 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # Hash of a call's inputs for the evidence record. Already in the lock file at 0.10.9 (an
 # edge, not a new crate); used in `application` only, never in the domain.
 sha2 = "0.10"
+# Reads a model's JSON reply in `domain::diagnosis` (pure: bytes in, value out). Already in the
+# lock file (an edge, not a new crate); the domain still imports no IO.
+serde_json = "1"
 
 # Process-lifetime `flock` on the holder files (`infrastructure/holders.rs`), through rustix's safe
 # API (the workspace forbids `unsafe`). Already in the lock file at 0.38.44 (the terminal client

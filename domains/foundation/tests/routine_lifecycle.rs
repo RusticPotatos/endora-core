@@ -173,7 +173,7 @@ fn a_schema_8_file_opens_unchanged_in_behaviour_and_gains_only_the_retired_flag(
     let clock = Arc::new(ManualClock::new(1_795_577_400_000));
     let core = Core::open(p.to_str().unwrap(), clock.clone()).unwrap();
     assert_eq!(version(&p), SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, 12);
     // Nothing that was there changed: same rows, same chain, every routine live.
     let rows = core.store().evidence_all().unwrap();
     assert_eq!(i64::try_from(rows.len()).unwrap(), before);

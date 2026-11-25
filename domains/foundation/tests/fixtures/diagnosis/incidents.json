@@ -1,0 +1,218 @@
+{
+ "note": "Synthetic incidents: every host is a documentation address or example.com and every name is invented. The replies are authored stand-ins for a model's recorded output, so a replay checks the verifier and the Foundation path, not the model.",
+ "cases": [
+  {
+   "id": "s01",
+   "title": "oom kill",
+   "log": "dial tcp 192.0.2.10:8096: connection refused\nservice web exited with status 137 (out of memory)\nrestart policy: none",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"out of memory\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"service web exited with status 137 (out of memory)\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "out of memory"
+  },
+  {
+   "id": "s02",
+   "title": "disk full",
+   "log": "write /var/lib/app/data.db: no space left on device\nfree-space check: 0 bytes available on /var/lib/app\nlast backup ok",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"no space left on device\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"write /var/lib/app/data.db: no space left on device\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "no space left on device"
+  },
+  {
+   "id": "s03",
+   "title": "expired cert",
+   "log": "GET https://svc.example.com/health\ntls: failed to verify certificate: x509: certificate has expired\nretrying in 30s",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"certificate has expired\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"tls: failed to verify certificate: x509: certificate has expired\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "certificate has expired"
+  },
+  {
+   "id": "s04",
+   "title": "bad config",
+   "log": "starting worker\nconfig error: unknown key 'listen_adress' at line 12\nworker stopped",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"unknown key 'listen_adress'\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"config error: unknown key 'listen_adress' at line 12\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "unknown key 'listen_adress'"
+  },
+  {
+   "id": "s05",
+   "title": "port in use",
+   "log": "binding 0.0.0.0:8080\nlisten tcp 0.0.0.0:8080: bind: address already in use\nexit 1",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"address already in use\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"listen tcp 0.0.0.0:8080: bind: address already in use\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "address already in use"
+  },
+  {
+   "id": "s06",
+   "title": "dns failure",
+   "log": "resolving updates.example.com\nlookup updates.example.com: no such host\ngiving up",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"no such host\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"lookup updates.example.com: no such host\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "no such host"
+  },
+  {
+   "id": "s07",
+   "title": "permission denied",
+   "log": "opening /srv/media/library.db\nopen /srv/media/library.db: permission denied\nuid=1000 gid=1000",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"permission denied\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"open /srv/media/library.db: permission denied\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "permission denied"
+  },
+  {
+   "id": "s08",
+   "title": "dependency down",
+   "log": "web: waiting for database\ndatabase at 192.0.2.20:5432 is not accepting connections\nweb: unhealthy",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"database at 192.0.2.20:5432 is not accepting connections\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"database at 192.0.2.20:5432 is not accepting connections\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "database at 192.0.2.20:5432 is not accepting connections"
+  },
+  {
+   "id": "s09",
+   "title": "bad image tag",
+   "log": "pulling registry.example.com/app:2.9.9\nmanifest for registry.example.com/app:2.9.9 not found: manifest unknown\ncontainer not created",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"manifest unknown\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"manifest for registry.example.com/app:2.9.9 not found: manifest unknown\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "manifest unknown"
+  },
+  {
+   "id": "s10",
+   "title": "db locked",
+   "log": "job sync started\nerror: database is locked (SQLITE_BUSY) after 5000ms\njob sync aborted",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"database is locked\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"error: database is locked (SQLITE_BUSY) after 5000ms\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "database is locked"
+  },
+  {
+   "id": "s11",
+   "title": "clock skew",
+   "log": "token check\ntoken rejected: issued in the future (clock skew 412s)\nauth failed",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"clock skew 412s\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"token rejected: issued in the future (clock skew 412s)\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "clock skew 412s"
+  },
+  {
+   "id": "s12",
+   "title": "mount missing",
+   "log": "scan /mnt/media\nstat /mnt/media: no such file or directory (mount not present)\nscan skipped",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"mount not present\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"stat /mnt/media: no such file or directory (mount not present)\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "mount not present"
+  },
+  {
+   "id": "s13",
+   "title": "rate limited",
+   "log": "POST https://api.example.com/v1/items\nHTTP 429 Too Many Requests; retry-after: 3600\nqueue paused",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"HTTP 429 Too Many Requests\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"HTTP 429 Too Many Requests; retry-after: 3600\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "HTTP 429 Too Many Requests"
+  },
+  {
+   "id": "s14",
+   "title": "panic",
+   "log": "thread 'main' panicked at src/store.rs:88:14:\nindex out of bounds: the len is 3 but the index is 7\nexit code 101",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"index out of bounds\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"index out of bounds: the len is 3 but the index is 7\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "index out of bounds"
+  },
+  {
+   "id": "s15",
+   "title": "memory limit",
+   "log": "container api limit: 512MiB\noom-killer invoked: container api used 530MiB\ncontainer restarted",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"oom-killer invoked\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"oom-killer invoked: container api used 530MiB\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "oom-killer invoked"
+  },
+  {
+   "id": "s16",
+   "title": "wrong password",
+   "log": "IMAP login to mail.example.com\nAUTHENTICATIONFAILED invalid credentials for user jane@example.com\nsync stopped",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"invalid credentials\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"AUTHENTICATIONFAILED invalid credentials for user jane@example.com\"}]}",
+    "yes"
+   ],
+   "expect": "verified",
+   "gold": "invalid credentials"
+  },
+  {
+   "id": "s17",
+   "title": "quiet failure",
+   "log": "check web: failed\nno further detail was logged",
+   "replies": [
+    "{\"status\": \"not_found\", \"answer\": null, \"evidence\": []}"
+   ],
+   "expect": "abstain"
+  },
+  {
+   "id": "s18",
+   "title": "empty probe",
+   "log": "probe returned no output",
+   "replies": [
+    "{\"status\": \"not_found\", \"answer\": null, \"evidence\": []}"
+   ],
+   "expect": "abstain"
+  },
+  {
+   "id": "s19",
+   "title": "wrong role (checker says no)",
+   "log": "web failed\nrestart policy: none\nservice web exited with status 1",
+   "replies": [
+    "{\"status\": \"found\", \"answer\": \"none\", \"evidence\": [{\"doc\": \"DOC\", \"quote\": \"restart policy: none\"}]}",
+    "no"
+   ],
+   "expect": "refused"
+  },
+  {
+   "id": "s20",
+   "title": "parse failure (prose, no JSON)",
+   "log": "web failed\nconnection reset by peer",
+   "replies": [
+    "The service most likely failed because the peer reset the connection."
+   ],
+   "expect": "refused"
+  }
+ ]
+}
