@@ -1069,13 +1069,13 @@ mod tests {
             refused.is_err_and(|why| why.contains("house's network")),
             "refused before anything is sent"
         );
-        // A name that resolves only to the house's addresses is the house's: a laptop's
-        // router-given name ("localhost." stands in for it). Nothing listens on port 1, so the
-        // call fails to connect, but never for being off the house's network.
-        let by_name = send_local("http://localhost.:1/v1", "", b"{}");
+        // An address at home is the house's. Nothing listens on port 1, so the call fails to
+        // connect, but never for being off the house's network. (A name that resolves only to
+        // private addresses is covered offline in `model_server`, with an injected resolver.)
+        let at_home = send_local("http://127.0.0.1:1/v1", "", b"{}");
         assert!(
-            by_name.is_err_and(|why| !why.contains("house's network")),
-            "a name at home is not refused as away"
+            at_home.is_err_and(|why| !why.contains("house's network")),
+            "an address at home is not refused as away"
         );
     }
 
