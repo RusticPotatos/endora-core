@@ -61,6 +61,7 @@ use endora_foundation_git::{
     AgentExecutor, ClaudeCode, ClaudeLimits, Config as GitConfig, Confinement, GitChange, Options,
     canonical_deny_paths, mac_profile_can_read,
 };
+use endora_foundation_observe::registry::{ALLOWED_HOSTS, HubSource, RegistryTags};
 use endora_kernel::{AppError, Clock, RepositoryError, Reversibility, Tier};
 
 use actions::{Action, Actions};
@@ -85,6 +86,9 @@ struct Settings {
     probe_env: Vec<String>,
     /// The repair actions the owner declared (`action NAME reversible COMMAND...`).
     actions: Vec<Action>,
+    /// `registry-host <host>`: enables the read-only `registry.tags` call for that host; only an
+    /// allow-listed host (`endora_foundation_observe::registry::ALLOWED_HOSTS`) is accepted.
+    registry_host: Option<String>,
     git: Option<GitConfig>,
     /// `claude-code <binary> <model> <max-micro-usd> <max-turns> [max-seconds]` (amounts in micro-USD: 1 USD = 1,000,000): the real executor for `git.change`.
     claude: Option<(ClaudeCode, ClaudeLimits, Option<Duration>)>,
@@ -103,7 +107,8 @@ struct Settings {
 
 /// Reads the line-based config: `probe <name> <tcp|http|command> <target...> <interval-seconds>`
 /// `probe-env <NAME>...` (variables a command probe may inherit),
-/// `action <name> reversible <command...>` (a repair; any other declaration is refused) and
+/// `action <name> reversible <command...>` (a repair; any other declaration is refused),
+/// `registry-host <host>` (the read-only `registry.tags` call; an allow-listed host only) and
 /// `git <scratch-root> <template> -- <agent command line...>`. `#` starts a comment.
 fn read_config(path: &Path) -> Result<Settings, String> {
     let text =
@@ -138,6 +143,16 @@ fn read_config(path: &Path) -> Result<Settings, String> {
                     name: t[1].into(),
                     command: t[3..].join(" "),
                 });
+            }
+            Some("registry-host") if t.len() == 2 => {
+                if !ALLOWED_HOSTS.contains(&t[1]) {
+                    return Err(at(&format!(
+                        "registry host `{}` is not allowed (allowed: {})",
+                        t[1],
+                        ALLOWED_HOSTS.join(", ")
+                    )));
+                }
+                s.registry_host = Some(t[1].into());
             }
             Some("probe-env") if t.len() >= 2 => {
                 s.probe_env.extend(t[1..].iter().map(|n| (*n).to_owned()));
@@ -1851,6 +1866,12 @@ fn run() -> Out {
     .map_err(err)?;
     core.register(Arc::new(Actions(settings.actions.clone())))
         .map_err(err)?;
+    if let Some(host) = &settings.registry_host {
+        core.register(Arc::new(
+            RegistryTags::new(host, Box::new(HubSource)).map_err(Fail::Error)?,
+        ))
+        .map_err(err)?;
+    }
     if let Some(mut cfg) = settings.git.clone() {
         if a.words.first().map(String::as_str) == Some("git-task") {
             cfg = task_config(cfg, &a.words)?;
