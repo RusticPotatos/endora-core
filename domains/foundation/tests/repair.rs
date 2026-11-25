@@ -452,7 +452,7 @@ fn a_schema_9_file_gains_the_repairs_table_and_keeps_its_paused_and_retired_rout
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(v, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, 12);
     assert_eq!(core.store().goals().unwrap().len(), goals_before);
     assert!(core.store().repair(goal).unwrap().is_none());
     // The paused routine is still paused and the retired one retired; neither fires.

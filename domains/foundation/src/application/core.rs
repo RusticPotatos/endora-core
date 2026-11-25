@@ -7,13 +7,15 @@ use endora_kernel::{AppError, Clock, DomainError, RepositoryError, Reversibility
 use sha2::{Digest, Sha256};
 
 use super::owner::OwnerProof;
-use super::ports::{CallOutput, Capability, NoticeSink};
+use super::ports::{CallOutput, Capability, DiagnosisModel, NoticeSink};
+use crate::domain::diagnosis;
 use crate::domain::{
     AUTO_ACCEPT, AUTO_OBSERVE, AcceptFacts, AcceptRefusal, AcceptancePolicy, Actor, ActorError,
-    Budget, BudgetMode, CallSpec, Criterion, DEFAULT_MAX_FAILURES, Deny, Evidence, Goal, GoalId,
-    ItemId, ItemState, Kind, NoticeState, PolicyRow, REPAIR_ACTOR, REPAIR_USES_PER_EPISODE, Repair,
-    Routine, RoutineId, Situation, Verdict, WorkItem, authorise, decide, failing_due, plan_firings,
-    validate_criteria, validate_repair, validate_rhythm,
+    Budget, BudgetMode, CallSpec, Criterion, DEFAULT_MAX_FAILURES, Deny, Diagnosis,
+    DiagnosisOutcome, Evidence, Goal, GoalId, ItemId, ItemState, Kind, NoticeState, PolicyRow,
+    REPAIR_ACTOR, REPAIR_USES_PER_EPISODE, Repair, Routine, RoutineId, Situation, Verdict,
+    WorkItem, authorise, decide, failing_due, plan_firings, validate_criteria, validate_repair,
+    validate_rhythm,
 };
 use crate::infrastructure::{ChainReport, ManualClock, Store};
 
@@ -616,6 +618,95 @@ impl Core {
             self.store.mark_watch_said(rid)?;
         }
         Ok(made)
+    }
+
+    /// The named evidence a diagnosis of `item` reads: the item's own evidence rows that hold text
+    /// (probe output, the watch's own control rows), oldest first, named `evidence-<row id>`.
+    ///
+    /// # Errors
+    /// [`AppError::Repository`].
+    pub fn diagnosis_sources(&self, item: ItemId) -> Res<Vec<(String, String)>> {
+        Ok(self
+            .store
+            .evidence_for(item)?
+            .into_iter()
+            .filter(|e| !e.output.trim().is_empty())
+            .map(|e| (format!("evidence-{}", e.id), e.output))
+            .collect())
+    }
+
+    /// Writes the ADVISORY diagnosis of a failed watch item, once. The model proposes an answer
+    /// with quotes; the quotes are checked verbatim against the item's own scrubbed evidence, and
+    /// each quote that holds the answer is put to the checker, whose reply must be a clear yes.
+    /// Anything else is refused and no answer is kept. A model that cannot be reached is kept as
+    /// `unavailable`. The diagnosis is stored beside the item: it is not an evidence row, not an
+    /// input to `decide`, a repair, an acceptance or a notice, and it starts nothing. An item
+    /// that already has one gets it back without a model call.
+    ///
+    /// # Errors
+    /// [`AppError::BadRequest`] for an item that is not a failed watch item;
+    /// [`AppError::Repository`].
+    pub fn diagnose_item(&self, item: ItemId, model: &dyn DiagnosisModel) -> Res<Diagnosis> {
+        if let Some(kept) = self.store.diagnosis(item)? {
+            return Ok(kept);
+        }
+        let it = self.store.item(item)?;
+        if it.routine.is_none() || it.state != ItemState::Failed {
+            return Err(AppError::BadRequest {
+                message: format!(
+                    "item {} is not a failed watch item: nothing to diagnose",
+                    item.0
+                ),
+            });
+        }
+        let bundle = diagnosis::Bundle::new(self.diagnosis_sources(item)?);
+        let mut d = Diagnosis {
+            item,
+            outcome: DiagnosisOutcome::Unavailable,
+            answer: None,
+            citations: Vec::new(),
+            faults: Vec::new(),
+            at_ms: self.now(),
+        };
+        match model
+            .ask(&bundle.prompt())
+            .map(|r| diagnosis::verify_reply(&bundle, &r))
+        {
+            Err(why) => d
+                .faults
+                .push(format!("the model gave no answer: {}", one_line(&why))),
+            Ok(diagnosis::Verdict::NotFound) => d.outcome = DiagnosisOutcome::NotFound,
+            Ok(diagnosis::Verdict::Rejected(faults)) => {
+                d.outcome = DiagnosisOutcome::Refused;
+                d.faults = faults.iter().map(diagnosis::Fault::said).collect();
+            }
+            Ok(diagnosis::Verdict::Verified(answer)) => match entail(model, &answer) {
+                Ok(()) => {
+                    d.outcome = DiagnosisOutcome::Verified;
+                    d.answer = Some(answer.text);
+                    d.citations = answer.citations;
+                }
+                Err(faults) => {
+                    d.outcome = DiagnosisOutcome::Refused;
+                    d.faults = faults.iter().map(diagnosis::Fault::said).collect();
+                }
+            },
+        }
+        self.store.add_diagnosis(&d)?;
+        Ok(self.store.diagnosis(item)?.unwrap_or(d))
+    }
+
+    /// One diagnosis tick: diagnoses the newest failed watch items that have none, at most `max`
+    /// of them. Returns how many were diagnosed. Advisory only (see [`Core::diagnose_item`]).
+    ///
+    /// # Errors
+    /// [`AppError::Repository`].
+    pub fn diagnose_failed(&self, model: &dyn DiagnosisModel, max: usize) -> Res<usize> {
+        let items = self.store.undiagnosed_failed_items(max)?;
+        for item in &items {
+            self.diagnose_item(*item, model)?;
+        }
+        Ok(items.len())
     }
 
     /// One delivery tick: every notice no sink has taken and the owner has not acknowledged goes to
@@ -1825,4 +1916,42 @@ pub fn status_text_listing(store: &Store, tail: usize, listing: ItemListing) -> 
         ));
     }
     Ok(s)
+}
+
+/// Put each quote that holds the answer to the checker, in order; the first clear yes accepts.
+/// A model that cannot answer counts as an unreadable reply: fail closed.
+fn entail(
+    model: &dyn DiagnosisModel,
+    answer: &diagnosis::Answer,
+) -> Result<(), Vec<diagnosis::Fault>> {
+    use diagnosis::Entailment;
+    let (mut refused, mut unreadable) = (false, false);
+    for citation in diagnosis::quotes_holding_answer(answer) {
+        let reply = model
+            .ask(&diagnosis::entailment_prompt(&answer.text, &citation.quote))
+            .unwrap_or_default();
+        match diagnosis::parse_entailment(&reply) {
+            Entailment::Yes => return Ok(()),
+            Entailment::No => refused = true,
+            Entailment::Invalid => unreadable = true,
+        }
+    }
+    let mut faults = Vec::new();
+    if refused || !unreadable {
+        faults.push(diagnosis::Fault::AnswerNotEntailed);
+    }
+    if unreadable {
+        faults.push(diagnosis::Fault::EntailmentUnreadable);
+    }
+    Err(faults)
+}
+
+/// A reason on one line, cut short, so a model's or a socket's text cannot fill a record.
+fn one_line(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(120)
+        .collect()
 }

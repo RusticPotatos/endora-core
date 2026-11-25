@@ -4,6 +4,7 @@ pub mod accept;
 pub mod actor;
 pub mod contract;
 pub mod decide;
+pub mod diagnosis;
 pub mod evidence;
 pub mod hold;
 pub mod notice;
@@ -13,6 +14,7 @@ pub use accept::{AUTO_ACCEPT, AUTO_OBSERVE, AcceptFacts, AcceptRefusal, authoris
 pub use actor::{Actor, ActorError, ActorKind, is_reserved};
 pub use contract::{Budget, BudgetMode, DEFAULT_MAX_SECONDS, Field, ValueType};
 pub use decide::{CallSpec, Deny, PolicyRow, Situation, Verdict, decide};
+pub use diagnosis::{Citation, Diagnosis, DiagnosisOutcome};
 pub use evidence::{Evidence, Kind};
 pub use hold::{
     AcceptancePolicy, Check, Criterion, DEFAULT_MAX_FAILURES, Fact, FactValue, Goal, GoalId,

@@ -435,7 +435,7 @@ fn a_schema_9_file_gains_only_the_notice_tables_and_keeps_every_row() {
     };
     let clock = Arc::new(ManualClock::new(1_795_580_200_000));
     let core = Core::open(p.to_str().unwrap(), clock.clone()).unwrap();
-    assert_eq!((version(&p), SCHEMA_VERSION), (11, 11));
+    assert_eq!((version(&p), SCHEMA_VERSION), (12, 12));
     assert!(core.verify_evidence().unwrap().broken.is_none());
     assert!(core.store().notices(true).unwrap().is_empty());
     drop(core);
@@ -549,7 +549,7 @@ fn a_schema_10_file_gains_the_notice_tables_and_keeps_its_repair_and_paused_rout
     assert_eq!(version(&p), 10);
     let clock = Arc::new(ManualClock::new(1_795_583_300_000));
     let core = Core::open(p.to_str().unwrap(), clock.clone()).unwrap();
-    assert_eq!((version(&p), SCHEMA_VERSION), (11, 11));
+    assert_eq!((version(&p), SCHEMA_VERSION), (12, 12));
     assert!(core.verify_evidence().unwrap().broken.is_none());
     // The schema-10 state is intact: the goal's repair, and the paused (not retired) routine.
     let repair = core

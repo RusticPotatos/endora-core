@@ -9,4 +9,4 @@ pub use core::{
     WatchEnd,
 };
 pub use owner::{AuthError, OwnerProof};
-pub use ports::{CallFailure, CallOutput, Capability, NoticeSink};
+pub use ports::{CallFailure, CallOutput, Capability, DiagnosisModel, NoticeSink};

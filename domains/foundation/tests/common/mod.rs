@@ -1,6 +1,8 @@
 //! Shared test helpers: an owner proof (through the real credential path) and a plain actor.
 #![allow(dead_code)]
 
+pub mod diagnosis_lab;
+
 use endora_foundation::application::{Core, OwnerProof};
 use endora_foundation::domain::Actor;
 
