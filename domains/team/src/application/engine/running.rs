@@ -1,6 +1,7 @@
 //! Turns: queued, started, ended and retried.
 
 use super::{Done, Engine, EngineError, STANDARDS};
+use crate::application::failure_cause;
 use crate::application::ports::{Clock, Run, TeamStore, WorkerAdapter};
 use crate::domain::handover;
 use crate::domain::mac;
@@ -184,7 +185,10 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
         } else {
             runs::own_attempts(run.attempts, run.interrupted)
         };
-        let Some(due) = runs::retry_after_failure(own, now) else {
+        // What a retry can hope for depends on why the turn failed: a spent quota is waited
+        // out, a refused key is not tried again.
+        let cause = failure_cause::cause_of(why, now);
+        let Some(due) = runs::retry_decision(cause, own, now) else {
             self.end(run, RunStatus::Failed, why)?;
             return Ok(false);
         };

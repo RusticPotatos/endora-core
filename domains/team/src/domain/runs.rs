@@ -80,11 +80,72 @@ pub enum Liveness {
     Gone,
 }
 
-/// What happens to a run whose turn failed after `attempts` tries: retried after a minute
-/// (`Some(due)`), or failed for good (`None`).
+/// How long a spent quota is held when the provider said no reset time: a conservative while,
+/// so a window that is certainly still closed is not tried again a minute later.
+pub const UNKNOWN_QUOTA_HOLD_MS: Millis = 30 * 60_000;
+/// The longest a backoff grows to when the provider named no time.
+pub const LONGEST_BACKOFF_MS: Millis = 5 * 60_000;
+
+/// Why a model call behind a failed turn failed, as far as the provider's answer said. What a
+/// retry can hope for depends on it: waiting out a spent quota, backing off a throttle, and
+/// not retrying a key that was refused are different things.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureCause {
+    /// The plan's or account's allowance is spent. `resets_at` is when it reopens, when known.
+    Quota {
+        /// When the window closes (milliseconds since the epoch), if the provider said.
+        resets_at: Option<Millis>,
+    },
+    /// The provider is throttling the caller. `retry_after` is how long it asked to wait.
+    RateLimit {
+        /// How long the provider asked to wait, in milliseconds, if it said.
+        retry_after: Option<Millis>,
+    },
+    /// The key or token was refused. Trying again cannot change that.
+    Credential,
+    /// The provider failed on its side (a 5xx, an overload).
+    Server,
+    /// Anything else, or nothing said.
+    Other,
+}
+
+/// The wait before the next try after `attempts` own tries: a minute, doubling, bounded by
+/// [`LONGEST_BACKOFF_MS`].
+#[must_use]
+pub fn backoff(attempts: u8) -> Millis {
+    let doublings = u32::from(attempts.saturating_sub(1)).min(16);
+    (RETRY_AFTER_MS << doublings).min(LONGEST_BACKOFF_MS)
+}
+
+/// What happens to a run whose turn failed after `attempts` tries, given why: retried at a
+/// time chosen by the cause (`Some(due)`), or failed for good (`None`). The caps on tries are
+/// the same for every cause; the cause moves only when a retry is made, or rules one out.
+#[must_use]
+pub fn retry_decision(cause: FailureCause, attempts: u8, now: Millis) -> Option<Millis> {
+    if attempts > MOST_RETRIES {
+        return None;
+    }
+    match cause {
+        FailureCause::Credential => None,
+        FailureCause::Other => Some(now + RETRY_AFTER_MS),
+        FailureCause::Server => Some(now + backoff(attempts)),
+        FailureCause::RateLimit { retry_after } => {
+            Some(now + retry_after.unwrap_or(0).max(backoff(attempts)))
+        }
+        FailureCause::Quota { resets_at: None } => Some(now + UNKNOWN_QUOTA_HOLD_MS),
+        // Never inside a closed window; a window already past is no reason to wait longer than
+        // an ordinary retry.
+        FailureCause::Quota {
+            resets_at: Some(resets_at),
+        } => Some(resets_at.max(now + RETRY_AFTER_MS)),
+    }
+}
+
+/// What happens to a run whose turn failed after `attempts` tries, when nothing is known of
+/// why: retried after a minute (`Some(due)`), or failed for good (`None`).
 #[must_use]
 pub fn retry_after_failure(attempts: u8, now: Millis) -> Option<Millis> {
-    (attempts <= MOST_RETRIES).then_some(now + RETRY_AFTER_MS)
+    retry_decision(FailureCause::Other, attempts, now)
 }
 
 /// How a turn's worker ended, as far as its runner said (ADR 0102).
@@ -303,6 +364,109 @@ mod tests {
         assert_eq!(retry_after_failure(1, 1_000), Some(61_000));
         assert_eq!(retry_after_failure(2, 1_000), Some(61_000));
         assert_eq!(retry_after_failure(3, 1_000), None);
+    }
+
+    #[test]
+    fn a_failed_turn_with_no_known_cause_is_retried_as_it_always_was() {
+        for attempts in 0..=4 {
+            assert_eq!(
+                retry_decision(FailureCause::Other, attempts, 1_000),
+                retry_after_failure(attempts, 1_000),
+                "attempt {attempts}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_rejected_credential_is_never_retried() {
+        for attempts in 1..=2 {
+            assert_eq!(
+                retry_decision(FailureCause::Credential, attempts, 1_000),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn a_spent_quota_with_a_known_window_is_held_until_it_reopens() {
+        let now = 1_000_000;
+        let resets_at = now + 3 * 60 * 60_000;
+        let cause = FailureCause::Quota {
+            resets_at: Some(resets_at),
+        };
+        for attempts in 1..=2 {
+            let due = retry_decision(cause, attempts, now).expect("within the caps");
+            assert!(due >= resets_at, "never inside the window: {due}");
+        }
+        assert_eq!(
+            retry_decision(cause, MOST_RETRIES + 1, now),
+            None,
+            "caps stay"
+        );
+    }
+
+    #[test]
+    fn a_quota_window_already_past_is_no_reason_to_wait_longer_than_a_normal_retry() {
+        let cause = FailureCause::Quota {
+            resets_at: Some(500),
+        };
+        assert_eq!(
+            retry_decision(cause, 1, 1_000),
+            Some(1_000 + RETRY_AFTER_MS)
+        );
+    }
+
+    #[test]
+    fn a_spent_quota_with_no_known_window_is_held_a_conservative_while() {
+        let cause = FailureCause::Quota { resets_at: None };
+        assert_eq!(
+            retry_decision(cause, 1, 1_000),
+            Some(1_000 + UNKNOWN_QUOTA_HOLD_MS)
+        );
+        assert_eq!(retry_decision(cause, MOST_RETRIES + 1, 1_000), None);
+    }
+
+    #[test]
+    fn a_rate_limit_waits_what_the_provider_asked_and_at_least_a_backoff() {
+        let said = FailureCause::RateLimit {
+            retry_after: Some(5 * 60_000),
+        };
+        assert_eq!(retry_decision(said, 1, 1_000), Some(1_000 + 5 * 60_000));
+        let short = FailureCause::RateLimit {
+            retry_after: Some(1_000),
+        };
+        assert_eq!(
+            retry_decision(short, 1, 1_000),
+            Some(1_000 + RETRY_AFTER_MS)
+        );
+        let unsaid = FailureCause::RateLimit { retry_after: None };
+        assert_eq!(
+            retry_decision(unsaid, 1, 1_000),
+            Some(1_000 + RETRY_AFTER_MS)
+        );
+        assert_eq!(
+            retry_decision(unsaid, 2, 1_000),
+            Some(1_000 + 2 * RETRY_AFTER_MS),
+            "the second retry backs off"
+        );
+        assert_eq!(retry_decision(unsaid, MOST_RETRIES + 1, 1_000), None);
+    }
+
+    #[test]
+    fn a_server_error_backs_off_but_never_past_the_bound() {
+        assert_eq!(
+            retry_decision(FailureCause::Server, 1, 0),
+            Some(RETRY_AFTER_MS)
+        );
+        assert_eq!(
+            retry_decision(FailureCause::Server, 2, 0),
+            Some(2 * RETRY_AFTER_MS)
+        );
+        assert_eq!(
+            retry_decision(FailureCause::Server, MOST_RETRIES + 1, 0),
+            None
+        );
+        assert!(backoff(u8::MAX) <= LONGEST_BACKOFF_MS, "bounded");
     }
 
     #[test]

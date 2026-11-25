@@ -374,6 +374,63 @@ fn worker_final_words_keep_mentions_without_dispatching_peer_work() {
     );
 }
 
+/// Starts a turn for a fresh task and ends it badly saying `why`; returns its run.
+fn a_turn_that_fails_saying(hq: &Hq<'_>, why: &str) -> i64 {
+    let t = team(hq);
+    task_for(hq, t.goal, Some(t.dev), "Add a list");
+    hq.tick().unwrap(); // started, and running until it is ended
+    let run = hq.store().runs().unwrap()[0].id.0;
+    hq.runner()
+        .finish_badly_saying(crate::domain::RunId(run), why);
+    hq.tick().unwrap(); // settled
+    run
+}
+
+#[test]
+fn a_turn_whose_key_was_refused_is_failed_at_once_not_retried() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let run = a_turn_that_fails_saying(
+        &hq,
+        "Claude Code failed (success): API Error: 401 authentication_error invalid x-api-key",
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::Failed);
+    let started = hq.runner().started().len();
+    clock.forward(RETRY_AFTER_MS * 10);
+    hq.tick().unwrap();
+    assert_eq!(hq.runner().started().len(), started, "never started again");
+}
+
+#[test]
+fn a_turn_that_hit_a_spent_quota_waits_out_its_window_and_not_a_minute() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let resets_at = NOON + 3 * 60 * 60_000;
+    let why = format!(
+        "Claude Code failed (success): Claude AI usage limit reached|{}",
+        resets_at / 1_000
+    );
+    let run = a_turn_that_fails_saying(&hq, &why);
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    let started = hq.runner().started().len();
+    clock.forward(resets_at - NOON - 1_000);
+    let report = hq.tick().unwrap();
+    assert_eq!(report.requeued, 0, "not inside the window");
+    assert_eq!(hq.runner().started().len(), started);
+    clock.forward(1_000);
+    assert_eq!(hq.tick().unwrap().requeued, 1, "when it reopens");
+}
+
+#[test]
+fn a_turn_that_failed_with_no_cause_is_retried_a_minute_later_as_before() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let run = a_turn_that_fails_saying(&hq, "Claude Code failed (error_during_execution): boom");
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    clock.forward(RETRY_AFTER_MS);
+    assert_eq!(hq.tick().unwrap().requeued, 1);
+}
+
 #[test]
 fn a_turn_whose_container_vanishes_is_tried_once_more_for_free_then_as_any_failure_then_fails() {
     // The first loss is the platform's (a restart under it) and does not count against the

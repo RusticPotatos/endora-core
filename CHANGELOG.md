@@ -90,6 +90,20 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
 - **Docs:** the STABILITY Docker row now says the Docker tests are ignored off Linux, not counted as passed; the stale
   `claude.rs` comment deviation (ADR 0150 item 4) is marked fixed.
 
+### Changed (the LEGACY HQ runtime: retry, relay, lessons, prompt budget)
+
+These change the LEGACY HQ code only (`domains/team`, `app/hq`, `app/worker`, the relay). The
+`endora-foundation` binary links none of it, so the foundation's behaviour is unchanged.
+
+- **A failed turn is retried by why it failed.** The fixed minute is now a decision by cause, read from
+  the provider's words in the runner's `why`: a refused key (the provider's `authentication_error`, not a
+  bare 401) is never retried; a spent quota with a reset time is held until it reopens (never retried
+  inside the window), and one without is held 30 minutes; a throttle (429) waits what the provider asked,
+  at least a doubling backoff; a server error (5xx, overloaded) backs off to five minutes; anything else
+  is retried as before. The caps (two retries) are unchanged, and `retry_after_failure` keeps its
+  behaviour. The relay still drops the provider's headers, so a `Retry-After` header does not reach this
+  decision: only a reset time the text carries does.
+
 ### Changed (the HQ product is LEGACY)
 
 - The HQ node, console, team and the other pre-foundation code stay in the tree and keep building and

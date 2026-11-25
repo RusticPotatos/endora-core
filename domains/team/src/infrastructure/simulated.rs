@@ -35,6 +35,7 @@ struct State {
     scripts: HashMap<MemberId, Script>,
     turns: HashMap<RunId, Liveness>,
     exits: HashMap<RunId, Exit>,
+    whys: HashMap<RunId, String>,
     started: Vec<RunContext>,
     stopped: Vec<RunId>,
 }
@@ -83,6 +84,16 @@ impl SimulatedRunner {
         state.exits.insert(run, exit);
     }
 
+    /// Ends a running turn badly, saying why in the runner's words, as a runner does with what
+    /// its worker last said (a provider's answer, say).
+    pub fn finish_badly_saying(&self, run: RunId, why: &str) {
+        let mut state = self.state();
+        state
+            .turns
+            .insert(run, Liveness::Finished { succeeded: false });
+        state.whys.insert(run, why.to_owned());
+    }
+
     /// Every turn started, in order, with what the member was told.
     #[must_use]
     pub fn started(&self) -> Vec<RunContext> {
@@ -116,6 +127,7 @@ impl WorkerAdapter for SimulatedRunner {
         state.turns.insert(run.run, liveness);
         // A new attempt starts afresh: nothing of how the last one ended is kept.
         state.exits.remove(&run.run);
+        state.whys.remove(&run.run);
         if script == Script::Killed {
             state.exits.insert(run.run, Exit::Code(137));
         }
@@ -132,6 +144,10 @@ impl WorkerAdapter for SimulatedRunner {
             .get(&run)
             .copied()
             .unwrap_or(Liveness::Gone)
+    }
+
+    fn why_ended(&self, run: RunId) -> Option<String> {
+        self.state().whys.get(&run).cloned()
     }
 
     fn exit_of(&self, run: RunId) -> Exit {
