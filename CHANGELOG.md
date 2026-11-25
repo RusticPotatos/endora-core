@@ -109,6 +109,15 @@ These change the LEGACY HQ code only (`domains/team`, `app/hq`, `app/worker`, th
   turn reads the header's time before the runner's words, so a quota is held exactly to its reset and a
   429 waits what it asked. Without headers, or from an older node or HQ, the text is read as before.
   The seven-day belief cap is unchanged. ADR 0102 is amended.
+- **A loop's lessons are scanned for injection, and a verdict's batch is judged as one.** A lesson is
+  told in every later turn's briefing, so a poisoned one persists. `checked` now refuses a line holding a
+  hidden or control character or shaped like an instruction to the model (drop-the-instructions, a posed
+  role or chat template, reveal-the-prompt, fetch-and-run or send-to-a-link, a secret read out or sent,
+  hiding from the owner, bypassing a safeguard, an encoded blob); negated warnings ("never print a
+  secret") pass. `learned` judges a verdict's lines as one batch against the final budget: overflow is
+  refused naming what the batch came to, so a flood cannot evict the batch's own lines or the list. HQ
+  records each refusal as `lesson.refused` (a secret's text is never copied into the feed); the owner's
+  edit goes through the same scan. The caps are unchanged.
 
 ### Changed (the HQ product is LEGACY)
 

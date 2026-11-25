@@ -471,6 +471,8 @@ function hqLogEntry(e) {
     // A guard that is tried in shadow was switched on, or put back in shadow (ADR 0133).
     // A lead narrowed what done means for a task in its area (ADR 0133).
     "task.criteria": ["run", `${hqName(d.by)} narrowed what done means for ${key}: ${(d.after || []).join("; ")}${d.why ? " (" + d.why + ")" : ""}`],
+    // A line offered as a loop's lesson that was refused: the line itself stays in the feed's data.
+    "lesson.refused": ["warn", `A lesson was refused: ${d.why || "not kept"}`],
     // A drain before a restart (ADR 0134): silent on the desk, one line here.
     "drain.began": ["warn", `A restart is announced: nothing new starts until it has been (${d.running || 0} running, up to ${d.cap_seconds} s)`],
     "drain.ended": [d.cut ? "bad" : "done", d.by === "restart"

@@ -107,6 +107,9 @@ pub enum EventKind {
     DrainBegan,
     /// A drain ended, and how many turns ended before it and how many the restart cut.
     DrainEnded,
+    /// A line offered as a loop's lesson was refused: why, and the line unless it
+    /// held a secret.
+    LessonRefused,
 }
 
 impl EventKind {
@@ -164,6 +167,7 @@ impl EventKind {
             Self::RecordAsked => "record.asked",
             Self::DrainBegan => "drain.began",
             Self::DrainEnded => "drain.ended",
+            Self::LessonRefused => "lesson.refused",
         }
     }
 }
