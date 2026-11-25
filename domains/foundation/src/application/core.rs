@@ -11,8 +11,8 @@ use super::ports::{CallOutput, Capability};
 use crate::domain::{
     AUTO_ACCEPT, AUTO_OBSERVE, AcceptFacts, AcceptRefusal, AcceptancePolicy, Actor, ActorError,
     Budget, BudgetMode, CallSpec, Criterion, DEFAULT_MAX_FAILURES, Deny, Evidence, Goal, GoalId,
-    ItemId, ItemState, Kind, PolicyRow, Routine, RoutineId, Situation, Verdict, authorise, decide,
-    plan_firings, validate_criteria, validate_rhythm,
+    ItemId, ItemState, Kind, PolicyRow, Routine, RoutineId, Situation, Verdict, WorkItem,
+    authorise, decide, plan_firings, validate_criteria, validate_rhythm,
 };
 use crate::infrastructure::{ChainReport, ManualClock, Store};
 
@@ -507,13 +507,65 @@ impl Core {
         Ok(out)
     }
 
+    /// Pauses a routine on the owner's word: it fires nothing until the owner resumes it. Pausing
+    /// a paused routine is allowed (it stays paused, and the owner's word is recorded again).
+    ///
+    /// # Errors
+    /// [`AppError::BadRequest`] for a retired routine; [`AppError::Repository`] for an unknown one.
+    pub fn pause_routine(&self, proof: &OwnerProof, routine: RoutineId) -> Res<()> {
+        self.refuse_if_retired(routine, "paused")?;
+        self.store.pause_routine(routine)?;
+        self.note(
+            None,
+            "core.pause_routine",
+            &proof.actor(),
+            Kind::Control,
+            true,
+            &format!("routine {} paused", routine.0),
+        )?;
+        Ok(())
+    }
+
+    /// Retires a routine for good (owner only): it never fires again and cannot be resumed. Its
+    /// past items and evidence stay. Retiring a retired routine is refused.
+    ///
+    /// # Errors
+    /// [`AppError::BadRequest`] for a routine already retired; [`AppError::Repository`] for an
+    /// unknown one.
+    pub fn retire_routine(&self, proof: &OwnerProof, routine: RoutineId) -> Res<()> {
+        self.refuse_if_retired(routine, "retired again")?;
+        self.store.retire_routine(routine)?;
+        self.note(
+            None,
+            "core.retire_routine",
+            &proof.actor(),
+            Kind::Control,
+            true,
+            &format!("routine {} retired", routine.0),
+        )?;
+        Ok(())
+    }
+
+    fn refuse_if_retired(&self, routine: RoutineId, what: &str) -> Res<()> {
+        if !self.store.routine(routine)?.retired {
+            return Ok(());
+        }
+        Err(AppError::BadRequest {
+            message: format!(
+                "routine {} is retired for good and cannot be {what}; declare a new routine instead",
+                routine.0
+            ),
+        })
+    }
+
     /// Lets a paused routine fire again and clears its run of failures (owner only; the next slot
-    /// is never in the past, so the pause leaves no pile of missed slots).
+    /// is never in the past, so the pause leaves no pile of missed slots). A retired routine is
+    /// refused: retiring is final.
     ///
     /// # Errors
     /// [`AppError::BadRequest`].
     pub fn resume_routine(&self, proof: &OwnerProof, routine: RoutineId) -> Res<()> {
-        self.store.routine(routine)?;
+        self.refuse_if_retired(routine, "resumed")?;
         self.store.reset_routine(routine, false, self.now())?;
         self.note(
             None,
@@ -588,7 +640,7 @@ impl Core {
         let now = self.now();
         let mut out = Vec::new();
         for r in self.store.routines()? {
-            if r.paused {
+            if r.paused || r.retired {
                 continue;
             }
             // An item awaiting acceptance blocks the next slot only when the owner must accept it.
@@ -1376,13 +1428,100 @@ impl Core {
     pub fn status_text(&self, tail: usize) -> Res<String> {
         status_text(&self.store, tail)
     }
+
+    /// The status with a bounded item listing (see [`ItemListing`]).
+    ///
+    /// # Errors
+    /// [`AppError::Repository`].
+    pub fn status_text_listing(&self, tail: usize, listing: ItemListing) -> Res<String> {
+        status_text_listing(&self.store, tail, listing)
+    }
 }
 
-/// Plain text status of a store: goals, items and the evidence tail.
+/// How many of a goal's items the status lists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ItemListing {
+    /// Every item of every goal.
+    All,
+    /// Per goal: a total with its states, and at most this many of its most recent items.
+    Recent(usize),
+}
+
+/// Plain text status of a store: goals, every item and the evidence tail.
 ///
 /// # Errors
 /// [`AppError::Repository`].
 pub fn status_text(store: &Store, tail: usize) -> Res<String> {
+    status_text_listing(store, tail, ItemListing::All)
+}
+
+fn item_line(store: &Store, i: &WorkItem) -> Res<String> {
+    let met = store.criteria(i.id)?;
+    let n_met = met.iter().filter(|k| k.met_by.is_some()).count();
+    Ok(format!(
+        "  #{} [{}] goal #{} {} criteria {}/{} attempts {} missed {}{}{}\n",
+        i.id.0,
+        i.state.name(),
+        i.goal.0,
+        i.title,
+        n_met,
+        met.len(),
+        i.attempts,
+        i.missed,
+        i.accepted_by
+            .as_ref()
+            .map(|b| format!(" accepted_by {b}"))
+            .unwrap_or_default(),
+        i.reason
+            .clone()
+            .map(|r| format!(" ({r})"))
+            .unwrap_or_default()
+    ))
+}
+
+/// One goal's items in a bounded status: its total and states, then its newest `keep` items.
+fn recent_items(store: &Store, goal: GoalId, items: &[WorkItem], keep: usize) -> Res<String> {
+    let mine: Vec<&WorkItem> = items.iter().filter(|i| i.goal == goal).collect();
+    let states: Vec<String> = [
+        ItemState::Open,
+        ItemState::Running,
+        ItemState::Blocked,
+        ItemState::Failed,
+        ItemState::Done,
+    ]
+    .iter()
+    .filter_map(|st| {
+        let n = mine.iter().filter(|i| i.state == *st).count();
+        (n > 0).then(|| format!("{n} {}", st.name()))
+    })
+    .collect();
+    let mut s = format!(
+        "  goal #{}: {} items{}\n",
+        goal.0,
+        mine.len(),
+        if states.is_empty() {
+            String::new()
+        } else {
+            format!(": {}", states.join(", "))
+        }
+    );
+    let hidden = mine.len().saturating_sub(keep);
+    if hidden > 0 {
+        s.push_str(&format!(
+            "  ... {hidden} older items not shown (`status --short --all` lists every one)\n"
+        ));
+    }
+    for i in &mine[hidden..] {
+        s.push_str(&item_line(store, i)?);
+    }
+    Ok(s)
+}
+
+/// Plain text status of a store with a choice of how many items to list.
+///
+/// # Errors
+/// [`AppError::Repository`].
+pub fn status_text_listing(store: &Store, tail: usize, listing: ItemListing) -> Res<String> {
     let mut s = format!(
         "STOP SWITCH: {}\n\nGOALS\n",
         if store.control("stop")? != 0 {
@@ -1391,7 +1530,8 @@ pub fn status_text(store: &Store, tail: usize) -> Res<String> {
             "off"
         }
     );
-    for g in store.goals()? {
+    let goals = store.goals()?;
+    for g in &goals {
         s.push_str(&format!(
             "  #{} {} (why: {}) scope: {}\n",
             g.id.0,
@@ -1401,24 +1541,18 @@ pub fn status_text(store: &Store, tail: usize) -> Res<String> {
         ));
     }
     s.push_str("\nITEMS\n");
-    for i in store.items()? {
-        let met = store.criteria(i.id)?;
-        let n_met = met.iter().filter(|k| k.met_by.is_some()).count();
-        s.push_str(&format!(
-            "  #{} [{}] goal #{} {} criteria {}/{} attempts {} missed {}{}{}\n",
-            i.id.0,
-            i.state.name(),
-            i.goal.0,
-            i.title,
-            n_met,
-            met.len(),
-            i.attempts,
-            i.missed,
-            i.accepted_by
-                .map(|b| format!(" accepted_by {b}"))
-                .unwrap_or_default(),
-            i.reason.map(|r| format!(" ({r})")).unwrap_or_default()
-        ));
+    let items = store.items()?;
+    match listing {
+        ItemListing::All => {
+            for i in &items {
+                s.push_str(&item_line(store, i)?);
+            }
+        }
+        ItemListing::Recent(keep) => {
+            for g in &goals {
+                s.push_str(&recent_items(store, g.id, &items, keep)?);
+            }
+        }
     }
     s.push_str("\nEVIDENCE (tail)\n");
     for e in store.evidence_tail(tail)? {

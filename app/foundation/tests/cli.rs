@@ -795,10 +795,12 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_endora-foundation"))
 }
 
-const COMMANDS: [&str; 19] = [
+const COMMANDS: [&str; 21] = [
     "goal add",
     "routine add",
     "routine resume",
+    "routine pause",
+    "routine retire",
     "git-task",
     "publish",
     "run-due",

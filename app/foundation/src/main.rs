@@ -48,7 +48,7 @@ use signal_hook::consts::{SIGINT, SIGTERM};
 
 use endora_foundation::application::core::ITEM_TAKEN;
 use endora_foundation::application::{
-    Acceptance, Core, NewGoal, NewItem, Outcome, OwnerProof, WatchEnd,
+    Acceptance, Core, ItemListing, NewGoal, NewItem, Outcome, OwnerProof, WatchEnd,
 };
 use endora_foundation::domain::{
     AcceptancePolicy, Actor, Check, Criterion, DEFAULT_MAX_FAILURES, GoalId, ItemId, ItemState,
@@ -302,6 +302,8 @@ const SPECS: &[Spec] = &[
         &[],
     ),
     spec("routine resume", &[], &[], &["ROUTINE"]),
+    spec("routine pause", &[], &[], &["ROUTINE"]),
+    spec("routine retire", &[], &[], &["ROUTINE"]),
     spec(
         "git-task",
         &[
@@ -317,7 +319,12 @@ const SPECS: &[Spec] = &[
     spec("publish", &[], &[], &["ITEM"]),
     spec("run-due", &[], &[], &[]),
     spec("serve", &[("--every", 1)], &["--every"], &[]),
-    spec("status", &[("--short", 0)], &[], &[]),
+    spec(
+        "status",
+        &[("--short", 0), ("--all", 0), ("--recent", 1)],
+        &[],
+        &[],
+    ),
     spec("init", &[], &[], &[]),
     spec("accept", &[], &[], &["ITEM"]),
     spec("decline", &[], &[], &["ITEM"]),
@@ -334,7 +341,7 @@ const SPECS: &[Spec] = &[
 ];
 
 /// The one-line usage an unknown command is answered with.
-const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine resume|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
+const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine pause|routine resume|routine retire|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
 
 /// What `--help`, `-h` and `help` print (to stdout, exit 0, no database opened).
 const HELP: &str = "endora-foundation: the foundation's command line (plain text over one SQLite file)
@@ -356,12 +363,16 @@ commands (OWNER = needs the owner token file; without it, or with a wrong one: e
                       a --check belongs to the --criteria before it
   routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--max-failures N]
            [--auto-accept]                                                OWNER
-  routine resume ID   lift the pause after repeated failures              OWNER
+  routine pause ID    stop a routine firing until it is resumed                OWNER
+  routine resume ID   lift a pause (the owner's, or after repeated failures)  OWNER
+  routine retire ID   stop a routine for good: it cannot be resumed          OWNER
   git-task --instruction T --test-cmd CMD [--goal ID] [--repo PATH] [--cap MICRO_USD]   OWNER
                       prepare, change (the configured agent), verify; waits for the owner
   run-due             fire due routines, start new items, run their checks
   serve --every SECONDS   run-due in a loop; SIGTERM ends it cleanly (SECONDS: 1 to 31622400, as for routine add)
-  status [--short]    goals, items, evidence tail (--short: without the tail), open decisions
+  status [--short [--recent N | --all]]   goals, items, evidence tail, open decisions
+                      --short: no evidence tail; per goal the totals and the N newest items
+                      (N is 10 unless --recent says otherwise); --all lists every item
   init --token-out FILE   once: make the owner credential
   accept ITEM         the owner accepts an item whose criteria are all met        OWNER
   decline ITEM        the owner declines an item                                 OWNER
@@ -1139,8 +1150,43 @@ fn serve(core: &Core, w: &[String]) -> Out {
     Ok(())
 }
 
-fn status(core: &Core, short: bool) -> Out {
-    let text = core.status_text(if short { 0 } else { 15 }).map_err(err)?;
+/// How many of a goal's newest items `status --short` lists unless `--recent` says otherwise.
+const DEFAULT_RECENT: usize = 10;
+
+/// What the `status` words ask for: `(short, listing)`.
+fn status_view(w: &[String]) -> Result<(bool, ItemListing), Fail> {
+    let short = w.iter().any(|x| x == "--short");
+    let all = w.iter().any(|x| x == "--all");
+    let recent = w.iter().position(|x| x == "--recent");
+    if recent.is_some() && !short {
+        return Err(Fail::Error("--recent is only for status --short".into()));
+    }
+    if recent.is_some() && all {
+        return Err(Fail::Error(
+            "--recent and --all are opposites: give one".into(),
+        ));
+    }
+    let listing = match recent {
+        Some(i) => {
+            let n: usize = num(w.get(i + 1).map_or("", String::as_str), "--recent")?
+                .try_into()
+                .map_err(|_| Fail::Error("--recent is a number from 1".into()))?;
+            if n == 0 {
+                return Err(Fail::Error("--recent is a number from 1".into()));
+            }
+            ItemListing::Recent(n)
+        }
+        None if short && !all => ItemListing::Recent(DEFAULT_RECENT),
+        None => ItemListing::All,
+    };
+    Ok((short, listing))
+}
+
+fn status(core: &Core, w: &[String]) -> Out {
+    let (short, listing) = status_view(w)?;
+    let text = core
+        .status_text_listing(if short { 0 } else { 15 }, listing)
+        .map_err(err)?;
     // `--short` has no evidence tail at all, not an empty header.
     print!(
         "{}",
@@ -1157,11 +1203,15 @@ fn status(core: &Core, short: bool) -> Out {
             r.id.0,
             r.goal.0,
             r.every_ms / 1000,
-            if r.paused {
+            if r.retired {
+                "RETIRED (it never fires again)".to_owned()
+            } else if r.paused && r.consecutive_failures >= r.max_failures {
                 format!(
                     "PAUSED after {} failures in a row (routine resume {})",
                     r.consecutive_failures, r.id.0
                 )
+            } else if r.paused {
+                format!("PAUSED by the owner (routine resume {})", r.id.0)
             } else {
                 format!(
                     "running, failures {}/{}",
@@ -1338,6 +1388,19 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             println!("routine {} resumed", id.0);
             Ok(())
         }
+        (Some("routine"), Some(verb @ ("pause" | "retire"))) => {
+            let id = RoutineId(num(w.get(2).map_or("", String::as_str), "routine id")?);
+            let proof = auth.prove(core)?;
+            need_routine(core, id)?;
+            if verb == "pause" {
+                core.pause_routine(&proof, id).map_err(err)?;
+                println!("routine {} paused", id.0);
+            } else {
+                core.retire_routine(&proof, id).map_err(err)?;
+                println!("routine {} retired", id.0);
+            }
+            Ok(())
+        }
         (Some("git-task"), _) => git_task(core, &auth.prove(core)?, w),
         (Some("publish"), _) => {
             // Publishing is refused by authority: there is no row, and the call is outward-reversible.
@@ -1374,7 +1437,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
         }
         (Some("run-due"), _) => run_due_command(core),
         (Some("serve"), _) => serve(core, w),
-        (Some("status"), _) => status(core, w.iter().any(|x| x == "--short")),
+        (Some("status"), _) => status(core, w),
         (Some("accept"), _) => {
             let proof = auth.prove(core)?;
             let id = item(1)?;

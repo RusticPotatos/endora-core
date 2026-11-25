@@ -246,6 +246,8 @@ pub struct Routine {
     pub consecutive_failures: u32,
     /// Paused after reaching `max_failures`: it fires nothing until the owner resumes it.
     pub paused: bool,
+    /// Retired by the owner: it fires nothing, ever, and cannot be resumed.
+    pub retired: bool,
 }
 
 /// The shortest rhythm a routine may have, in milliseconds.

@@ -77,7 +77,7 @@ CREATE TRIGGER IF NOT EXISTS firings_no_replace BEFORE INSERT ON firings
 type Migration = fn(&Connection) -> Res<()>;
 
 /// The ordered history: step `n` takes a file from version `n-1` to `n`.
-const MIGRATIONS: [Migration; 8] = [
+const MIGRATIONS: [Migration; 9] = [
     migrate_to_slice4_shape,
     migrate_slice5a_watch_columns,
     migrate_actor_kind,
@@ -86,6 +86,7 @@ const MIGRATIONS: [Migration; 8] = [
     migrate_micro_usd,
     migrate_evidence_profile,
     migrate_item_holder,
+    migrate_routine_retired,
 ];
 
 /// The first schema version that has the hash chain (see [`refuse_laundering`]).
@@ -212,6 +213,13 @@ fn migrate_evidence_profile(c: &Connection) -> Res<()> {
 /// Not part of the evidence chain (items are not).
 fn migrate_item_holder(c: &Connection) -> Res<()> {
     add_column(c, "items", "holder", "TEXT")
+}
+
+/// Version 9: a routine the owner has retired for good (`retired`, 0 for every older routine, so
+/// they all behave as before). Additive: nothing is rewritten, and not part of the evidence chain
+/// (the owner's retire is itself recorded there).
+fn migrate_routine_retired(c: &Connection) -> Res<()> {
+    add_column(c, "routines", "retired", "INTEGER NOT NULL DEFAULT 0")
 }
 
 /// The schema version this build writes.
@@ -418,7 +426,7 @@ impl Store {
     /// [`RepositoryError::Backend`]; `Corrupt` when a stored flag is neither 0 nor 1.
     pub fn routine(&self, id: RoutineId) -> Res<Routine> {
         let c = self.db.lock()?;
-        c.query_row("SELECT id, goal_id, title, every_ms, next_due_ms, auto_accept, max_failures, consecutive_failures, paused FROM routines WHERE id=?1", [id.0], routine_row)
+        c.query_row("SELECT id, goal_id, title, every_ms, next_due_ms, auto_accept, max_failures, consecutive_failures, paused, retired FROM routines WHERE id=?1", [id.0], routine_row)
             .map_err(backend)?
     }
 
@@ -430,7 +438,7 @@ impl Store {
         let c = self.db.lock()?;
         col(
             &c,
-            "SELECT id, goal_id, title, every_ms, next_due_ms, auto_accept, max_failures, consecutive_failures, paused FROM routines ORDER BY id",
+            "SELECT id, goal_id, title, every_ms, next_due_ms, auto_accept, max_failures, consecutive_failures, paused, retired FROM routines ORDER BY id",
             [],
             routine_row,
         )?
@@ -536,6 +544,17 @@ impl Store {
             params![r.0, i64::from(paused), due_not_before],
         )
         .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Retires a routine: it never fires again and cannot be resumed.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn retire_routine(&self, r: RoutineId) -> Res<()> {
+        let c = self.db.lock()?;
+        c.execute("UPDATE routines SET retired=1 WHERE id=?1", [r.0])
+            .map_err(backend)?;
         Ok(())
     }
 
@@ -1354,8 +1373,8 @@ fn flag(id: i64, what: &str, n: i64) -> Res<bool> {
 fn routine_row(r: &Row<'_>) -> rusqlite::Result<Res<Routine>> {
     let id: i64 = r.get(0)?;
     let (goal, title, every_ms, next_due_ms) = (GoalId(r.get(1)?), r.get(2)?, r.get(3)?, r.get(4)?);
-    let (auto, max, run, paused): (i64, i64, i64, i64) =
-        (r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?);
+    let (auto, max, run, paused, retired): (i64, i64, i64, i64, i64) =
+        (r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?);
     let built = || -> Res<Routine> {
         Ok(Routine {
             id: RoutineId(id),
@@ -1367,6 +1386,7 @@ fn routine_row(r: &Row<'_>) -> rusqlite::Result<Res<Routine>> {
             max_failures: u32_of(max),
             consecutive_failures: u32_of(run),
             paused: flag(id, "paused", paused)?,
+            retired: flag(id, "retired", retired)?,
         })
     };
     Ok(built())
