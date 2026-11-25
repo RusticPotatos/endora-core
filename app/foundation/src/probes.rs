@@ -2,7 +2,8 @@
 //! the owner wrote in the config file (a tcp port, an http path, a command line), never something
 //! an agent proposes. Its facts come from what this code observes: whether the connection opened,
 //! the status line it parsed, the exit code. Text the remote or the command printed stays in the
-//! result for people to read and is never a fact.
+//! result for people to read and is never a fact. (The one exception is a pinned adapter the owner
+//! classified, `adapters.rs`, ADR 0154: it is a separate call, never `probe.run`.)
 
 use endora_foundation::application::{CallFailure, CallOutput, Capability};
 use endora_foundation::domain::{BudgetMode, CallSpec, Field};

@@ -1289,6 +1289,334 @@ pub fn run(j: &Job<'_>) -> Result<Ran, String> {
     })
 }
 
+// ---- the read-only filter job (ADR 0154) ---------------------------------------------------
+
+/// What a filter job needs: a directory it may only read, the text it reads on stdin, and how
+/// much of its one answer is kept. The program is always `python3 -I -S -B <entry>`.
+pub struct FilterJob<'a> {
+    /// `Bubblewrap` or `Docker`; anything else is refused (nothing here runs unconfined).
+    pub confinement: Confinement,
+    /// The directory mounted read-only (the pinned adapter), canonical.
+    pub dir: &'a Path,
+    /// The script in `dir` to run.
+    pub entry: &'a str,
+    /// What goes to its stdin.
+    pub stdin: &'a [u8],
+    /// The wall clock.
+    pub limit: Duration,
+    /// Most bytes of stdout kept; more sets [`Filtered::over`].
+    pub most_out: usize,
+    /// The Docker backend's image (it must hold `python3`; unused by `bwrap`).
+    pub image: &'a str,
+    /// Where the Docker backend records the containers it starts (see [`reap_containers`]).
+    pub records: &'a Path,
+}
+
+/// What a filter job left. Stderr is never kept.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Filtered {
+    /// Exit code, if it exited.
+    pub code: Option<i32>,
+    /// It was stopped at the wall clock.
+    pub timed_out: bool,
+    /// Its stdout, at most the cap.
+    pub stdout: Vec<u8>,
+    /// It wrote more than the cap.
+    pub over: bool,
+}
+
+/// The address-space, cpu and file limits a `bwrap` filter job starts with (`prlimit`, since
+/// `bwrap` has no limits of its own). No process limit: `RLIMIT_NPROC` counts every process of
+/// the user, so a fixed number either does nothing or stops the call; the pid namespace dies with
+/// the job and the wall clock ends it.
+const FILTER_LIMITS: [&str; 5] = [
+    "--as=1073741824",
+    "--cpu=10",
+    "--nofile=64",
+    "--core=0",
+    "--fsize=0",
+];
+
+/// The `bwrap` arguments of a filter job: read-only system paths, `dir` read-only at `/adapter`,
+/// an empty tmpfs for `/tmp`, no network, a new pid namespace, and no writable bind at all. Ends
+/// with `--` so the command can follow.
+#[must_use]
+pub fn filter_bwrap_args(dir: &Path) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-net",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+    ]
+    .map(String::from)
+    .to_vec();
+    for s in ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64"] {
+        a.extend(["--ro-bind-try".into(), s.into(), s.into()]);
+    }
+    a.extend([
+        "--proc".into(),
+        "/proc".into(),
+        "--dev".into(),
+        "/dev".into(),
+    ]);
+    a.extend(["--tmpfs".into(), "/tmp".into()]);
+    a.extend([
+        "--ro-bind".into(),
+        dir.display().to_string(),
+        "/adapter".into(),
+        "--chdir".into(),
+        "/adapter".into(),
+        "--".into(),
+    ]);
+    a
+}
+
+/// The `docker run` arguments of a filter job, ending with the interpreter's own arguments. Only
+/// `dir` is mounted, read-only; no network, a read-only root, no capabilities, bounded pids,
+/// memory and cpu, a user that is neither root nor the owner.
+#[must_use]
+pub fn filter_docker_args(name: &str, image: &str, dir: &Path, entry: &str) -> Vec<String> {
+    let mut a: Vec<String> = [
+        "run",
+        "--rm",
+        "-i",
+        "--pull",
+        "never",
+        "--name",
+        name,
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        "--pids-limit",
+        "32",
+        "--memory",
+        "256m",
+        "--memory-swap",
+        "256m",
+        "--cpus",
+        "1",
+        "--ulimit",
+        "nofile=64",
+        "--user",
+        "65534:65534",
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=8m",
+        "-w",
+        "/adapter",
+        "--entrypoint",
+        "python3",
+        "-v",
+    ]
+    .map(String::from)
+    .to_vec();
+    a.push(format!("{}:/adapter:ro", dir.display()));
+    a.push(image.to_owned());
+    a.extend(["-I", "-S", "-B"].map(String::from));
+    a.push(format!("/adapter/{entry}"));
+    a
+}
+
+/// Whether this host can run a filter job: Linux `bwrap` if a real job with the real flags runs,
+/// else Docker if the daemon answers and `image` is present locally with `python3`; else
+/// [`Confinement::Unavailable`] (and the second value says what was tried).
+#[must_use]
+pub fn detect_filter(image: &str) -> (Confinement, String) {
+    let mut tried: Vec<String> = Vec::new();
+    for c in [Confinement::Bubblewrap, Confinement::Docker] {
+        match probe_filter(c, image) {
+            Ok(()) => return (c, format!("{c:?}")),
+            Err(e) => tried.push(format!("{c:?}: {e}")),
+        }
+    }
+    (
+        Confinement::Unavailable,
+        format!("tried {}", tried.join("; ")),
+    )
+}
+
+/// Runs a trivial adapter in `c`: the real flags, the real wrapper.
+fn probe_filter(c: Confinement, image: &str) -> Result<(), String> {
+    let base = std::env::temp_dir().join(format!("endora-filter-probe-{}", std::process::id()));
+    let dir = base.join("adapter");
+    let records = base.join("records");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    std::fs::write(dir.join("adapter.py"), "print('ready')\n").map_err(|e| e.to_string())?;
+    let dir = dir.canonicalize().map_err(|e| e.to_string())?;
+    let r = run_filter(&FilterJob {
+        confinement: c,
+        dir: &dir,
+        entry: "adapter.py",
+        stdin: b"",
+        limit: Duration::from_secs(30),
+        most_out: 64,
+        image,
+        records: &records,
+    });
+    let _ = std::fs::remove_dir_all(&base);
+    let r = r?;
+    if r.code == Some(0) && r.stdout.starts_with(b"ready") {
+        return Ok(());
+    }
+    Err(format!("a probe job did not run (exit {:?})", r.code))
+}
+
+/// Runs the job confined, feeding `stdin` and keeping a capped stdout. The process group is
+/// always killed at the end; a Docker container is always removed.
+///
+/// # Errors
+/// When the backend is not `Bubblewrap` or `Docker`, cannot start, or cannot be stopped.
+pub fn run_filter(j: &FilterJob<'_>) -> Result<Filtered, String> {
+    let entry_ok = !j.entry.is_empty()
+        && j.entry
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+    if !entry_ok {
+        return Err("the filter entry must be a plain file name".into());
+    }
+    let ds = j.dir.display().to_string();
+    if ds.contains([':', ',', '\n']) || !j.dir.is_absolute() {
+        return Err(
+            "the adapter directory must be an absolute path without `:`, `,` or a newline".into(),
+        );
+    }
+    match j.confinement {
+        Confinement::Bubblewrap => {
+            let mut c = Command::new("prlimit");
+            c.args(FILTER_LIMITS)
+                .arg("--")
+                .arg("bwrap")
+                .args(filter_bwrap_args(j.dir))
+                .args(["/usr/bin/python3", "-I", "-S", "-B", j.entry])
+                .env_clear()
+                .envs([("PATH", "/usr/bin:/bin")]);
+            drive_filter(c, j, None)
+        }
+        Confinement::Docker => {
+            let docker = docker_bin().ok_or("no `docker` on PATH")?;
+            let name = random_name();
+            std::fs::create_dir_all(j.records).map_err(|e| e.to_string())?;
+            let record = j.records.join(&name);
+            // Recorded BEFORE the container exists, so a Core killed at any point after this is
+            // cleaned up by the next start.
+            std::fs::write(&record, &name).map_err(|e| e.to_string())?;
+            let mut c = Command::new(&docker);
+            c.args(filter_docker_args(&name, j.image, j.dir, j.entry))
+                .env_clear()
+                .envs([("PATH", std::env::var_os("PATH").unwrap_or_default())]);
+            let res = drive_filter(c, j, Some((&docker, &name)));
+            let gone = remove_container(&docker, &name);
+            if gone {
+                let _ = std::fs::remove_file(&record);
+            }
+            match (res, gone) {
+                (Ok(r), true) => Ok(r),
+                (Ok(_), false) => Err(format!("container {name} could not be removed")),
+                (Err(e), _) => Err(e),
+            }
+        }
+        _ => Err("an adapter parses only under `bwrap` or Docker".into()),
+    }
+}
+
+/// `docker rm -f` by name, then waits until it is gone.
+fn remove_container(docker: &Path, name: &str) -> bool {
+    let _ = Command::new(docker)
+        .args(["rm", "-f", name])
+        .stdin(Stdio::null())
+        .output();
+    for _ in 0..50 {
+        let o = Command::new(docker)
+            .args(["container", "inspect", name])
+            .stdin(Stdio::null())
+            .output();
+        if o.is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("No such container")) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+fn drive_filter(
+    mut cmd: Command,
+    j: &FilterJob<'_>,
+    container: Option<(&Path, &str)>,
+) -> Result<Filtered, String> {
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0);
+    let mut child = cmd.spawn().map_err(|e| format!("cannot start: {e}"))?;
+    // The text goes in on its own thread, so neither side can fill a pipe and stall the other.
+    let mut stdin = child.stdin.take();
+    let text = j.stdin.to_vec();
+    std::thread::spawn(move || {
+        if let Some(mut s) = stdin.take() {
+            let _ = std::io::Write::write_all(&mut s, &text);
+        }
+    });
+    let mut stdout = child.stdout.take();
+    let most = j.most_out;
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let Some(mut s) = stdout.take() else {
+            let _ = tx.send((kept, false));
+            return;
+        };
+        let _ = (&mut s).take(most as u64 + 1).read_to_end(&mut kept);
+        let over = kept.len() > most;
+        kept.truncate(most);
+        let _ = tx.send((kept, over));
+        let _ = std::io::copy(&mut s, &mut std::io::sink());
+    });
+    let started = Instant::now();
+    let (code, timed_out) = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break (s.code(), false),
+            Ok(None) if started.elapsed() > j.limit => {
+                if let Some((docker, name)) = container {
+                    // `docker kill` by name: the client process is not the container.
+                    for _ in 0..20 {
+                        let k = Command::new(docker)
+                            .args(["kill", name])
+                            .stdin(Stdio::null())
+                            .output();
+                        if k.is_ok_and(|o| o.status.success())
+                            || child.try_wait().ok().flatten().is_some()
+                        {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                }
+                stop(&mut child)?;
+                break (None, true);
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(5)),
+            Err(e) => {
+                let _ = stop(&mut child);
+                return Err(e.to_string());
+            }
+        }
+    };
+    kill_group(child.id())?;
+    let (stdout, over) = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    Ok(Filtered {
+        code,
+        timed_out,
+        stdout,
+        over,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

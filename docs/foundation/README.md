@@ -130,6 +130,8 @@ probe slow command sleep 3 300                     # kind `command`: the rest of
 git /var/lib/endora/jobs /srv/template -- sh agent.sh   # scratch root, template, agent command line
 action restart-web reversible touch /var/lib/endora/restart-web   # name, `reversible` (any other word is refused), command
 registry-host hub.docker.com                       # enables the read-only registry.tags call; only an allow-listed host loads
+adapter ss_listen web-ports <tree-sha256> observe fact=listen_count:int fact=ssh_listening:bool   # family probe pin band facts
+adapter-image python:3.12-slim                     # the local image Docker runs adapters in where bwrap cannot
 ```
 
 Real-executor lines (see "Real executors"):
@@ -142,6 +144,18 @@ claude-arg --effort                                       # (repeatable) extra C
 
 A probe gives the call `probe.run <name>` with facts `up` (tcp, http), `status` (http) and `exit`
 (command). Probe commands and the git agent line are the owner's, written in the config.
+
+An `adapter` line registers a **pinned parser** of one command probe's text as an observe-band call,
+`adapter.<family>.<first 8 hex of the pin>`, at zero cost, with no input ([ADR 0154](../adr/0154-pinned-parser-adapters-the-one-exception-to-text-is-never-a-fact.md)).
+The line is the owner's classification: the probe it reads (a `probe ... command` line), the SHA-256 of the adapter's
+directory tree, the band word (only `observe` loads) and the facts it may return (`int`, `bool`, `word:a|b`). The
+directory is `adapters/<pin>/` beside the database (`adapter.py`, `adapter.json`, `manifest.json`), copied there by the
+owner; Core recomputes the pin at start and before every call. The adapter runs confined (no network, nothing writable
+but a small tmpfs): under `bwrap` where it can run, else in Docker from the local image named by `adapter-image`
+(default `python:3.12-slim`; never pulled); with neither, nothing runs. `ok` gives the facts and keeps the command's raw
+text; `partial`, `refused` and unreadable output are failed calls (a partial keeps its checked facts, which never meet a
+criterion); a fact the line did not declare breaks the contract and stops the goal. The adapter's own words are never
+recorded. Delete the line to revoke. Enabling one on a live instance is the owner's decision.
 
 An `action` is a repair the owner may attach to a goal: `action.run <name>`, reversible band, run like a
 command probe (scrubbed environment) with fact `exit`. It runs only through `repair add` and only when

@@ -343,6 +343,7 @@ of an existing record and take the next number.
 | [0151](0151-a-repair-policy-for-a-failed-watch.md) | A repair policy for a failed watch: one reversible call, an owner-made row, one use per failure episode, then the owner. **Proposed** | - |
 | [0152](0152-owner-notices-an-outbox-and-a-local-sink.md) | Owner notices: an outbox and a local sink. A watch failing for the grace is said once, its recovery once; no network sink | - |
 | [0153](0153-advisory-diagnosis-of-a-failed-watch.md) | Advisory diagnosis of a failed watch: a local model proposes with quotes, code verifies them and a fail-closed entailment check refuses the unsupported; advice only, never an input to `decide`; the live endpoint is off | - |
+| [0154](0154-pinned-parser-adapters-the-one-exception-to-text-is-never-a-fact.md) | Pinned parser adapters: the one exception to "text a command printed is never a fact"; an owner-classified, hash-pinned, confined, observe-band-only parser turns a command's text into declared facts, its own words never enter the record; practice run only, not enabled live | - |
 
 The forty-nine decisions these consolidate are in [archive/](archive/) — kept in full,
 because the reasoning that produced a rule is the reason it survives an argument later.
