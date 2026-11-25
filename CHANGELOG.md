@@ -31,6 +31,9 @@ There is **no release of the foundation**: the workspace version label is inheri
   configured agent, verified on a clean copy, then waits for the owner; `git.publish` is always refused),
   with confinement by macOS `sandbox-exec` or a Docker container per call on Linux. The command line is
   `endora-foundation` (`app/foundation`); a container recipe is in `deploy/foundation/`.
+- **A repair policy for a failed watch (ADR 0151, schema 10).** A goal may name one reversible `action` (config line,
+  `repair add`); when its watch fails the action runs once per failure episode through the same `decide`, the check runs
+  again, and the item waits for the owner. A paused or retired routine never triggers a repair. No live behaviour changes until an owner configures an action.
 - **Stability.** Six interfaces are FROZEN (additive changes only) and fourteen EXPERIMENTAL (the macOS sandbox-profile row was unfrozen on 15 Nov 2026 and a new EXPERIMENTAL row for recovery of interrupted work was added, see below), rated in
   [docs/foundation/STABILITY.md](docs/foundation/STABILITY.md). Everything else is EXPERIMENTAL. A real
   agent (the Claude Code CLI) is supported on macOS only, costs real money, and its dollar cap is unverified.

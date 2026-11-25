@@ -11,8 +11,9 @@ use super::ports::{CallOutput, Capability};
 use crate::domain::{
     AUTO_ACCEPT, AUTO_OBSERVE, AcceptFacts, AcceptRefusal, AcceptancePolicy, Actor, ActorError,
     Budget, BudgetMode, CallSpec, Criterion, DEFAULT_MAX_FAILURES, Deny, Evidence, Goal, GoalId,
-    ItemId, ItemState, Kind, PolicyRow, Routine, RoutineId, Situation, Verdict, WorkItem,
-    authorise, decide, plan_firings, validate_criteria, validate_rhythm,
+    ItemId, ItemState, Kind, PolicyRow, REPAIR_ACTOR, REPAIR_USES_PER_EPISODE, Repair, Routine,
+    RoutineId, Situation, Verdict, WorkItem, authorise, decide, plan_firings, validate_criteria,
+    validate_repair, validate_rhythm,
 };
 use crate::infrastructure::{ChainReport, ManualClock, Store};
 
@@ -131,6 +132,10 @@ pub enum WatchEnd {
     },
     /// Not a watch, already ended, or waiting on the owner to confirm a criterion.
     Waiting,
+    /// A check failed, the goal's one repair ran and the probe's re-check now passes: the item
+    /// stays running and waits for the owner to accept it (policy never accepts reversible work),
+    /// so the routine parks behind it.
+    Repaired,
 }
 
 /// What recovery did with one interrupted item.
@@ -450,13 +455,19 @@ impl Core {
             return Ok((met, WatchEnd::Waiting));
         };
         let routine = self.store.routine(rid)?;
+        if let Some(repaired) = self.try_repair(item, &routine, idx)? {
+            return Ok(repaired);
+        }
         let failures = self.store.add_routine_failure(rid)?;
         let why = format!(
             "watch failed: criterion {} not met (failure {failures} of {} in a row)",
             idx + 1,
             routine.max_failures
         );
-        self.store.move_item(item, ItemState::Failed, Some(&why))?;
+        // A repair that broke its contract or its cost already failed the item.
+        if self.store.item(item)?.state == ItemState::Running {
+            self.store.move_item(item, ItemState::Failed, Some(&why))?;
+        }
         self.note(
             Some(item),
             "core.watch",
@@ -481,6 +492,72 @@ impl Core {
             )?;
         }
         Ok((met, WatchEnd::Failed { failures, paused }))
+    }
+
+    /// The goal's one repair, tried for a watch whose check just failed (criterion `idx`, 0-based).
+    /// The repair is an ordinary call by the actor `repair`, decided by [`decide`] alone: the stop
+    /// switch, the goal's scope, the owner's policy row and the row's cap all apply, and the
+    /// intent and the result (or the refusal) are evidence rows. The cap is ONE use per failure
+    /// episode: uses on this item plus those of the failed items of the routine's current run of
+    /// failures all count, so a repair that did not help is not tried again until a healthy check
+    /// ends the episode. When the call ran, the failed check runs again; if every criterion is now
+    /// met the item stays running for the owner and `Some(Repaired)` comes back. `None` means no
+    /// repair happened (none set, or the routine is paused or retired) or it did not help: the watch fails as it always did.
+    fn try_repair(
+        &self,
+        item: ItemId,
+        routine: &Routine,
+        idx: usize,
+    ) -> Res<Option<(Vec<bool>, WatchEnd)>> {
+        // The owner's pause or retire stops everything the routine does, a repair included: an item
+        // opened before the word was given fails as it always did, and nothing is changed.
+        if routine.paused || routine.retired {
+            return Ok(None);
+        }
+        let Some(repair) = self.store.repair(routine.goal)? else {
+            return Ok(None);
+        };
+        let actor = Actor::capability(REPAIR_ACTOR).map_err(|e| AppError::BadRequest {
+            message: e.to_string(),
+        })?;
+        let earlier = self.store.episode_uses(
+            routine.id,
+            REPAIR_ACTOR,
+            &repair.call,
+            item,
+            routine.consecutive_failures,
+        )?;
+        let ran = matches!(
+            self.call_counting(&actor, item, &repair.call, &repair.input, earlier)?,
+            Outcome::Done(_) | Outcome::Failed(_)
+        );
+        if !ran {
+            return Ok(None); // refused (recorded by the call) or the item was already failed
+        }
+        let met = self.verify(item)?;
+        let healed = met.iter().all(|m| *m);
+        self.note(
+            Some(item),
+            "core.repair",
+            &Actor::core(),
+            Kind::Control,
+            healed,
+            &format!(
+                "repair {} ran after criterion {} failed; the check was run again: {}",
+                repair.call,
+                idx + 1,
+                if healed {
+                    "met, the item waits for the owner"
+                } else {
+                    "still not met"
+                }
+            ),
+        )?;
+        if !healed {
+            return Ok(None);
+        }
+        self.store.reset_routine(routine.id, false, 0)?;
+        Ok(Some((met, WatchEnd::Repaired)))
     }
 
     /// Routine items a dead process left `running` whose checks have not been met: each is to be
@@ -556,6 +633,61 @@ impl Core {
                 routine.0
             ),
         })
+    }
+
+    /// Names the ONE repair a goal's failed watch may make (owner only). The call must be a
+    /// registered, reversible, local call in the goal's scope, taking `input`; an observe,
+    /// outward-reversible, irreversible or unclassified call is refused here, and so is a second
+    /// repair for the goal. The owner's row is made in the same step: the actor `repair` may make
+    /// that call once per item (the failure episode's cap is applied by the watch, see
+    /// [`Core::check_watch`]). Nothing runs until a watch fails, and then only through `decide`.
+    ///
+    /// # Errors
+    /// [`AppError::BadRequest`] with the refusal; [`AppError::Repository`].
+    pub fn add_repair(&self, proof: &OwnerProof, goal: GoalId, call: &str, input: &str) -> Res<()> {
+        let g = self.store.goal(goal)?;
+        let spec = self.spec(call);
+        let refuse = |why: &crate::domain::RepairRefusal| {
+            Err(AppError::BadRequest {
+                message: why.said(),
+            })
+        };
+        if let Err(why) = validate_repair(spec.as_ref(), &g.scope, call, input) {
+            return refuse(&why);
+        }
+        let Some(spec) = spec else {
+            return refuse(&crate::domain::RepairRefusal::UnknownCall);
+        };
+        if self.store.repair(goal)?.is_some() {
+            return refuse(&crate::domain::RepairRefusal::AlreadySet);
+        }
+        self.store.insert_repair(
+            &Repair {
+                goal,
+                call: call.to_owned(),
+                input: input.to_owned(),
+            },
+            self.now(),
+        )?;
+        self.store.put_policy(&PolicyRow {
+            actor: REPAIR_ACTOR.to_owned(),
+            call: call.to_owned(),
+            band: Reversibility::Reversible,
+            tier: spec.tier.max(g.tier),
+            max_uses_per_item: Some(REPAIR_USES_PER_EPISODE),
+        })?;
+        self.note(
+            None,
+            "core.repair",
+            &proof.actor(),
+            Kind::Control,
+            true,
+            &format!(
+                "goal {} may repair a failed watch with {call}, once per failure episode",
+                goal.0
+            ),
+        )?;
+        Ok(())
     }
 
     /// Lets a paused routine fire again and clears its run of failures (owner only; the next slot
@@ -855,6 +987,19 @@ impl Core {
     /// # Errors
     /// [`AppError::Repository`].
     pub fn call(&self, actor: &Actor, item: ItemId, call: &str, input: &str) -> Res<Outcome> {
+        self.call_counting(actor, item, call, input, 0)
+    }
+
+    /// [`Core::call`], with `earlier_uses` more uses of the call than this item's own counted
+    /// against the policy row's cap (a repair's earlier items in one failure episode).
+    fn call_counting(
+        &self,
+        actor: &Actor,
+        item: ItemId,
+        call: &str,
+        input: &str,
+        earlier_uses: u32,
+    ) -> Res<Outcome> {
         let actor_kind = actor.kind();
         let actor_name = actor.name();
         let actor = actor_name.as_str();
@@ -906,7 +1051,10 @@ impl Core {
             goal_stopped: self.store.control(&goal_stop_key(goal.id))? != 0,
             goal_scope: &goal.scope,
             goal_tier: goal.tier,
-            uses_this_item: self.store.uses(actor, call, item)?,
+            uses_this_item: self
+                .store
+                .uses(actor, call, item)?
+                .saturating_add(earlier_uses),
             goal_spent_micros: spent(Some(goal.id))?,
             goal_cap_micros: goal.spend_cap_micros,
             total_spent_micros: spent(None)?,

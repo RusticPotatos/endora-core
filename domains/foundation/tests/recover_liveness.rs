@@ -329,7 +329,7 @@ fn a_version_7_file_migrates_by_one_nullable_column_and_its_chain_is_untouched()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
     assert_eq!(v, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 9);
+    assert_eq!(SCHEMA_VERSION, 10);
     let col: (String, i64) = c
         .query_row(
             "SELECT type, \"notnull\" FROM pragma_table_info('items') WHERE name='holder'",

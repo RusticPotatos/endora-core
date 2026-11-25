@@ -795,12 +795,13 @@ fn bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_endora-foundation"))
 }
 
-const COMMANDS: [&str; 21] = [
+const COMMANDS: [&str; 22] = [
     "goal add",
     "routine add",
     "routine resume",
     "routine pause",
     "routine retire",
+    "repair add",
     "git-task",
     "publish",
     "run-due",
@@ -2025,4 +2026,83 @@ fn publish_on_an_unreadable_item_says_corruption_not_missing_and_writes_nothing(
     );
     assert!(!t.contains("no item"), "{t}");
     assert_eq!(before, raw_rows(&db), "publish wrote a row");
+}
+
+#[test]
+fn a_failed_watch_runs_its_one_repair_then_waits_for_the_owner() {
+    let lab = Lab::new("repair");
+    let flag = lab.dir.join("flag");
+    let f = flag.to_str().unwrap();
+    let cfg = lab.config(&format!(
+        "probe flag command test -f {f} 60\naction mkflag reversible touch {f}"
+    ));
+    let db = lab.dir.join("live.db");
+    let run = |args: &[&str]| lab.run_on(&db, &cfg, args);
+    let g = run(&[
+        "goal",
+        "add",
+        "--title",
+        "flag",
+        "--probe",
+        "flag",
+        "--scope",
+        "probe.run,action.run",
+        "--acceptance",
+        "auto-observe",
+    ]);
+    assert_eq!(code(&g), 0, "{}", text(&g));
+    assert_eq!(
+        code(&run(&["routine", "add", "--goal", "1", "--every", "1"])),
+        0
+    );
+    // An action that is not configured, and a goal that does not exist, are refused.
+    assert_eq!(
+        code(&run(&["repair", "add", "--goal", "1", "--action", "nope"])),
+        1
+    );
+    assert_ne!(
+        code(&run(&[
+            "repair", "add", "--goal", "9", "--action", "mkflag"
+        ])),
+        0
+    );
+    let ok = run(&["repair", "add", "--goal", "1", "--action", "mkflag"]);
+    assert_eq!(code(&ok), 0, "{}", text(&ok));
+    // The same goal may not name a second repair.
+    assert_eq!(
+        code(&run(&[
+            "repair", "add", "--goal", "1", "--action", "mkflag"
+        ])),
+        2
+    );
+    assert!(!flag.exists());
+    let d = run(&["run-due"]);
+    assert_eq!(code(&d), 0, "{}", text(&d));
+    assert!(text(&d).contains("item 1 repaired"), "{}", text(&d));
+    assert!(flag.exists(), "the action ran");
+    let st = text(&run(&["status"]));
+    assert!(st.contains("#1 [running]"), "waits for the owner: {st}");
+    let ev = text(&run(&["evidence", "--item", "1"]));
+    assert!(ev.contains("action.run"), "{ev}");
+    assert!(ev.contains("repair"), "{ev}");
+    // A later pass does not run the action again, and does not accept the item for the owner.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let d = run(&["run-due"]);
+    assert_eq!(code(&d), 0, "{}", text(&d));
+    assert!(text(&run(&["status"])).contains("#1 [running]"));
+    assert_eq!(code(&run(&["accept", "1"])), 0);
+    assert!(text(&run(&["status"])).contains("#1 [done]"));
+}
+
+#[test]
+fn an_action_declared_irreversible_or_outward_is_refused_when_the_config_loads() {
+    let lab = Lab::new("repair-config");
+    let db = lab.dir.join("live.db");
+    for word in ["irreversible", "outward-reversible", "observe", "anything"] {
+        let cfg = lab.config(&format!("action wipe {word} rm -rf /tmp/never"));
+        let o = lab.run_plain(&db, &cfg, &["capabilities"]);
+        assert_ne!(code(&o), 0, "{word}: {}", text(&o));
+        assert!(text(&o).contains("action"), "{word}: {}", text(&o));
+        assert!(!db.exists(), "a refused config opened no database");
+    }
 }

@@ -62,7 +62,7 @@ code; text an agent or a remote wrote can never be one.
 `ENDORA_FOUNDATION_DB`, `ENDORA_FOUNDATION_CONFIG`, `ENDORA_OWNER_TOKEN_FILE`: a PATH, never the
 token; `init` also takes `--token-out FILE`). Exit 0 ok, 1 error (including a mistake in the command
 line), 2 refused by authority (the reason is printed). Owner commands
-(`goal add`, `routine add|resume`, `git-task`, `overall-cap`, `accept`, `decline`, `confirm-criterion`,
+(`goal add`, `routine add|resume`, `repair add`, `git-task`, `overall-cap`, `accept`, `decline`, `confirm-criterion`,
 `resume`, `resume-goal`) need the token file and exit 2 without it or with a wrong one.
 
 ```
@@ -71,6 +71,9 @@ goal add --title T [--why W] --criteria TEXT [--check CALL INPUT FIELD EXPECT]
          [--acceptance owner|auto-observe]
                             a `--check` belongs to the `--criteria` before it; `--probe NAME`
                             adds a criterion of its own (so `--criteria` + `--check` + `--probe` = 2)
+repair add --goal ID --action NAME
+                           a failed watch of the goal may run the configured `action` once per failure
+                           episode (ADR 0151), then re-check; the item then waits for the owner
 routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--max-failures N]
             [--auto-accept]
 routine pause ID            stop a routine firing until it is resumed (owner)
@@ -125,6 +128,7 @@ probe web tcp 127.0.0.1:8080 60                    # name kind target interval-s
 probe api http 127.0.0.1:8080/health 60
 probe slow command sleep 3 300                     # kind `command`: the rest of the line before the interval
 git /var/lib/endora/jobs /srv/template -- sh agent.sh   # scratch root, template, agent command line
+action restart-web reversible touch /var/lib/endora/restart-web   # name, `reversible` (any other word is refused), command
 ```
 
 Real-executor lines (see "Real executors"):
@@ -137,6 +141,12 @@ claude-arg --effort                                       # (repeatable) extra C
 
 A probe gives the call `probe.run <name>` with facts `up` (tcp, http), `status` (http) and `exit`
 (command). Probe commands and the git agent line are the owner's, written in the config.
+
+An `action` is a repair the owner may attach to a goal: `action.run <name>`, reversible band, run like a
+command probe (scrubbed environment) with fact `exit`. It runs only through `repair add` and only when
+that goal's watch fails, once per failure episode ([ADR 0151](../adr/0151-a-repair-policy-for-a-failed-watch.md)):
+the goal's scope must name `action.run`, the stop switch and the cap refuse it, and the item waits for the
+owner after the re-check. A goal with no repair behaves as before.
 
 ## Known limits
 
@@ -163,7 +173,7 @@ Running it long-term: [../operate.md](../operate.md).
 - **Back up before you upgrade the binary. A newer binary upgrades any database file it opens, including a
   backup you only inspect; keep one copy that the newer binary has never opened.** Every command, the
   read-only ones too (`status`, `evidence`, `verify-evidence`, `capabilities`), opens the file read-write
-  and runs the pending schema migrations (the current schema is version 9). An older binary then refuses
+  and runs the pending schema migrations (the current schema is version 10). An older binary then refuses
   the file, and there is no downgrade path.
 - **No machine-readable output.** `--help` and `--version` exist (see "The command line" above); there is
   no JSON mode, and `status --json` is refused as an unknown option.
