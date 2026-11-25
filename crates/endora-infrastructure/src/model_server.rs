@@ -79,6 +79,17 @@ pub fn is_private_endpoint(url: &str) -> bool {
 /// address changes (ADR 0130). A name that resolves to nothing is not known to be at home.
 #[must_use]
 pub fn reaches_only_the_house(url: &str) -> bool {
+    reaches_only_the_house_with(url, |target| {
+        std::net::ToSocketAddrs::to_socket_addrs(target).map(Iterator::collect)
+    })
+}
+
+/// [`reaches_only_the_house`] with the name lookup injected, so a test can stand in for the
+/// resolver. `resolve` receives a `host:port` target.
+fn reaches_only_the_house_with<F>(url: &str, resolve: F) -> bool
+where
+    F: FnOnce(&str) -> std::io::Result<Vec<std::net::SocketAddr>>,
+{
     if is_private_endpoint(url) {
         return true;
     }
@@ -100,10 +111,10 @@ pub fn reaches_only_the_house(url: &str) -> bool {
     } else {
         format!("{authority}:80")
     };
-    let Ok(found) = std::net::ToSocketAddrs::to_socket_addrs(&target) else {
+    let Ok(found) = resolve(&target) else {
         return false;
     };
-    all_private(&found.collect::<Vec<_>>())
+    all_private(&found)
 }
 
 /// Whether every address is on the house's network, and there is at least one.
@@ -274,11 +285,26 @@ mod tests {
         // A private address by its text needs no lookup; a public one never passes.
         assert!(super::reaches_only_the_house("http://172.31.99.10:8080/v1"));
         assert!(!super::reaches_only_the_house("http://8.8.8.8:8080/v1"));
-        // A name the text check does not know, that resolves to a private address, reaches only
-        // the house: "localhost." stands in for a laptop's router-given name.
-        assert!(!super::is_private_endpoint("http://localhost.:8080/v1"));
-        assert!(super::reaches_only_the_house("http://localhost.:8080/v1"));
+        // A name the text check does not know reaches only the house when everything it resolves
+        // to is private. The lookup is injected, so this does not depend on the OS resolver.
+        let resolving = |addrs: &'static [&'static str]| {
+            move |_: &str| Ok(addrs.iter().map(|a| at(a)).collect::<Vec<_>>())
+        };
+        let router_name = "http://router-laptop.example.invalid:8080/v1";
+        assert!(!super::is_private_endpoint(router_name));
+        assert!(super::reaches_only_the_house_with(
+            router_name,
+            resolving(&["172.31.99.10:8080"])
+        ));
+        assert!(!super::reaches_only_the_house_with(
+            "http://mixed.example.invalid:8080/v1",
+            resolving(&["172.31.99.10:8080", "8.8.8.8:8080"])
+        ));
         // A name that resolves to nothing is not known to be at home.
+        assert!(!super::reaches_only_the_house_with(
+            "http://no-such-mac.invalid:8080/v1",
+            |_: &str| Err(std::io::Error::other("no such host"))
+        ));
         assert!(!super::reaches_only_the_house(
             "http://no-such-mac.invalid:8080/v1"
         ));

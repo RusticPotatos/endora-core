@@ -6,13 +6,17 @@
 //! it moved its item on with) and the reviewer's notes may carry lines marked
 //! [`lessons::MARK`]. The worker's are held for the item until its verdict, so only work a
 //! reviewer judged teaches the loop; HQ keeps a line only if it is short, new and holds nothing
-//! shaped like a credential ([`lessons::kept`]), and the oldest goes when the list is full. The
-//! owner edits the list whole.
+//! shaped like a credential, hidden, or an instruction to the model ([`lessons::learned`], which
+//! judges the verdict's lines as one batch against the final budget), and the oldest goes when
+//! the list is full. A line refused is told in the feed (`lesson.refused`). The owner edits the
+//! list whole.
+
+use serde_json::json;
 
 use super::{Done, Engine, EngineError};
 use crate::application::ports::{Clock, Run, TeamStore, WorkerAdapter};
 use crate::domain::lessons;
-use crate::domain::{Member, ProjectId, Refusal, Task, TaskId};
+use crate::domain::{EventKind, Member, ProjectId, Refusal, Task, TaskId};
 
 /// Where a loop's lessons are kept, a line each.
 fn lessons_key(project: ProjectId) -> String {
@@ -102,16 +106,22 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
         if said.is_empty() {
             return Ok(());
         }
-        let mut list = self.loop_lessons(project)?;
-        for lesson in &said {
-            // A line refused (too long, a repeat, a secret) is simply not kept.
-            if let Ok(kept) = lessons::kept(&list, lesson) {
-                list = kept;
-            }
-        }
+        let learned = lessons::learned(&self.loop_lessons(project)?, &said);
         self.store.set_setting(&key, "")?;
         self.store
-            .set_setting(&lessons_key(project), &list.join("\n"))?;
+            .set_setting(&lessons_key(project), &learned.list.join("\n"))?;
+        // A line refused is in the feed with why (a repeat is not a refusal worth one): none is
+        // dropped silently, and a poisoned lesson is seen when it is tried.
+        for (line, why) in &learned.refused {
+            if *why == lessons::Unkept::Duplicate {
+                continue;
+            }
+            self.emit(
+                EventKind::LessonRefused,
+                json!({ "project": project.0, "task": task.id.0,
+                        "lesson": lessons::shown(line, why), "why": why.to_string() }),
+            )?;
+        }
         Ok(())
     }
 

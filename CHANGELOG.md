@@ -90,6 +90,42 @@ All in the composition root (`app/foundation`); no change to Core, no new exit c
 - **Docs:** the STABILITY Docker row now says the Docker tests are ignored off Linux, not counted as passed; the stale
   `claude.rs` comment deviation (ADR 0150 item 4) is marked fixed.
 
+### Changed (the LEGACY HQ runtime: retry, relay, lessons, prompt budget)
+
+These change the LEGACY HQ code only (`domains/team`, `app/hq`, `app/worker`, the relay). The
+`endora-foundation` binary links none of it, so the foundation's behaviour is unchanged.
+
+- **A failed turn is retried by why it failed.** The fixed minute is now a decision by cause, read from
+  the provider's words in the runner's `why`: a refused key (the provider's `authentication_error`, not a
+  bare 401) is never retried; a spent quota with a reset time is held until it reopens (never retried
+  inside the window), and one without is held 30 minutes; a throttle (429) waits what the provider asked,
+  at least a doubling backoff; a server error (5xx, overloaded) backs off to five minutes; anything else
+  is retried as before. The caps (two retries) are unchanged, and `retry_after_failure` keeps its
+  behaviour. The relay still drops the provider's headers, so a `Retry-After` header does not reach this
+  decision: only a reset time the text carries does.
+- **A provider's `Retry-After` and rate-limit reset reach the retry decision.** The node's relay reads
+  `Retry-After` and the exhausted `anthropic-ratelimit-*-reset` headers from a refusal and tells HQ at a
+  new, additive route (`POST /v1/team/throttle`); HQ keeps the answer briefly in memory, and a failing
+  turn reads the header's time before the runner's words, so a quota is held exactly to its reset and a
+  429 waits what it asked. Without headers, or from an older node or HQ, the text is read as before.
+  The seven-day belief cap is unchanged. ADR 0102 is amended.
+- **A loop's lessons are scanned for injection, and a verdict's batch is judged as one.** A lesson is
+  told in every later turn's briefing, so a poisoned one persists. `checked` now refuses a line holding a
+  hidden or control character or shaped like an instruction to the model (drop-the-instructions, a posed
+  role or chat template, reveal-the-prompt, fetch-and-run or send-to-a-link, a secret read out or sent,
+  hiding from the owner, bypassing a safeguard, an encoded blob); negated warnings ("never print a
+  secret") pass. `learned` judges a verdict's lines as one batch against the final budget: overflow is
+  refused naming what the batch came to, so a flood cannot evict the batch's own lines or the list. HQ
+  records each refusal as `lesson.refused` (a secret's text is never copied into the feed); the owner's
+  edit goes through the same scan. The caps are unchanged.
+- **The NAS's model counts its conversation once, held to its window.** A probe showed the NAS model
+  (Ollama's `qwen3.5:9b`) restoring 84 to 92 percent of a repeated prefix, which falsifies ADR 0142's
+  premise that it rereads every resend. `Brain::Local` now gets `budget_counts: conversation`; the Mac
+  stays `every_call` until it is measured. Counted once, the house's 240,000-byte budget would let one
+  call pass the 16,384-token slot, so the NAS gets its own budget, `NAS_PROMPT_BUDGET` = (16,384 - 2,048)
+  x 3 bytes a token = 43,008 bytes, held to every call by itself; the gist's side call is held the same
+  way, rather than against the sum of earlier reads. ADR 0142 is amended.
+
 ### Changed (the HQ product is LEGACY)
 
 - The HQ node, console, team and the other pre-foundation code stay in the tree and keep building and

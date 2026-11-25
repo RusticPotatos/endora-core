@@ -1195,6 +1195,62 @@ fn a_cached_brains_budget_counts_the_conversation_once() {
     assert!(text.contains("conversation reached"), "{text}");
 }
 
+/// Counting the conversation once, every call is held to the budget by itself, the
+/// gist's side call too: a gist call that fits is made however much the turn has sent before,
+/// and one that would not fit is not made, the raw result read instead.
+#[test]
+fn a_gist_call_is_held_to_the_budget_by_itself_when_the_conversation_counts_once() {
+    let replies = || {
+        vec![
+            (200, reading_the_log(r#"{"container": "sonarr"}"#)),
+            (200, says("Sonarr cannot write its imports: uid 1000.")),
+            (200, says("Done.")),
+        ]
+    };
+    let log = long_log();
+    let (hq_url, _) = hq(None);
+    let (node_url, _) = node_logging(log.clone());
+    let (model_url, to_model) = model(replies());
+    let out = worker(&with_node(&hq_url, &model_url, &node_url));
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    let sizes: Vec<usize> = to_model
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.body.to_string().len())
+        .collect();
+    assert_eq!(sizes.len(), 3, "{sizes:?}");
+    // The calls, in order: the first, the gist's (the largest, it holds the raw log), the
+    // next. Room for the gist call alone, but not for it after the first call, summed.
+    let budget = sizes[1] + sizes[0] / 2;
+    assert!(budget < sizes[0] + sizes[1], "summed, it would not fit");
+    assert!(
+        sizes.iter().all(|s| *s <= budget),
+        "{sizes:?}: each call fits"
+    );
+    let (hq_url, _) = hq(None);
+    let (node_url, _) = node_logging(log);
+    let (model_url, to_model) = model(replies());
+    let mut env = with_node(&hq_url, &model_url, &node_url);
+    env.push(("ENDORA_PROMPT_BUDGET", budget.to_string()));
+    env.push(("ENDORA_BUDGET_COUNTS", "conversation".to_owned()));
+    let out = worker(&env);
+    assert_eq!(out.status.code(), Some(0), "{}", said(&out));
+    let largest = to_model
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|s| s.body.to_string().len())
+        .max()
+        .unwrap();
+    assert!(largest <= budget, "no call passes the budget: {largest}");
+    assert_eq!(
+        to_model.lock().unwrap().len(),
+        3,
+        "the first call, the gist's and the next"
+    );
+}
+
 /// `git` in `dir`, which must succeed.
 fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
     let out = std::process::Command::new("git")

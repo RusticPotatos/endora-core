@@ -598,6 +598,7 @@ fn only_allow_listed_variables_reach_the_child() {
     assert!(!dump.contains("TOKEN"), "{dump}");
 }
 
+#[cfg(target_os = "macos")]
 fn gone(pid: &str) -> bool {
     for _ in 0..40 {
         let alive = Command::new("kill")

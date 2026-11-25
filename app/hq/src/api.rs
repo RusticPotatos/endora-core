@@ -139,6 +139,9 @@ pub fn app(state: State) -> Router {
         // The node's model relay: whose a turn's token is, and what each call cost.
         .route("/v1/team/turn", post(crate::team::turn))
         .route("/v1/team/usage", post(crate::team::usage))
+        // What a provider's refusal said about when to try again: additive to the
+        // relay's contract, so an HQ without it answers 404 and a node without it never asks.
+        .route("/v1/team/throttle", post(crate::team::throttle))
         .route("/v1/team/tokens", post(crate::team::tokens))
         // The node's receipts (ADR 0114): each call a turn made of Endora's tools, with the
         // turn's own token, written by the node and never by the model.
@@ -1372,7 +1375,15 @@ mod tests {
 
     /// A developer is handed a task, and the tick starts their turn: it waits for a runner.
     fn a_turn_starts(st: &State) -> (RunId, TaskId) {
+        a_turn_starts_on(st, None)
+    }
+
+    /// As [`a_turn_starts`], for a developer the owner set to think on `brain`.
+    fn a_turn_starts_on(st: &State, brain: Option<&str>) -> (RunId, TaskId) {
         let dev = st.hq.hire("John Doe", 40, 2, 0).unwrap();
+        if let Some(brain) = brain {
+            st.hq.set_brain(dev, brain).unwrap();
+        }
         let goal = st
             .hq
             .set_goal("Keep the lab tidy", "a test", Author::Owner)
@@ -2320,6 +2331,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_relay_tells_the_provider_s_headers_and_the_failure_waits_as_long_as_they_say() {
+        let st = state(true);
+        assert!(st.hq.tick().unwrap().started >= 1);
+        let run = scripted(&st).started()[0].run;
+        let app = app(st.clone());
+        let tell = |token: Option<&str>, body: serde_json::Value| {
+            call("POST", "/v1/team/throttle", token, &body.to_string())
+        };
+        // Only the node tells it.
+        let refused = app
+            .clone()
+            .oneshot(tell(None, json!({ "run": run.0, "status": 429 })))
+            .await
+            .unwrap();
+        assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+        let unknown = app
+            .clone()
+            .oneshot(tell(Some(TOKEN), json!({ "run": 987_654, "status": 429 })))
+            .await
+            .unwrap();
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        // A payload with only what an older shape had (a run, a status) is taken, and so is one
+        // with a field this HQ does not know yet: additive both ways.
+        for body in [
+            json!({ "run": run.0, "status": 402 }),
+            json!({ "run": run.0, "status": 429, "retry_after_ms": 240_000, "a_later_field": [1] }),
+        ] {
+            let res = app.clone().oneshot(tell(Some(TOKEN), body)).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+        // The turn then fails with words that name no time: it waits what the header said.
+        let before = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        scripted(&st).finish_badly_saying(run, "Claude Code failed (success): API Error: 429");
+        st.hq.tick().unwrap();
+        let kept = st.hq.store().run(run).unwrap().unwrap();
+        assert_eq!(kept.status, RunStatus::RetryWaiting);
+        let due = kept.retry_at.unwrap();
+        assert!(
+            (before + 240_000..=before + 240_000 + 60_000).contains(&due),
+            "held the four minutes it asked: {} ms from the start",
+            due - before
+        );
+    }
+
+    #[tokio::test]
     async fn the_relay_learns_whose_a_token_is_and_reports_what_each_call_cost() {
         let st = state(true);
         // Ada, the demo's lead, judges with Claude: her turns of judgment are paid from the
@@ -2945,6 +3007,31 @@ mod tests {
         assert_eq!(turn["project"], project.0);
     }
 
+    /// The NAS's model reuses a repeated prefix, so its turn counts the
+    /// conversation once; the Mac is not measured, so its turn still sums every call.
+    #[tokio::test]
+    async fn a_nas_turn_counts_its_conversation_once_and_a_mac_turn_every_call() {
+        for (brain, counts) in [("local", "conversation"), ("mac", "every_call")] {
+            let st = state(false);
+            // A Mac turn starts only while the node says the Mac is free.
+            st.hq.tell_mac(true, "ready");
+            a_turn_starts_on(&st, Some(brain));
+            let res = app(st)
+                .oneshot(call(
+                    "POST",
+                    "/v1/runner/next",
+                    Some(RUNNER),
+                    &json!({ "free": 1 }).to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{brain}");
+            let turn = json_of(res).await;
+            assert_eq!(turn["brain"], brain);
+            assert_eq!(turn["budget_counts"], counts, "{brain}");
+        }
+    }
+
     #[tokio::test]
     async fn the_runner_is_handed_a_started_turn_once_and_its_end_ends_the_run() {
         let st = state(false);
@@ -2974,8 +3061,12 @@ mod tests {
         assert_eq!(turn["effort"], json!(null), "the house's model takes none");
         assert_eq!(
             turn["prompt_budget"],
-            json!(240_000),
-            "the house's budget, as HQ judges the turn by"
+            json!(43_008),
+            "the NAS model's budget, held to its window, as HQ judges the turn by"
+        );
+        assert_eq!(
+            turn["budget_counts"], "conversation",
+            "the NAS reuses its prefix, so its conversation counts once"
         );
         assert_eq!(
             turn["shell"], true,

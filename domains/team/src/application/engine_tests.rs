@@ -374,6 +374,191 @@ fn worker_final_words_keep_mentions_without_dispatching_peer_work() {
     );
 }
 
+/// Starts a turn for a fresh task and ends it badly saying `why`; returns its run.
+fn a_turn_that_fails_saying(hq: &Hq<'_>, why: &str) -> i64 {
+    a_turn_that_fails_after(hq, None, why)
+}
+
+/// What a provider's answer said, as the node's relay tells it to HQ: its status, its
+/// `Retry-After` and its rate-limit reset.
+type Told = (u16, Option<i64>, Option<i64>);
+
+/// Like [`a_turn_that_fails_saying`], with the provider's own answer (its headers) told to HQ
+/// while the turn ran, as the node's relay does.
+fn a_turn_that_fails_after(hq: &Hq<'_>, told: Option<Told>, why: &str) -> i64 {
+    let t = team(hq);
+    task_for(hq, t.goal, Some(t.dev), "Add a list");
+    hq.tick().unwrap(); // started, and running until it is ended
+    let run = hq.store().runs().unwrap()[0].id.0;
+    if let Some((status, retry_after, resets_at)) = told {
+        hq.tell_provider_answer(crate::domain::RunId(run), status, retry_after, resets_at)
+            .unwrap();
+    }
+    hq.runner()
+        .finish_badly_saying(crate::domain::RunId(run), why);
+    hq.tick().unwrap(); // settled
+    run
+}
+
+#[test]
+fn a_turn_whose_key_was_refused_is_failed_at_once_not_retried() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let run = a_turn_that_fails_saying(
+        &hq,
+        "Claude Code failed (success): API Error: 401 authentication_error invalid x-api-key",
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::Failed);
+    let started = hq.runner().started().len();
+    clock.forward(RETRY_AFTER_MS * 10);
+    hq.tick().unwrap();
+    assert_eq!(hq.runner().started().len(), started, "never started again");
+}
+
+#[test]
+fn a_turn_that_hit_a_spent_quota_waits_out_its_window_and_not_a_minute() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let resets_at = NOON + 3 * 60 * 60_000;
+    let why = format!(
+        "Claude Code failed (success): Claude AI usage limit reached|{}",
+        resets_at / 1_000
+    );
+    let run = a_turn_that_fails_saying(&hq, &why);
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    let started = hq.runner().started().len();
+    clock.forward(resets_at - NOON - 1_000);
+    let report = hq.tick().unwrap();
+    assert_eq!(report.requeued, 0, "not inside the window");
+    assert_eq!(hq.runner().started().len(), started);
+    clock.forward(1_000);
+    assert_eq!(hq.tick().unwrap().requeued, 1, "when it reopens");
+}
+
+#[test]
+fn a_quota_failure_that_carries_a_reset_header_is_held_exactly_to_that_time() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let resets_at = NOON + 3 * 60 * 60_000 + 17_000;
+    // The runner's words say a quota and no time, as the relay's refusal does.
+    let run = a_turn_that_fails_after(
+        &hq,
+        Some((402, None, Some(resets_at))),
+        "Claude Code failed (success): API Error: 402 billing_error: the credit balance is too low",
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    let started = hq.runner().started().len();
+    clock.forward(resets_at - NOON - 1);
+    assert_eq!(hq.tick().unwrap().requeued, 0, "not a millisecond early");
+    assert_eq!(hq.runner().started().len(), started);
+    clock.forward(1);
+    assert_eq!(hq.tick().unwrap().requeued, 1, "exactly when it reopens");
+}
+
+#[test]
+fn the_header_s_reset_wins_over_a_time_in_the_runner_s_words() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let by_header = NOON + 2 * 60 * 60_000;
+    let by_words = NOON + 5 * 60 * 60_000;
+    let run = a_turn_that_fails_after(
+        &hq,
+        Some((429, None, Some(by_header))),
+        &format!(
+            "Claude Code failed (success): usage limit reached|{}",
+            by_words / 1_000
+        ),
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    clock.forward(by_header - NOON);
+    assert_eq!(hq.tick().unwrap().requeued, 1, "when the header said");
+}
+
+#[test]
+fn a_429_with_retry_after_waits_that_long() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let run = a_turn_that_fails_after(
+        &hq,
+        Some((429, Some(4 * 60_000), None)),
+        "Claude Code failed (success): API Error: 429 rate_limit_error",
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    let started = hq.runner().started().len();
+    clock.forward(4 * 60_000 - 1);
+    assert_eq!(hq.tick().unwrap().requeued, 0, "not before it asked");
+    assert_eq!(hq.runner().started().len(), started);
+    clock.forward(1);
+    assert_eq!(hq.tick().unwrap().requeued, 1, "when it asked");
+}
+
+#[test]
+fn a_reply_without_headers_is_still_told_by_its_words_as_before() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    // No answer told at all (an older node): the words alone, a throttle's own retry-after.
+    let run = a_turn_that_fails_after(
+        &hq,
+        None,
+        "Claude Code failed (success): API Error: 429 too many requests; retry-after: 120",
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    clock.forward(120_000 - 1);
+    assert_eq!(hq.tick().unwrap().requeued, 0);
+    clock.forward(1);
+    assert_eq!(hq.tick().unwrap().requeued, 1);
+}
+
+#[test]
+fn an_answer_with_no_time_in_it_leaves_the_words_to_say() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let resets_at = NOON + 3 * 60 * 60_000;
+    let run = a_turn_that_fails_after(
+        &hq,
+        Some((429, None, None)),
+        &format!("Claude AI usage limit reached|{}", resets_at / 1_000),
+    );
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    clock.forward(resets_at - NOON - 1_000);
+    assert_eq!(hq.tick().unwrap().requeued, 0, "held to the words' window");
+    clock.forward(1_000);
+    assert_eq!(hq.tick().unwrap().requeued, 1);
+}
+
+#[test]
+fn an_answer_told_long_before_the_failure_is_not_held_against_it() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let t = team(&hq);
+    task_for(&hq, t.goal, Some(t.dev), "Add a list");
+    hq.tick().unwrap();
+    let run = hq.store().runs().unwrap()[0].id;
+    // A throttle early in a long turn, since got past; the turn then fails for another reason.
+    hq.tell_provider_answer(run, 429, Some(50 * 60_000), None)
+        .unwrap();
+    clock.forward(20 * 60_000);
+    hq.runner()
+        .finish_badly_saying(run, "Claude Code failed (error_during_execution): boom");
+    hq.tick().unwrap();
+    clock.forward(RETRY_AFTER_MS);
+    assert_eq!(
+        hq.tick().unwrap().requeued,
+        1,
+        "retried as an ordinary failure"
+    );
+}
+
+#[test]
+fn a_turn_that_failed_with_no_cause_is_retried_a_minute_later_as_before() {
+    let clock = hands();
+    let hq = hq(&clock, 4);
+    let run = a_turn_that_fails_saying(&hq, "Claude Code failed (error_during_execution): boom");
+    assert_eq!(status_of(&hq, run), RunStatus::RetryWaiting);
+    clock.forward(RETRY_AFTER_MS);
+    assert_eq!(hq.tick().unwrap().requeued, 1);
+}
+
 #[test]
 fn a_turn_whose_container_vanishes_is_tried_once_more_for_free_then_as_any_failure_then_fails() {
     // The first loss is the platform's (a restart under it) and does not count against the

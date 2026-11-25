@@ -46,10 +46,90 @@ impl Call {
     }
 }
 
-/// Anthropic's answer: its status, and its body as it arrives.
+/// What a provider's answer headers said about when to try again: the structured
+/// twin of the words an error carries. Both are `None` when the provider sent neither, which
+/// is every older reply and every success.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Throttle {
+    /// How long it asked to wait (`Retry-After`), in milliseconds.
+    pub retry_after: Option<i64>,
+    /// When the limit it named reopens (the latest of the exhausted
+    /// `anthropic-ratelimit-*-reset`), milliseconds since the epoch.
+    pub resets_at: Option<i64>,
+}
+
+impl Throttle {
+    /// Reads the answer's `headers` (name, value), `now` being when it arrived. A header that
+    /// does not parse is ignored.
+    #[must_use]
+    pub fn from_headers<'a>(
+        headers: impl IntoIterator<Item = (&'a str, &'a str)>,
+        now: i64,
+    ) -> Self {
+        let mut seen: Vec<(String, &str)> = headers
+            .into_iter()
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim()))
+            .collect();
+        seen.sort();
+        let value = |name: &str| {
+            seen.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, value)| *value)
+        };
+        let retry_after = value("retry-after").and_then(|v| waited(v, now));
+        // The reset of each limit the call was refused for: one with nothing left (or no word
+        // of what is left), whose own reset is when it reopens. The latest holds: waiting for
+        // the earlier would only be refused by the other.
+        let resets_at = seen
+            .iter()
+            .filter_map(|(name, v)| {
+                let bucket = name
+                    .strip_prefix("anthropic-ratelimit-")?
+                    .strip_suffix("-reset")?;
+                let left = value(&format!("anthropic-ratelimit-{bucket}-remaining"));
+                if left.is_some_and(|left| left != "0") {
+                    return None;
+                }
+                reset_at(v)
+            })
+            .max();
+        Self {
+            retry_after,
+            resets_at,
+        }
+    }
+
+    /// Whether the headers said anything worth telling.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.retry_after.is_none() && self.resets_at.is_none()
+    }
+}
+
+/// How long `Retry-After` asks to wait, in milliseconds: whole seconds, or an HTTP date (how
+/// long from `now`).
+fn waited(value: &str, now: i64) -> Option<i64> {
+    if let Ok(seconds) = value.parse::<u64>() {
+        return i64::try_from(seconds).ok()?.checked_mul(1_000);
+    }
+    let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+    Some((at.timestamp_millis() - now).max(0))
+}
+
+/// When a limit reopens, from its reset header: an RFC 3339 time (Anthropic's), in
+/// milliseconds since the epoch.
+fn reset_at(value: &str) -> Option<i64> {
+    let at = chrono::DateTime::parse_from_rfc3339(value).ok()?;
+    Some(at.timestamp_millis())
+}
+
+/// Anthropic's answer: its status, what its headers said about when to try again, and its
+/// body as it arrives.
 pub struct Reply {
     /// The HTTP status.
     pub status: u16,
+    /// What its headers said about when to try again.
+    pub throttle: Throttle,
     /// The body, read as it streams in.
     pub body: Box<dyn std::io::Read + Send>,
 }
@@ -84,8 +164,26 @@ pub fn send(
     }
     let response = request.send(body).map_err(|e| e.to_string())?;
     let status = response.status().as_u16();
+    // Only a refusal's headers say when to try again; a success's are not read.
+    let throttle = if status >= 400 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|since| i64::try_from(since.as_millis()).ok())
+            .unwrap_or(0);
+        Throttle::from_headers(
+            response
+                .headers()
+                .iter()
+                .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
+            now,
+        )
+    } else {
+        Throttle::default()
+    };
     Ok(Reply {
         status,
+        throttle,
         body: Box::new(response.into_body().into_reader()),
     })
 }
@@ -892,6 +990,81 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const NOW: i64 = 1_794_000_000_000;
+
+    fn throttle_of(headers: &[(&str, &str)]) -> Throttle {
+        Throttle::from_headers(headers.iter().copied(), NOW)
+    }
+
+    #[test]
+    fn retry_after_is_seconds_or_a_date_and_nothing_else_is_believed() {
+        let at = |h: &str| throttle_of(&[("retry-after", h)]).retry_after;
+        assert_eq!(at("30"), Some(30_000));
+        assert_eq!(at(" 7 "), Some(7_000));
+        assert_eq!(at("0"), Some(0));
+        // NOW is 2026-11-06 21:20:00 UTC; the date is ten minutes on.
+        assert_eq!(
+            at("Fri, 06 Nov 2026 21:30:00 GMT"),
+            Some(600_000),
+            "an HTTP date is how long from now"
+        );
+        assert_eq!(at("soon"), None);
+        assert_eq!(at("-5"), None);
+        assert_eq!(at(""), None);
+    }
+
+    #[test]
+    fn the_latest_exhausted_anthropic_reset_is_when_the_limit_reopens() {
+        let got = throttle_of(&[
+            ("anthropic-ratelimit-requests-remaining", "0"),
+            ("anthropic-ratelimit-requests-reset", "2026-11-06T21:21:00Z"),
+            ("anthropic-ratelimit-tokens-remaining", "0"),
+            (
+                "anthropic-ratelimit-tokens-reset",
+                "2026-11-06T21:23:30.500Z",
+            ),
+            // Not exhausted: not why the call was refused.
+            ("anthropic-ratelimit-input-tokens-remaining", "9000"),
+            (
+                "anthropic-ratelimit-input-tokens-reset",
+                "2026-11-06T23:00:00Z",
+            ),
+        ]);
+        assert_eq!(got.resets_at, Some(NOW + 3 * 60_000 + 30_500));
+        assert_eq!(got.retry_after, None);
+    }
+
+    #[test]
+    fn a_reset_with_no_remaining_beside_it_counts_and_a_bad_one_does_not() {
+        let got = throttle_of(&[("anthropic-ratelimit-requests-reset", "2026-11-06T21:21:00Z")]);
+        assert_eq!(got.resets_at, Some(NOW + 60_000));
+        let bad = throttle_of(&[("anthropic-ratelimit-requests-reset", "tomorrow")]);
+        assert!(bad.is_empty());
+    }
+
+    #[test]
+    fn names_are_read_in_any_case_and_other_headers_are_left_alone() {
+        let got = throttle_of(&[
+            ("Retry-After", "12"),
+            ("Anthropic-RateLimit-Requests-Reset", "2026-11-06T21:21:00Z"),
+            ("content-type", "application/json"),
+            ("x-ratelimit-reset", "5"),
+        ]);
+        assert_eq!(
+            got,
+            Throttle {
+                retry_after: Some(12_000),
+                resets_at: Some(NOW + 60_000)
+            }
+        );
+    }
+
+    #[test]
+    fn an_answer_with_no_such_headers_says_nothing() {
+        assert!(throttle_of(&[]).is_empty());
+        assert!(throttle_of(&[("content-type", "application/json")]).is_empty());
+    }
+
     /// A call shaped as Claude Code 2.1.296 sent one, headless (`claude -p`), recorded against
     /// a fake relay with its contents cut down: a `system` list with cache marks, its own tools
     /// and the turn's MCP tools, `metadata`, adaptive thinking, an effort, streamed, with
@@ -1069,13 +1242,13 @@ mod tests {
             refused.is_err_and(|why| why.contains("house's network")),
             "refused before anything is sent"
         );
-        // A name that resolves only to the house's addresses is the house's: a laptop's
-        // router-given name ("localhost." stands in for it). Nothing listens on port 1, so the
-        // call fails to connect, but never for being off the house's network.
-        let by_name = send_local("http://localhost.:1/v1", "", b"{}");
+        // An address at home is the house's. Nothing listens on port 1, so the call fails to
+        // connect, but never for being off the house's network. (A name that resolves only to
+        // private addresses is covered offline in `model_server`, with an injected resolver.)
+        let at_home = send_local("http://127.0.0.1:1/v1", "", b"{}");
         assert!(
-            by_name.is_err_and(|why| !why.contains("house's network")),
-            "a name at home is not refused as away"
+            at_home.is_err_and(|why| !why.contains("house's network")),
+            "an address at home is not refused as away"
         );
     }
 

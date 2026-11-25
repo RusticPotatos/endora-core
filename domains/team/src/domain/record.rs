@@ -242,7 +242,7 @@ pub fn clean(text: &str) -> String {
 /// Whether a character could pass for structure or hide in text: a control character, one that
 /// turns text around (right-to-left marks, embeddings, overrides and isolates), a zero-width one,
 /// or a line or paragraph separator.
-fn odd(c: char) -> bool {
+pub(super) fn odd(c: char) -> bool {
     c.is_control()
         || matches!(
             c,

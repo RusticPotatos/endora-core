@@ -4,6 +4,7 @@ mod chess_tool;
 pub mod desk_ports;
 pub mod engine;
 pub mod event_ports;
+mod failure_cause;
 pub mod guard_ports;
 pub mod history_ports;
 pub mod map_ports;
@@ -30,6 +31,9 @@ pub use ports::{Clock, NewProject, NewRoutine, NewTask, RunContext, TeamStore, W
 
 #[cfg(test)]
 mod engine_tests;
+
+#[cfg(test)]
+mod failure_cause_tests;
 
 #[cfg(test)]
 mod protocol_tests;
