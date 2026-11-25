@@ -7,6 +7,16 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (foundation: routine lifecycle and a bounded status, EXPERIMENTAL)
+
+- `routine pause ID`, `routine resume ID` (now also for the owner's pause) and `routine retire ID` are owner
+  verbs: they need the owner token and are recorded on the evidence chain. `run-due` and `serve` skip paused
+  and retired routines; a retired routine can never be resumed. Schema 9 adds one column, `routines.retired`
+  (default 0): additive, so a schema-8 file opens and behaves as before (tested against a real schema-8
+  file). Back up before upgrading the binary, as for any schema step.
+- `status --short` shows, per goal, its totals and its 10 newest items (`--recent N`; `--short --all` is the
+  old listing) instead of every item. Plain `status` is unchanged.
+
 ### Added (the foundation, EXPERIMENTAL)
 
 This entry describes the branch `docs/developer-docs-v1` and the review fixes stacked on it in this branch (listed below); `main` does not carry any of it until it is merged. <!-- INTERIM-NOTICE -->

@@ -233,7 +233,7 @@ fn old_files_with_a_stuck_item_are_handled_sanely_in_schema_7_and_8() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 8);
+        assert_eq!(v, 9);
         // The old unsettled call of attempt 1 is ignored: the item that met its criteria waits.
         for _ in 0..3 {
             assert!(core.recover_interrupted().unwrap().is_empty(), "v{version}");
