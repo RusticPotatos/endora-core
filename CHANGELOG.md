@@ -103,6 +103,12 @@ These change the LEGACY HQ code only (`domains/team`, `app/hq`, `app/worker`, th
   is retried as before. The caps (two retries) are unchanged, and `retry_after_failure` keeps its
   behaviour. The relay still drops the provider's headers, so a `Retry-After` header does not reach this
   decision: only a reset time the text carries does.
+- **A provider's `Retry-After` and rate-limit reset reach the retry decision.** The node's relay reads
+  `Retry-After` and the exhausted `anthropic-ratelimit-*-reset` headers from a refusal and tells HQ at a
+  new, additive route (`POST /v1/team/throttle`); HQ keeps the answer briefly in memory, and a failing
+  turn reads the header's time before the runner's words, so a quota is held exactly to its reset and a
+  429 waits what it asked. Without headers, or from an older node or HQ, the text is read as before.
+  The seven-day belief cap is unchanged. ADR 0102 is amended.
 
 ### Changed (the HQ product is LEGACY)
 

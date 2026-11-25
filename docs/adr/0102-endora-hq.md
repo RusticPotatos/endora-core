@@ -123,6 +123,21 @@ seconds is taken down and the turn refused the same way. A runner that restarts 
 observers it finds by their label. Scenarios:
 `app/runner/features/a-probe-observer-starts-before-the-worksite.feature`.
 
+Amended 2026-11-24: **a provider's refusal reaches the retry decision with the time it
+named.** The relay used to drop the provider's headers, so a `Retry-After` or a rate-limit reset
+reached the run logic only if the worker's last words repeated it, and a spent quota usually got
+the 30-minute hold. The relay now reads them from a refusal (status 400 or above; a success's
+headers are not read): `Retry-After` as seconds or an HTTP date, and the latest
+`anthropic-ratelimit-*-reset` whose limit is exhausted (remaining `0`, or none said). It tells HQ
+at a new route, `POST /v1/team/throttle` (`run`, `status`, and optional `retry_after_ms` and
+`resets_at`), only when a time was named. This is additive within the protocol's major version
+(ADR 0050): no existing route, field or meaning changes; an older node never calls the route, an
+older HQ answers it 404 and the node carries on, and fields HQ does not know are ignored. HQ
+keeps the answer in memory for the run, five minutes at most and taken by its failure, which
+reads the header's time before the runner's words (`failure_cause`); with none, the words are
+read as before. The same seven-day belief cap applies. An OpenAI-shaped provider's
+`x-ratelimit-reset-*` is not read: the metered and local relays return the body alone.
+
 ## Context
 
 The always-on plan wants Endora to do real technical work for its owner (changes to their

@@ -2,6 +2,7 @@
 //! Wakes and their receipts, claiming, threads, delegation, the tick, the ledger, the gate's
 //! word on done, the kill switch, and the event feed.
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -29,8 +30,8 @@ use crate::domain::wakes::{self};
 use crate::domain::work::{self, mentions};
 use crate::domain::{
     Brain, CheckBackStatus, EventKind, Fault, Firing, GoalId, GoalStatus, Liveness, Member,
-    MemberId, Millis, Priority, ProjectId, Receipt, Refusal, Routine, RoutineId, RunId, RunStatus,
-    Task, TaskId, TaskStatus, WakeDecision, WakeReason,
+    MemberId, Millis, Priority, ProjectId, ProviderAnswer, Receipt, Refusal, Routine, RoutineId,
+    RunId, RunStatus, Task, TaskId, TaskStatus, WakeDecision, WakeReason,
 };
 
 mod allowance;
@@ -246,6 +247,10 @@ pub struct Engine<S, W, C> {
     /// What the node last said about the owner's Mac (ADR 0130), and when. `None` until it has
     /// said, and again after HQ restarts: a new HQ does not guess that the Mac is free.
     mac: Mutex<Option<MacFacts>>,
+    /// What a provider's own answer said about when to try again, by the run it was told for
+    ///: kept only in memory and only briefly, and taken by the run's failure. A new
+    /// HQ has none, and the runner's words are read as before.
+    provider_answers: Mutex<HashMap<RunId, ProviderAnswer>>,
     /// Endora's public records and plans, which the CEO may read.
     docs: Library,
     /// Set while the engine does what the owner asked (their task, reply, answer, decision or
@@ -265,6 +270,10 @@ pub struct Engine<S, W, C> {
     /// tick. The service coalesces the asking; with none, work waits for the tick as before.
     pass_requests: Option<PassRequests>,
 }
+
+/// How long a provider's answer, told for a run, still speaks for its failure: the worker's own
+/// retries of a throttle take a while, but a throttle from before that is long past.
+const ANSWER_FRESH_MS: Millis = 5 * 60_000;
 
 /// How the engine asks its service for a pass of the tick (ADR 0102, amended 2026-11-04).
 pub type PassRequests = std::sync::Arc<dyn Fn() + Send + Sync>;
@@ -337,6 +346,7 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             lock: Mutex::new(()),
             lab: Mutex::new(None),
             mac: Mutex::new(None),
+            provider_answers: Mutex::new(HashMap::new()),
             docs: &[],
             for_owner: AtomicBool::new(false),
             acting: Mutex::new(None),
@@ -414,6 +424,39 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
             why: one_line(why, 60),
             told_at: now,
         });
+    }
+
+    /// What a provider's answer to one of a run's model calls said about when to try again
+    ///: its `Retry-After` and rate-limit reset, read by the node's relay from the
+    /// response's headers. Kept for the run's failure, which prefers it to the runner's words.
+    ///
+    /// # Errors
+    /// The store's, and [`EngineError::Unknown`] for a run HQ does not have.
+    pub fn tell_provider_answer(
+        &self,
+        run: RunId,
+        status: u16,
+        retry_after: Option<Millis>,
+        resets_at: Option<Millis>,
+    ) -> Done<()> {
+        self.store.run(run)?.ok_or(EngineError::Unknown("run"))?;
+        let now = self.clock.now();
+        let mut kept = self
+            .provider_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Only the fresh are kept, so runs that never fail leave nothing behind.
+        kept.retain(|_, told| now - told.seen_at <= ANSWER_FRESH_MS);
+        kept.insert(
+            run,
+            ProviderAnswer {
+                status,
+                retry_after: retry_after.map(|wait| wait.max(0)),
+                resets_at,
+                seen_at: now,
+            },
+        );
+        Ok(())
     }
 
     /// What the node last said about the Mac, if it has.

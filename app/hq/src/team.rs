@@ -268,6 +268,49 @@ pub(crate) async fn usage(
 }
 
 #[derive(serde::Deserialize)]
+pub(crate) struct ThrottleTold {
+    run: i64,
+    /// The HTTP status the provider refused with.
+    status: u16,
+    /// How long it asked to wait (`Retry-After`), in milliseconds, if it said.
+    #[serde(default)]
+    retry_after_ms: Option<i64>,
+    /// When the limit it named reopens (`anthropic-ratelimit-*-reset`), milliseconds since
+    /// the epoch, if it said.
+    #[serde(default)]
+    resets_at: Option<i64>,
+}
+
+/// For the node's model relay: what a provider's refusal of one of a turn's calls said about
+/// when to try again, read from its headers. HQ keeps it for the turn's failure, which prefers
+/// it to the runner's words. Fields this HQ does not know are ignored, and the
+/// time fields may be missing: older and newer nodes both work.
+pub(crate) async fn throttle(
+    Extract(state): Extract<State>,
+    Json(req): Json<ThrottleTold>,
+) -> Response {
+    let hq = state.hq.clone();
+    let noted = tokio::task::spawn_blocking(move || {
+        hq.tell_provider_answer(
+            endora_team::domain::RunId(req.run),
+            req.status,
+            req.retry_after_ms,
+            req.resets_at,
+        )
+    })
+    .await;
+    match noted {
+        Ok(Ok(())) => Json(json!({ "noted": true })).into_response(),
+        Ok(Err(e)) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
 pub(crate) struct TokensTold {
     run: i64,
     /// The call's prompt tokens, as the house's model reported them.

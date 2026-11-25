@@ -1,8 +1,8 @@
 //! The cause of a failed turn, read from the provider's words, and the retries it allows.
 
 use super::failure_cause::cause_of;
-use crate::domain::FailureCause;
 use crate::domain::runs::{retry_after_failure, retry_decision};
+use crate::domain::{FailureCause, ProviderAnswer};
 
 const NOW: i64 = 1_794_000_000_000;
 
@@ -56,7 +56,7 @@ fn each_provider_answer_is_told_by_its_status_and_words() {
         ("exited with code 1", FailureCause::Other),
     ];
     for (said, expected) in cases {
-        assert_eq!(cause_of(said, NOW), expected, "{said}");
+        assert_eq!(cause_of(said, None, NOW), expected, "{said}");
     }
 }
 
@@ -67,13 +67,13 @@ fn a_number_inside_a_longer_number_is_not_a_status() {
         "turn 5030 ended (exit 1)",
         "took 4010ms",
     ] {
-        assert_eq!(cause_of(said, NOW), FailureCause::Other, "{said}");
+        assert_eq!(cause_of(said, None, NOW), FailureCause::Other, "{said}");
     }
 }
 
 #[test]
 fn a_reset_time_is_taken_in_seconds_or_milliseconds_and_only_when_plausible() {
-    let at = |said: &str| cause_of(said, NOW);
+    let at = |said: &str| cause_of(said, None, NOW);
     let reopens = |resets_at| FailureCause::Quota {
         resets_at: Some(resets_at),
     };
@@ -98,7 +98,7 @@ fn reopens_nothing() -> FailureCause {
 #[test]
 fn a_rate_limit_asking_for_hours_is_a_window_not_a_pause() {
     assert_eq!(
-        cause_of("429 too many requests, retry-after: 7200", NOW),
+        cause_of("429 too many requests, retry-after: 7200", None, NOW),
         FailureCause::Quota {
             resets_at: Some(NOW + 7_200_000)
         }
@@ -163,6 +163,7 @@ fn replaying_the_recorded_quota_failures_retries_nothing_inside_a_closed_window(
         // The same failure, now said with the window the provider would have given.
         let cause = cause_of(
             &format!("{said}; resets_at: {}", resets_at_ms / 1_000),
+            None,
             failed,
         );
         assert_eq!(
@@ -186,7 +187,7 @@ fn replaying_the_recorded_quota_failures_retries_nothing_inside_a_closed_window(
 fn the_recorded_failures_all_get_a_cause_other_than_other() {
     let told: Vec<FailureCause> = RECORDED
         .iter()
-        .map(|(at, said)| cause_of(said, at * 1_000))
+        .map(|(at, said)| cause_of(said, None, at * 1_000))
         .collect();
     let named = told.iter().filter(|c| **c != FailureCause::Other).count();
     assert_eq!(
@@ -206,6 +207,135 @@ fn the_synthetic_fixtures_are_told_as_named() {
     // SYNTHETIC: invented to cover the causes `RECORDED` has no failure of; two are `Other`
     // on purpose, so this is a check of each answer, not of a share.
     for (said, expected) in SYNTHETIC {
-        assert_eq!(cause_of(said, NOW), expected, "{said}");
+        assert_eq!(cause_of(said, None, NOW), expected, "{said}");
     }
+}
+
+/// The provider's own answer, as the relay read its headers, told `NOW`.
+fn answer(status: u16, retry_after: Option<i64>, resets_at: Option<i64>) -> ProviderAnswer {
+    ProviderAnswer {
+        status,
+        retry_after,
+        resets_at,
+        seen_at: NOW,
+    }
+}
+
+const HOUR: i64 = 60 * 60_000;
+
+#[test]
+fn a_reset_header_on_a_quota_failure_fills_the_window() {
+    let said = "API Error: 402 billing_error: the credit balance is too low";
+    let reset = NOW + 3 * HOUR;
+    assert_eq!(
+        cause_of(said, Some(answer(402, None, Some(reset))), NOW),
+        FailureCause::Quota {
+            resets_at: Some(reset)
+        }
+    );
+    // Even when the words said nothing of a quota at all.
+    assert_eq!(
+        cause_of(
+            "exited with code 1",
+            Some(answer(402, None, Some(reset))),
+            NOW
+        ),
+        FailureCause::Quota {
+            resets_at: Some(reset)
+        }
+    );
+}
+
+#[test]
+fn the_header_is_told_before_the_words() {
+    let by_words = (NOW + 5 * HOUR) / 1_000;
+    let by_header = NOW + 2 * HOUR;
+    assert_eq!(
+        cause_of(
+            &format!("usage limit reached|{by_words}"),
+            Some(answer(429, None, Some(by_header))),
+            NOW
+        ),
+        FailureCause::Quota {
+            resets_at: Some(by_header)
+        }
+    );
+}
+
+#[test]
+fn a_retry_after_header_on_a_throttle_is_how_long_it_asked() {
+    let said = "API Error: 429 rate_limit_error";
+    assert_eq!(
+        cause_of(said, Some(answer(429, Some(45_000), None)), NOW),
+        FailureCause::RateLimit {
+            retry_after: Some(45_000)
+        }
+    );
+    // Without Retry-After, the reset of the limit it named is how long.
+    assert_eq!(
+        cause_of(said, Some(answer(429, None, Some(NOW + 90_000))), NOW),
+        FailureCause::RateLimit {
+            retry_after: Some(90_000)
+        }
+    );
+    // The two together: the later one holds.
+    assert_eq!(
+        cause_of(
+            said,
+            Some(answer(429, Some(10_000), Some(NOW + 90_000))),
+            NOW
+        ),
+        FailureCause::RateLimit {
+            retry_after: Some(90_000)
+        }
+    );
+}
+
+#[test]
+fn a_throttle_that_asks_for_hours_is_a_window() {
+    assert_eq!(
+        cause_of(
+            "API Error: 429",
+            Some(answer(429, Some(2 * HOUR), None)),
+            NOW
+        ),
+        FailureCause::Quota {
+            resets_at: Some(NOW + 2 * HOUR)
+        }
+    );
+}
+
+#[test]
+fn a_reset_past_a_week_is_not_believed() {
+    let far = NOW + 8 * 24 * HOUR;
+    assert_eq!(
+        cause_of("API Error: 402", Some(answer(402, None, Some(far))), NOW),
+        FailureCause::Quota { resets_at: None }
+    );
+    assert_eq!(
+        cause_of(
+            "API Error: 429",
+            Some(answer(429, Some(far - NOW), None)),
+            NOW
+        ),
+        FailureCause::RateLimit { retry_after: None }
+    );
+}
+
+#[test]
+fn an_answer_with_no_time_leaves_the_words_to_say() {
+    let said = "status 429 Too Many Requests; retry-after: 45";
+    assert_eq!(
+        cause_of(said, Some(answer(429, None, None)), NOW),
+        cause_of(said, None, NOW)
+    );
+}
+
+#[test]
+fn a_refused_key_is_never_softened_by_an_answer() {
+    let said = "API Error: 401 authentication_error invalid x-api-key";
+    assert_eq!(
+        cause_of(said, Some(answer(429, Some(1_000), None)), NOW),
+        FailureCause::Credential
+    );
 }

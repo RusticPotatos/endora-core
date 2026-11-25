@@ -109,6 +109,23 @@ pub enum FailureCause {
     Other,
 }
 
+/// What a provider's own answer said about when to try again, as the node's relay read it from
+/// the response's headers: the structured twin of what [`FailureCause`] otherwise
+/// reads from the runner's words. Every field but the status is optional, since a provider says
+/// only what it says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderAnswer {
+    /// The HTTP status the provider answered with.
+    pub status: u16,
+    /// How long it asked to wait (`Retry-After`), in milliseconds.
+    pub retry_after: Option<Millis>,
+    /// When the limit it named reopens (`anthropic-ratelimit-*-reset`), milliseconds since the
+    /// epoch.
+    pub resets_at: Option<Millis>,
+    /// When HQ was told, by HQ's clock: how fresh the answer still is.
+    pub seen_at: Millis,
+}
+
 /// The wait before the next try after `attempts` own tries: a minute, doubling, bounded by
 /// [`LONGEST_BACKOFF_MS`].
 #[must_use]

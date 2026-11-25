@@ -1,6 +1,6 @@
 //! Turns: queued, started, ended and retried.
 
-use super::{Done, Engine, EngineError, STANDARDS};
+use super::{ANSWER_FRESH_MS, Done, Engine, EngineError, STANDARDS};
 use crate::application::failure_cause;
 use crate::application::ports::{Clock, Run, TeamStore, WorkerAdapter};
 use crate::domain::handover;
@@ -8,8 +8,8 @@ use crate::domain::mac;
 use crate::domain::review;
 use crate::domain::runs;
 use crate::domain::{
-    Brain, CheckBackStatus, EventKind, Fault, Member, Millis, Receipt, RunStatus, TaskId,
-    WakeReason,
+    Brain, CheckBackStatus, EventKind, Fault, Member, Millis, ProviderAnswer, Receipt, RunId,
+    RunStatus, TaskId, WakeReason,
 };
 
 /// The most of the owner's posts on an item a reviewer is told, newest last, and the most of
@@ -155,6 +155,17 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
         self.end(run, status, why)
     }
 
+    /// The provider's answer told for `run`, if it is fresh: taken, so it colours only this
+    /// failure.
+    fn take_provider_answer(&self, run: RunId, now: Millis) -> Option<ProviderAnswer> {
+        let told = self
+            .provider_answers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&run)?;
+        (now - told.seen_at <= ANSWER_FRESH_MS).then_some(told)
+    }
+
     /// A failed turn: tried again a minute later, at most twice; then failed for good. A turn the
     /// platform cut short (HQ or the runner restarted under it, its container vanished) did
     /// nothing wrong: the first time, its start does not count against its retries, and it says
@@ -187,7 +198,8 @@ impl<S: TeamStore, W: WorkerAdapter, C: Clock> Engine<S, W, C> {
         };
         // What a retry can hope for depends on why the turn failed: a spent quota is waited
         // out, a refused key is not tried again.
-        let cause = failure_cause::cause_of(why, now);
+        let answer = self.take_provider_answer(run.id, now);
+        let cause = failure_cause::cause_of(why, answer, now);
         let Some(due) = runs::retry_decision(cause, own, now) else {
             self.end(run, RunStatus::Failed, why)?;
             return Ok(false);

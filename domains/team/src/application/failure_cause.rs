@@ -1,24 +1,66 @@
-//! Why a turn failed, read from the provider's words.
+//! Why a turn failed, read from the provider's answer and words.
 //!
 //! A failed turn reaches the run logic as one line, the runner's `why`: the worker's exit and
 //! its last words, which carry whatever the provider said (a status, an error type, sometimes a
-//! reset time). The relay drops the provider's headers, so a `Retry-After` header never gets
-//! this far; only what the text carries does. This reads that text into a
-//! [`FailureCause`]; the decision about what to do is the domain's
-//! ([`retry_decision`](crate::domain::runs::retry_decision)).
+//! reset time). Beside it may come the provider's own answer, as the node's relay read its
+//! headers (`Retry-After`, the rate-limit reset): when it names a time, that time is told
+//! before the words. Without it (an older node, a provider that sent none) the text alone is
+//! read, as before. This reads both into a [`FailureCause`]; the decision about what to do is
+//! the domain's ([`retry_decision`](crate::domain::runs::retry_decision)).
 
-use crate::domain::FailureCause;
 use crate::domain::work::Millis;
+use crate::domain::{FailureCause, ProviderAnswer};
 
 /// The furthest ahead a reset time is believed: a week, the longest plan window.
 const FURTHEST_RESET_MS: Millis = 7 * 24 * 60 * 60_000;
 /// The longest a throttle's `retry-after` is a pause; past it, it is a window.
 const LONGEST_PAUSE_MS: Millis = 60 * 60_000;
 
+/// The cause of a failure, from the provider's answer if it named a time and from the words
+/// for the rest, `now` being when it was read. A refused key is the words' alone: no answer
+/// softens it.
+#[must_use]
+pub(crate) fn cause_of(said: &str, answer: Option<ProviderAnswer>, now: Millis) -> FailureCause {
+    let cause = cause_of_words(said, now);
+    let Some(answer) = answer else {
+        return cause;
+    };
+    if cause == FailureCause::Credential {
+        return cause;
+    }
+    told_by(answer, cause, now).unwrap_or(cause)
+}
+
+/// What the provider's headers say of a failure the words read as `cause`: a quota whose reset
+/// they name, or a throttle whose wait they name. `None` when they name no usable time, which
+/// leaves the words to say. Believed no further than a week ahead, as the words' are.
+fn told_by(answer: ProviderAnswer, cause: FailureCause, now: Millis) -> Option<FailureCause> {
+    if answer.status == 402 || matches!(cause, FailureCause::Quota { .. }) {
+        let by_words = match cause {
+            FailureCause::Quota { resets_at } => resets_at,
+            _ => None,
+        };
+        let by_header = answer.resets_at.and_then(|at| believed(at, now));
+        return Some(FailureCause::Quota {
+            resets_at: by_header.or(by_words),
+        });
+    }
+    if answer.status != 429 && !matches!(cause, FailureCause::RateLimit { .. }) {
+        return None;
+    }
+    // The later of what it asked and when its limit reopens: waiting for the earlier would
+    // only be refused again.
+    let asked = [answer.retry_after, answer.resets_at.map(|at| at - now)]
+        .into_iter()
+        .flatten()
+        .max()
+        .filter(|wait| *wait > 0)?;
+    Some(throttle(asked, now))
+}
+
 /// The cause of a failure, from its words, `now` being when it was read. A quota is told before
 /// a throttle, since some providers answer a spent quota with a 429.
-#[must_use]
-pub(crate) fn cause_of(said: &str, now: Millis) -> FailureCause {
+fn cause_of_words(said: &str, now: Millis) -> FailureCause {
     let said = said.to_ascii_lowercase();
     if is_credential(&said) {
         return FailureCause::Credential;
@@ -102,8 +144,13 @@ fn rate_limit(said: &str, now: Millis) -> FailureCause {
     let asked = i64::try_from(seconds)
         .unwrap_or(i64::MAX / 1_000)
         .saturating_mul(1_000);
+    throttle(asked, now)
+}
+
+/// A throttle that asked to wait `asked` milliseconds: a pause, or, past an hour, a window.
+fn throttle(asked: Millis, now: Millis) -> FailureCause {
     if asked > LONGEST_PAUSE_MS {
-        return believed(now + asked, now).map_or(
+        return believed(now.saturating_add(asked), now).map_or(
             FailureCause::RateLimit { retry_after: None },
             |at| FailureCause::Quota {
                 resets_at: Some(at),
@@ -139,7 +186,7 @@ fn reset_time(said: &str, now: Millis) -> Option<Millis> {
 
 /// `at` when it is no more than a week ahead.
 fn believed(at: Millis, now: Millis) -> Option<Millis> {
-    (at <= now + FURTHEST_RESET_MS).then_some(at)
+    (at <= now.saturating_add(FURTHEST_RESET_MS)).then_some(at)
 }
 
 /// The first number that follows any of `keys`, past separators (`"`, `:`, `=`, spaces, `|`).

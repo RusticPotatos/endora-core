@@ -18,7 +18,7 @@ use super::*;
 use axum::body::{Body, Bytes};
 use axum::http::HeaderMap;
 use endora_infrastructure::relay::{
-    Call, StreamedUsage, Used, affordable_output, asks_to_cache, betas_for_claude_code,
+    Call, StreamedUsage, Throttle, Used, affordable_output, asks_to_cache, betas_for_claude_code,
     betas_passed, cost, counted, for_claude_code, may_use, most_a_turn, price_of, prompt_cost,
     send, send_local, send_metered, served_model, unmetered,
 };
@@ -309,6 +309,28 @@ pub(super) async fn turn_of(
 /// Tells HQ what a call cost, and notes it in Endora's own use of models. A failure to tell
 /// HQ is said in the log: it is never quietly charged to nobody. Whether HQ accepted the post:
 /// `None` when no charge was attempted (a model with no price).
+/// Tells HQ what a provider's refusal said about when to try again: its `Retry-After`
+/// and rate-limit reset, as the headers gave them, so HQ can hold the turn's retry to them. Told
+/// only when the headers named a time; a refusal that named none leaves the runner's words to
+/// say, as before. Best effort: an HQ that does not know this route (an older one) answers 404
+/// and nothing changes for the worker.
+fn tell_throttle(
+    hq: &endora_infrastructure::HqClient,
+    run: i64,
+    status: Option<u16>,
+    throttle: Throttle,
+) {
+    let Some(status) = status else { return };
+    if status < 400 || throttle.is_empty() {
+        return;
+    }
+    let told = json!({ "run": run, "status": status, "retry_after_ms": throttle.retry_after,
+                       "resets_at": throttle.resets_at });
+    if let Err(e) = hq.post("/v1/team/throttle", &told) {
+        eprintln!("relay: could not tell HQ of run {run}'s refusal {status}: {e}");
+    }
+}
+
 fn charge(
     hq: &endora_infrastructure::HqClient,
     state: &AppState,
@@ -352,6 +374,7 @@ pub(super) async fn count(
     version: Option<String>,
     beta: Option<String>,
     asked: serde_json::Value,
+    refused: Box<dyn FnOnce(u16, Throttle) + Send>,
 ) -> Result<u64, Response> {
     let done = tokio::task::spawn_blocking(move || {
         let reply = send(
@@ -362,13 +385,17 @@ pub(super) async fn count(
             beta.as_deref(),
             asked.to_string().as_bytes(),
         )?;
+        let (status, throttle) = (reply.status, reply.throttle);
         let mut bytes = Vec::new();
         std::io::Read::read_to_end(
             &mut std::io::Read::take(reply.body, LARGEST_REPLY),
             &mut bytes,
         )
         .map_err(|e| e.to_string())?;
-        Ok::<_, String>((reply.status, bytes))
+        if status >= 300 {
+            refused(status, throttle);
+        }
+        Ok::<_, String>((status, bytes))
     })
     .await;
     let Ok(Ok((status, bytes))) = done else {
@@ -505,6 +532,11 @@ pub(super) async fn messages(
         version.clone(),
         beta.clone(),
         counted(&call),
+        {
+            let hq = hq.clone();
+            let run = turn.run;
+            Box::new(move |status, throttle| tell_throttle(&hq, run, Some(status), throttle))
+        },
     )
     .await
     {
@@ -540,6 +572,7 @@ pub(super) async fn messages(
     let settle: Settle = Box::new(move |used, served, ended| {
         // Held until this call is charged, so the turn's next call sees what this one cost.
         let _one_at_a_time = one_at_a_time;
+        tell_throttle(&hq, turn.run, ended.status, ended.throttle);
         if let Some(id) = counted_as {
             endora_application::RelayCensus::ended(
                 state2.store.as_ref(),
@@ -568,6 +601,9 @@ pub(super) struct Ended {
     /// Whether the usage was fully reported (a whole reply parsed, a stream that reached its
     /// last usage).
     pub(super) usage_complete: bool,
+    /// What a refusal's headers said about when to try again; nothing for an
+    /// answer that was not refused.
+    pub(super) throttle: Throttle,
 }
 
 /// What is done once a call passed on has been answered: told what it used, or `None` when it
@@ -593,6 +629,7 @@ pub(super) async fn pass_on(
 
     if !streamed {
         let done = tokio::task::spawn_blocking(move || {
+            let mut throttle = Throttle::default();
             let answered = send(
                 &upstream,
                 Call::Messages,
@@ -602,6 +639,7 @@ pub(super) async fn pass_on(
                 &sent,
             )
             .and_then(|reply| {
+                throttle = reply.throttle;
                 let mut bytes = Vec::new();
                 std::io::Read::read_to_end(
                     &mut std::io::Read::take(reply.body, LARGEST_REPLY),
@@ -631,16 +669,19 @@ pub(super) async fn pass_on(
                     },
                     status: Some(*status),
                     usage_complete: used.is_some(),
+                    throttle: Throttle::default(),
                 },
                 Ok((status, _)) => Ended {
                     outcome: endora_application::RelayOutcome::Failed,
                     status: Some(*status),
                     usage_complete: false,
+                    throttle,
                 },
                 Err(_) => Ended {
                     outcome: endora_application::RelayOutcome::Failed,
                     status: None,
                     usage_complete: false,
+                    throttle: Throttle::default(),
                 },
             };
             settle(used, served, ended);
@@ -679,6 +720,7 @@ pub(super) async fn pass_on(
                         outcome: endora_application::RelayOutcome::Failed,
                         status: None,
                         usage_complete: false,
+                        throttle: Throttle::default(),
                     },
                 );
                 let _ = head_tx.send(Err(why));
@@ -715,6 +757,7 @@ pub(super) async fn pass_on(
                     outcome: endora_application::RelayOutcome::Failed,
                     status: Some(reply.status),
                     usage_complete: false,
+                    throttle: reply.throttle,
                 },
             );
             return;
@@ -736,6 +779,7 @@ pub(super) async fn pass_on(
                 outcome,
                 status: Some(reply.status),
                 usage_complete: finished,
+                throttle: Throttle::default(),
             },
         );
     });
@@ -1127,9 +1171,23 @@ pub(super) mod tests {
     pub(in crate::api) type Seen = Arc<Mutex<Vec<(String, Vec<(String, String)>, String)>>>;
     pub(in crate::api) type Answer =
         Arc<dyn Fn(&str, &str) -> (u16, &'static str, String) + Send + Sync>;
+    /// An answer that also sets headers: (status, content type, extra headers, body).
+    pub(in crate::api) type HeadedAnswer = Arc<
+        dyn Fn(&str, &str) -> (u16, &'static str, Vec<(&'static str, &'static str)>, String)
+            + Send
+            + Sync,
+    >;
 
     /// A tiny HTTP server on a local port that answers each request with `answer`.
     pub(in crate::api) fn fake(answer: Answer) -> (String, Seen) {
+        fake_headed(Arc::new(move |path, body| {
+            let (status, kind, reply) = answer(path, body);
+            (status, kind, Vec::new(), reply)
+        }))
+    }
+
+    /// As [`fake`], for an answer that sets headers of its own (a provider's `Retry-After`).
+    pub(in crate::api) fn fake_headed(answer: HeadedAnswer) -> (String, Seen) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
@@ -1166,11 +1224,15 @@ pub(super) mod tests {
                 let mut body = vec![0u8; length];
                 let _ = stream.read_exact(&mut body);
                 let body = String::from_utf8_lossy(&body).into_owned();
-                let (status, kind, reply) = answer(&path, &body);
+                let (status, kind, extra, reply) = answer(&path, &body);
                 kept.lock().unwrap().push((path, headers, body));
+                let extra: String = extra
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect();
                 let _ = write!(
                     stream,
-                    "HTTP/1.1 {status} OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    "HTTP/1.1 {status} OK\r\nContent-Type: {kind}\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{reply}",
                     reply.len()
                 );
             }
@@ -1533,6 +1595,45 @@ pub(super) mod tests {
         }))
     }
 
+    /// Anthropic refusing every message with `status` and `headers` (counting is free and
+    /// answers); `counting` makes counting refuse the same way.
+    fn anthropic_refusing(
+        status: u16,
+        headers: Vec<(&'static str, &'static str)>,
+        counting: bool,
+    ) -> (String, Seen) {
+        fake_headed(Arc::new(move |path, _| {
+            let refused = |headers: Vec<(&'static str, &'static str)>| {
+                (
+                    status,
+                    "application/json",
+                    headers,
+                    r#"{"type":"error","error":{"type":"rate_limit_error","message":"slow"}}"#
+                        .to_owned(),
+                )
+            };
+            if path == "/v1/messages/count_tokens" && !counting {
+                return (
+                    200,
+                    "application/json",
+                    Vec::new(),
+                    json!({ "input_tokens": 1_000 }).to_string(),
+                );
+            }
+            refused(headers.clone())
+        }))
+    }
+
+    /// The bodies HQ was told at `/v1/team/throttle`.
+    fn throttles(seen: &Seen) -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _, _)| p == "/v1/team/throttle")
+            .map(|(_, _, b)| serde_json::from_str(b).unwrap())
+            .collect()
+    }
+
     /// HQ that knows the turn (token `good`) but answers every usage post with a 500.
     pub(in crate::api) fn hq_refusing_usage(left: i64) -> (String, Seen) {
         fake(Arc::new(move |path, body| match path {
@@ -1651,6 +1752,77 @@ pub(super) mod tests {
             assert_eq!((row.served_model.as_deref(), row.hq_told), (None, None));
             assert!(charged(&to_hq).is_empty());
         }
+    }
+
+    /// A provider's `Retry-After` and rate-limit reset used to stop at the relay.
+    #[tokio::test]
+    async fn a_refusal_with_a_retry_after_and_a_reset_is_told_to_hq_as_structured_data() {
+        let headers = vec![
+            ("retry-after", "45"),
+            ("anthropic-ratelimit-requests-remaining", "0"),
+            ("anthropic-ratelimit-requests-reset", "2031-01-01T00:00:00Z"),
+        ];
+        for stream in [false, true] {
+            let (hq_url, to_hq) = hq(400_000);
+            let (upstream, _) = anthropic_refusing(429, headers.clone(), false);
+            let state = node(&hq_url, &upstream);
+            assert_eq!(call_once(&state, stream, json!({})).await, 429, "{stream}");
+            census(&state, 1).await;
+            assert_eq!(
+                throttles(&to_hq),
+                vec![json!({ "run": 7, "status": 429, "retry_after_ms": 45_000,
+                             "resets_at": 1_924_992_000_000_i64 })],
+                "streamed: {stream}"
+            );
+            assert!(charged(&to_hq).is_empty(), "a refusal costs nothing");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_count_is_told_to_hq_too() {
+        let (hq_url, to_hq) = hq(400_000);
+        let (upstream, _) = anthropic_refusing(429, vec![("retry-after", "20")], true);
+        let state = node(&hq_url, &upstream);
+        assert_eq!(call_once(&state, false, json!({})).await, 429);
+        assert_eq!(
+            throttles(&to_hq),
+            vec![json!({ "run": 7, "status": 429, "retry_after_ms": 20_000,
+                         "resets_at": null })]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refusal_that_says_no_time_tells_hq_nothing_and_is_passed_on_as_before() {
+        for stream in [false, true] {
+            let (hq_url, to_hq) = hq(400_000);
+            let (upstream, _) = anthropic_failing(429);
+            let state = node(&hq_url, &upstream);
+            assert_eq!(call_once(&state, stream, json!({})).await, 429);
+            census(&state, 1).await;
+            assert!(throttles(&to_hq).is_empty(), "streamed: {stream}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_hq_that_does_not_know_the_throttle_post_changes_nothing_for_the_worker() {
+        // An older HQ answers the new route 404; the call's refusal still reaches the worker
+        // whole, and is counted.
+        let (hq_url, _) = fake(Arc::new(|path, body| match path {
+            "/v1/team/turn" if body.contains("\"good\"") => (
+                200,
+                "application/json",
+                json!({ "run": 7, "member": "Linus", "left": 400_000, "cloud": true,
+                        "brain": "local" })
+                .to_string(),
+            ),
+            "/v1/team/throttle" => (404, "application/json", r#"{"error":"no"}"#.to_owned()),
+            _ => (200, "application/json", r#"{"may_go_on":true}"#.to_owned()),
+        }));
+        let (upstream, _) = anthropic_refusing(429, vec![("retry-after", "45")], false);
+        let state = node(&hq_url, &upstream);
+        assert_eq!(call_once(&state, false, json!({})).await, 429);
+        let rows = census(&state, 1).await;
+        assert_eq!(rows[0].outcome, "failed");
     }
 
     #[tokio::test]
