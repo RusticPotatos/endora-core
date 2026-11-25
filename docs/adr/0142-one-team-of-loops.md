@@ -306,6 +306,14 @@ shrank each call; nothing bounded the turn.
   slowly, so their turns still sum them (`every_call`). The figures are unchanged; HQ's own test
   of a turn that ran out of room (half the budget metered) holds either way, since what is
   metered is at least the conversation.
+  *Amended 2026-11-24 (from a probe of the model): the premise was wrong for the NAS. Ollama's
+  qwen3.5:9b restores 84% of a repeated prompt's tokens when only the tail changes and 92% when
+  the prompt is extended (about 0.7 s a call against 2.1 s for a new prefix), so the NAS counts
+  its conversation once (`budget_counts: conversation`). Its budget is its window's, not the
+  house's: `NAS_PROMPT_BUDGET`, (16,384 - 2,048 reply tokens) x 3 bytes a token = 43,008 bytes,
+  held to every call by itself, the gist's side call too, because counted once 240,000 bytes
+  would let a call pass the 16,384-token slot (ADR 0085). The Mac stays `every_call` at the
+  house's figure until it is measured.*
 - **Its last word says it goes on.** The worker posts what the model said on the way and that
   the prompt reached its budget, as its last word (not progress), marked `continues`. Only the
   worker sets the mark: it strips `last_word` and `continues` from the model's own posts, so a

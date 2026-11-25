@@ -98,8 +98,8 @@ pub struct Setup {
     /// Whether [`Self::prompt_budget`] holds the conversation itself, each byte counted once,
     /// rather than every call's prompt summed: on a brain whose provider caches the part a call
     /// repeats (Claude, DeepSeek), a resend costs little, and the sum counted a 50 KB conversation
-    /// as 238 KB (Rae on 955, 1 Nov). A house model on the NAS or the Mac reads every resend
-    /// again, slowly, so its turns still sum them.
+    /// as 238 KB (Rae on 955, 1 Nov). The NAS's model reuses its prefix too and counts once, its
+    /// budget its window; the Mac is not measured, so its turns still sum every resend.
     pub counts_conversation: bool,
     /// Where the worksite's shell runs, when the worker is in the worksite; `None` anywhere
     /// else, where it has no shell.
@@ -579,7 +579,10 @@ fn gisted(
         looked.raw,
     );
     let size = body.to_string().len();
-    if !has_room(1, *read, size, setup.prompt_budget) {
+    // Counting the conversation, a call is held to the budget by itself (the NAS's is its
+    // window), the gist's side call too: what the turn read before is not in it.
+    let so_far = if setup.counts_conversation { 0 } else { *read };
+    if !has_room(1, so_far, size, setup.prompt_budget) {
         return None;
     }
     *read += size;

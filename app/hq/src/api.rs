@@ -1375,7 +1375,15 @@ mod tests {
 
     /// A developer is handed a task, and the tick starts their turn: it waits for a runner.
     fn a_turn_starts(st: &State) -> (RunId, TaskId) {
+        a_turn_starts_on(st, None)
+    }
+
+    /// As [`a_turn_starts`], for a developer the owner set to think on `brain`.
+    fn a_turn_starts_on(st: &State, brain: Option<&str>) -> (RunId, TaskId) {
         let dev = st.hq.hire("John Doe", 40, 2, 0).unwrap();
+        if let Some(brain) = brain {
+            st.hq.set_brain(dev, brain).unwrap();
+        }
         let goal = st
             .hq
             .set_goal("Keep the lab tidy", "a test", Author::Owner)
@@ -2999,6 +3007,31 @@ mod tests {
         assert_eq!(turn["project"], project.0);
     }
 
+    /// The NAS's model reuses a repeated prefix, so its turn counts the
+    /// conversation once; the Mac is not measured, so its turn still sums every call.
+    #[tokio::test]
+    async fn a_nas_turn_counts_its_conversation_once_and_a_mac_turn_every_call() {
+        for (brain, counts) in [("local", "conversation"), ("mac", "every_call")] {
+            let st = state(false);
+            // A Mac turn starts only while the node says the Mac is free.
+            st.hq.tell_mac(true, "ready");
+            a_turn_starts_on(&st, Some(brain));
+            let res = app(st)
+                .oneshot(call(
+                    "POST",
+                    "/v1/runner/next",
+                    Some(RUNNER),
+                    &json!({ "free": 1 }).to_string(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "{brain}");
+            let turn = json_of(res).await;
+            assert_eq!(turn["brain"], brain);
+            assert_eq!(turn["budget_counts"], counts, "{brain}");
+        }
+    }
+
     #[tokio::test]
     async fn the_runner_is_handed_a_started_turn_once_and_its_end_ends_the_run() {
         let st = state(false);
@@ -3028,8 +3061,12 @@ mod tests {
         assert_eq!(turn["effort"], json!(null), "the house's model takes none");
         assert_eq!(
             turn["prompt_budget"],
-            json!(240_000),
-            "the house's budget, as HQ judges the turn by"
+            json!(43_008),
+            "the NAS model's budget, held to its window, as HQ judges the turn by"
+        );
+        assert_eq!(
+            turn["budget_counts"], "conversation",
+            "the NAS reuses its prefix, so its conversation counts once"
         );
         assert_eq!(
             turn["shell"], true,

@@ -118,6 +118,13 @@ These change the LEGACY HQ code only (`domains/team`, `app/hq`, `app/worker`, th
   refused naming what the batch came to, so a flood cannot evict the batch's own lines or the list. HQ
   records each refusal as `lesson.refused` (a secret's text is never copied into the feed); the owner's
   edit goes through the same scan. The caps are unchanged.
+- **The NAS's model counts its conversation once, held to its window.** A probe showed the NAS model
+  (Ollama's `qwen3.5:9b`) restoring 84 to 92 percent of a repeated prefix, which falsifies ADR 0142's
+  premise that it rereads every resend. `Brain::Local` now gets `budget_counts: conversation`; the Mac
+  stays `every_call` until it is measured. Counted once, the house's 240,000-byte budget would let one
+  call pass the 16,384-token slot, so the NAS gets its own budget, `NAS_PROMPT_BUDGET` = (16,384 - 2,048)
+  x 3 bytes a token = 43,008 bytes, held to every call by itself; the gist's side call is held the same
+  way, rather than against the sum of earlier reads. ADR 0142 is amended.
 
 ### Changed (the HQ product is LEGACY)
 

@@ -46,7 +46,9 @@ Feature: Every pass fits one fresh turn
     Every call of a turn resends the conversation so far. Claude's and DeepSeek's providers
     cache the part a call repeats, so on them the budget holds the conversation, each byte
     counted once; summing every resend counted Rae's 50 KB conversation as 238 KB (955, 1 Nov).
-    The house's own models read every resend again, slowly, so their turns still sum them.
+    The NAS's model reuses a repeated prefix too (84 to 92 percent restored), so it
+    counts the conversation once, held to its 16,384-token window. The Mac is not measured, so
+    its turns still sum every resend.
     Then a turn on <model> counts its budget by <counting>
 
     Examples:
@@ -55,5 +57,5 @@ Feature: Every pass fits one fresh turn
       | sonnet   | its conversation |
       | opus     | its conversation |
       | deepseek | its conversation |
-      | local    | every call       |
+      | local    | its conversation |
       | mac      | every call       |

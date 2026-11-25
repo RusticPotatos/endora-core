@@ -36,6 +36,9 @@ pub const fn chars_for(brain: Brain) -> usize {
 pub const fn prompt_budget(brain: Brain) -> usize {
     if brain.claude() {
         endora_kernel::prompt_budget::CLAUDE_PROMPT_BUDGET
+    } else if matches!(brain, Brain::Local) {
+        // Counted once, so each call is held to the NAS model's window.
+        endora_kernel::prompt_budget::NAS_PROMPT_BUDGET
     } else {
         endora_kernel::prompt_budget::HOUSE_PROMPT_BUDGET
     }
@@ -44,12 +47,13 @@ pub const fn prompt_budget(brain: Brain) -> usize {
 /// Whether a turn on `brain` holds [`prompt_budget`] to its conversation, each byte counted once,
 /// rather than to every call's prompt summed (the owner, 1 Nov). Every call resends the
 /// conversation so far; Claude's and DeepSeek's providers cache the part a call repeats, so a
-/// resend costs little, and the sum counted Rae's 50 KB conversation on 955 as 238 KB. The
-/// house's own models on the NAS and the Mac read every resend again, slowly, so their turns
-/// still sum them.
+/// resend costs little, and the sum counted Rae's 50 KB conversation on 955 as 238 KB. The NAS's
+/// model reuses a repeated prefix too (measured: 84 to 92 percent restored, 0.7 s against 2.1 s),
+/// so it counts once as well, its budget held to its window ([`prompt_budget`]). The Mac has not
+/// been measured, so its turns still sum every resend.
 #[must_use]
 pub const fn counts_conversation(brain: Brain) -> bool {
-    !matches!(brain, Brain::Local | Brain::Mac)
+    !matches!(brain, Brain::Mac)
 }
 
 /// About how many prompt tokens [`prompt_budget`] comes to.
@@ -478,7 +482,11 @@ mod tests {
 
     #[test]
     fn a_turns_prompt_budget_is_one_figure_by_whether_it_thinks_on_claude() {
-        assert_eq!(prompt_budget(Brain::Local), 240_000);
+        assert_eq!(
+            prompt_budget(Brain::Local),
+            endora_kernel::prompt_budget::NAS_PROMPT_BUDGET,
+            "the NAS's model is held to its window, not to the house's 240,000"
+        );
         assert_eq!(prompt_budget(Brain::DeepSeek), 240_000);
         assert_eq!(prompt_budget(Brain::Haiku), 480_000);
         assert_eq!(prompt_budget_tokens(Brain::Opus), 120_000);
@@ -486,18 +494,43 @@ mod tests {
     }
 
     #[test]
-    fn a_cached_brain_counts_its_conversation_once_and_a_house_model_every_call() {
-        for brain in [Brain::Haiku, Brain::Sonnet, Brain::Opus, Brain::DeepSeek] {
+    fn a_brain_that_reuses_its_prefix_counts_its_conversation_once_and_the_mac_every_call() {
+        for brain in [
+            Brain::Haiku,
+            Brain::Sonnet,
+            Brain::Opus,
+            Brain::DeepSeek,
+            Brain::Local,
+        ] {
             assert!(counts_conversation(brain), "{brain:?}");
         }
-        assert!(!counts_conversation(Brain::Local));
-        assert!(!counts_conversation(Brain::Mac));
+        assert!(!counts_conversation(Brain::Mac), "not measured yet");
+    }
+
+    /// Counting the conversation once, a turn's calls are held to the budget one by one, so the
+    /// NAS's budget must itself fit the NAS model's window, its reply included.
+    #[test]
+    fn the_nas_budget_cannot_push_a_call_past_the_models_window() {
+        use endora_kernel::prompt_budget::{
+            NAS_BYTES_A_TOKEN, NAS_CONTEXT_TOKENS, NAS_REPLY_TOKENS,
+        };
+        let budget = prompt_budget(Brain::Local);
+        assert!(
+            budget < prompt_budget(Brain::Mac),
+            "tighter than the house's"
+        );
+        // The most tokens a prompt of the budget can be, a token at least NAS_BYTES_A_TOKEN
+        // bytes, plus room for the reply, is inside the window.
+        assert!(budget.div_ceil(NAS_BYTES_A_TOKEN) + NAS_REPLY_TOKENS <= NAS_CONTEXT_TOKENS);
     }
 
     #[test]
     fn only_a_worker_turn_that_read_near_its_budget_ran_out_of_room() {
-        assert!(out_of_room(Brain::Local, false, 30_000));
-        assert!(!out_of_room(Brain::Local, false, 29_999));
+        // The Mac's budget is the house's 60,000 tokens, the NAS's 10,752 (its window).
+        assert!(out_of_room(Brain::Mac, false, 30_000));
+        assert!(!out_of_room(Brain::Mac, false, 29_999));
+        assert!(out_of_room(Brain::Local, false, 5_376));
+        assert!(!out_of_room(Brain::Local, false, 5_375));
         assert!(!out_of_room(Brain::Sonnet, false, 59_999));
         assert!(out_of_room(Brain::Sonnet, false, 60_000));
         assert!(
@@ -505,6 +538,7 @@ mod tests {
             "never from Claude Code"
         );
         assert!(!out_of_room(Brain::Mac, false, 0));
+        assert!(!out_of_room(Brain::Local, false, 0));
     }
 
     fn handover() -> Handover {
