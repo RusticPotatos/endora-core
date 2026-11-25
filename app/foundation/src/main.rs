@@ -6,6 +6,7 @@
 //! and open no database. Every command line is checked against [`SPECS`] before a database is
 //! opened: an unknown command, option or extra word is refused (exit 1) naming itself.
 
+mod actions;
 mod probes;
 
 /// Set when a write to stdout failed (a closed pipe, a full disk): the exit code then says so.
@@ -61,6 +62,7 @@ use endora_foundation_git::{
 };
 use endora_kernel::{AppError, Clock, RepositoryError, Reversibility, Tier};
 
+use actions::{Action, Actions};
 use probes::{Kind, Probe, Probes};
 
 /// A command that failed: `Refused` for authority (exit 2), `Error` for anything else (exit 1).
@@ -80,6 +82,8 @@ struct Settings {
     probes: Vec<Probe>,
     /// Variables a command probe may inherit (`probe-env NAME...`); every other one is cleared.
     probe_env: Vec<String>,
+    /// The repair actions the owner declared (`action NAME reversible COMMAND...`).
+    actions: Vec<Action>,
     git: Option<GitConfig>,
     /// `claude-code <binary> <model> <max-micro-usd> <max-turns> [max-seconds]` (amounts in micro-USD: 1 USD = 1,000,000): the real executor for `git.change`.
     claude: Option<(ClaudeCode, ClaudeLimits, Option<Duration>)>,
@@ -90,7 +94,8 @@ struct Settings {
 }
 
 /// Reads the line-based config: `probe <name> <tcp|http|command> <target...> <interval-seconds>`
-/// `probe-env <NAME>...` (variables a command probe may inherit) and
+/// `probe-env <NAME>...` (variables a command probe may inherit),
+/// `action <name> reversible <command...>` (a repair; any other declaration is refused) and
 /// `git <scratch-root> <template> -- <agent command line...>`. `#` starts a comment.
 fn read_config(path: &Path) -> Result<Settings, String> {
     let text =
@@ -117,6 +122,13 @@ fn read_config(path: &Path) -> Result<Settings, String> {
                     kind,
                     target: t[3..t.len() - 1].join(" "),
                     interval_secs,
+                });
+            }
+            Some("action") if t.len() >= 4 => {
+                actions::declared_band(t[2]).map_err(|m| at(&m))?;
+                s.actions.push(Action {
+                    name: t[1].into(),
+                    command: t[3..].join(" "),
                 });
             }
             Some("probe-env") if t.len() >= 2 => {
@@ -305,6 +317,12 @@ const SPECS: &[Spec] = &[
     spec("routine pause", &[], &[], &["ROUTINE"]),
     spec("routine retire", &[], &[], &["ROUTINE"]),
     spec(
+        "repair add",
+        &[("--goal", 1), ("--action", 1)],
+        &["--goal", "--action"],
+        &[],
+    ),
+    spec(
         "git-task",
         &[
             ("--goal", 1),
@@ -341,7 +359,7 @@ const SPECS: &[Spec] = &[
 ];
 
 /// The one-line usage an unknown command is answered with.
-const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine pause|routine resume|routine retire|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
+const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine pause|routine resume|routine retire|repair add|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
 
 /// What `--help`, `-h` and `help` print (to stdout, exit 0, no database opened).
 const HELP: &str = "endora-foundation: the foundation's command line (plain text over one SQLite file)
@@ -366,6 +384,8 @@ commands (OWNER = needs the owner token file; without it, or with a wrong one: e
   routine pause ID    stop a routine firing until it is resumed                OWNER
   routine resume ID   lift a pause (the owner's, or after repeated failures)  OWNER
   routine retire ID   stop a routine for good: it cannot be resumed          OWNER
+  repair add --goal ID --action NAME   a failed watch may run the configured `action`
+                      once per failure episode (a `reversible` config line), then re-check; OWNER
   git-task --instruction T --test-cmd CMD [--goal ID] [--repo PATH] [--cap MICRO_USD]   OWNER
                       prepare, change (the configured agent), verify; waits for the owner
   run-due             fire due routines, start new items, run their checks
@@ -976,6 +996,30 @@ fn routine_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> O
     Ok(())
 }
 
+/// `repair add --goal ID --action NAME`: the goal's failed watch may run that configured action
+/// once per failure episode, under a policy row this command makes (owner only). The goal's scope
+/// must name `action.run` (`goal add --scope probe.run,action.run`).
+fn repair_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> Out {
+    let goal = GoalId(num(need(w, "--goal")?, "goal id")?);
+    let name = need(w, "--action")?;
+    if !s.actions.iter().any(|a| a.name == name) {
+        return Err(Fail::Error(format!(
+            "`{name}` is not an action in the config"
+        )));
+    }
+    core.store().goal(goal).map_err(err)?;
+    core.add_repair(proof, goal, actions::CALL, name)
+        .map_err(|e| match e {
+            AppError::BadRequest { message } => Fail::Refused(message),
+            other => err(other),
+        })?;
+    println!(
+        "goal {}: a failed watch may run action `{name}` once per failure episode",
+        goal.0
+    );
+    Ok(())
+}
+
 /// Runs what is due and prints what it did. `Ok(true)` when it did or said anything, `Ok(false)`
 /// when there was nothing to do (`run-due` then says so; `serve` stays quiet).
 fn run_due(core: &Core) -> Result<bool, Fail> {
@@ -1043,6 +1087,13 @@ fn run_due(core: &Core) -> Result<bool, Fail> {
             met.iter().filter(|m| **m).count(),
             met.len()
         );
+        if end == WatchEnd::Repaired {
+            println!(
+                "item {} repaired: the action ran once and the check now passes; waiting for the owner (`accept {}`)",
+                id.0, id.0
+            );
+            continue;
+        }
         if let WatchEnd::Failed { failures, paused } = end {
             println!("item {} failed (failure {failures} in a row)", id.0);
             if paused {
@@ -1401,6 +1452,7 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
             }
             Ok(())
         }
+        (Some("repair"), Some("add")) => repair_add(core, &auth.prove(core)?, s, w),
         (Some("git-task"), _) => git_task(core, &auth.prove(core)?, w),
         (Some("publish"), _) => {
             // Publishing is refused by authority: there is no row, and the call is outward-reversible.
@@ -1663,6 +1715,8 @@ fn run() -> Out {
         settings.probe_env.clone(),
     )))
     .map_err(err)?;
+    core.register(Arc::new(Actions(settings.actions.clone())))
+        .map_err(err)?;
     if let Some(mut cfg) = settings.git.clone() {
         if a.words.first().map(String::as_str) == Some("git-task") {
             cfg = task_config(cfg, &a.words)?;

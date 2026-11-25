@@ -11,7 +11,7 @@ use super::holders::{Held, Holders};
 use super::legacy_evidence;
 use crate::domain::{
     AcceptancePolicy, ActorKind, Check, Criterion, Evidence, Goal, GoalId, ItemId, ItemState, Kind,
-    Plan, PolicyRow, Routine, RoutineId, WorkItem, hold::may_move,
+    Plan, PolicyRow, Repair, Routine, RoutineId, WorkItem, hold::may_move,
 };
 
 type Res<T> = Result<T, RepositoryError>;
@@ -77,7 +77,7 @@ CREATE TRIGGER IF NOT EXISTS firings_no_replace BEFORE INSERT ON firings
 type Migration = fn(&Connection) -> Res<()>;
 
 /// The ordered history: step `n` takes a file from version `n-1` to `n`.
-const MIGRATIONS: [Migration; 9] = [
+const MIGRATIONS: [Migration; 10] = [
     migrate_to_slice4_shape,
     migrate_slice5a_watch_columns,
     migrate_actor_kind,
@@ -87,6 +87,7 @@ const MIGRATIONS: [Migration; 9] = [
     migrate_evidence_profile,
     migrate_item_holder,
     migrate_routine_retired,
+    migrate_repairs,
 ];
 
 /// The first schema version that has the hash chain (see [`refuse_laundering`]).
@@ -222,6 +223,18 @@ fn migrate_routine_retired(c: &Connection) -> Res<()> {
     add_column(c, "routines", "retired", "INTEGER NOT NULL DEFAULT 0")
 }
 
+/// Version 10: a goal's repair, the one reversible call a failed watch may make (see
+/// `domain::repair`). A new table and nothing else: no old row changes. An older build refuses a
+/// file at this version, so a rollback restores the backup taken before the upgrade.
+fn migrate_repairs(c: &Connection) -> Res<()> {
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS repairs (
+           goal_id INTEGER PRIMARY KEY REFERENCES goals(id), call TEXT NOT NULL,
+           input TEXT NOT NULL, created_ms INTEGER NOT NULL) STRICT;",
+    )
+    .map_err(backend)
+}
+
 /// The schema version this build writes.
 pub const SCHEMA_VERSION: i64 = MIGRATIONS.len() as i64;
 
@@ -282,7 +295,7 @@ fn refuse_laundering(c: &Connection, found: i64) -> Res<()> {
 }
 
 /// The tables, in the order the canonical dump reads them.
-const DUMPED: [&str; 10] = [
+const DUMPED: [&str; 11] = [
     "goals",
     "goal_scope",
     "routines",
@@ -291,6 +304,7 @@ const DUMPED: [&str; 10] = [
     "criteria",
     "item_met",
     "policy",
+    "repairs",
     "control",
     "evidence",
 ];
@@ -498,14 +512,15 @@ impl Store {
 
     /// Whether the routine's last item blocks its next slot, for a goal that does not need the
     /// owner: an item not yet started, or cut off inside a call, blocks; one that has finished
-    /// its work and merely awaits acceptance does not.
+    /// its work and merely awaits acceptance does not, EXCEPT an item a repair acted on: it waits
+    /// for the owner, and a new slot must not fail and repair again behind the owner's back.
     ///
     /// # Errors
     /// [`RepositoryError::Backend`].
     pub fn routine_has_unfinished_item(&self, r: RoutineId) -> Res<bool> {
         let c = self.db.lock()?;
         let n: i64 = c.query_row(
-            "SELECT COUNT(*) FROM items WHERE routine_id=?1 AND (state IN ('open','blocked') OR (state='running' AND EXISTS (SELECT 1 FROM evidence e WHERE e.item_id=items.id AND e.kind='intent' AND e.id NOT IN (SELECT intent_id FROM evidence WHERE intent_id IS NOT NULL))))",
+            "SELECT COUNT(*) FROM items WHERE routine_id=?1 AND (state IN ('open','blocked') OR (state='running' AND EXISTS (SELECT 1 FROM evidence e WHERE e.item_id=items.id AND e.kind='intent' AND (e.actor='repair' OR e.id NOT IN (SELECT intent_id FROM evidence WHERE intent_id IS NOT NULL)))))",
             [r.0],
             |x| x.get(0),
         ).map_err(backend)?;
@@ -844,6 +859,66 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// Records a goal's repair. Refused (by the table's key) when the goal already has one.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn insert_repair(&self, r: &Repair, now: i64) -> Res<()> {
+        let c = self.db.lock()?;
+        c.execute(
+            "INSERT INTO repairs (goal_id, call, input, created_ms) VALUES (?1,?2,?3,?4)",
+            params![r.goal.0, r.call, r.input, now],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// The repair a goal names, if any.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub fn repair(&self, goal: GoalId) -> Res<Option<Repair>> {
+        let c = self.db.lock()?;
+        c.query_row(
+            "SELECT call, input FROM repairs WHERE goal_id=?1",
+            [goal.0],
+            |r| {
+                Ok(Repair {
+                    goal,
+                    call: r.get(0)?,
+                    input: r.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(backend)
+    }
+
+    /// Allowed intents of `actor` making `call` on the items of `routine` just before
+    /// `item`: what the failure episode's earlier items already spent.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub fn episode_uses(
+        &self,
+        routine: RoutineId,
+        actor: &str,
+        call: &str,
+        item: ItemId,
+        run: u32,
+    ) -> Res<u32> {
+        let c = self.db.lock()?;
+        let n: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM evidence WHERE kind='intent' AND actor=?1 AND call=?2 AND item_id IN \
+                 (SELECT id FROM items WHERE routine_id=?3 AND id < ?4 ORDER BY id DESC LIMIT ?5)",
+                params![actor, call, routine.0, item.0, i64::from(run)],
+                |r| r.get(0),
+            )
+            .map_err(backend)?;
+        Ok(u32_of(n))
     }
 
     /// A control value (`stop`, `overall_cap_micros`), zero when never set.
