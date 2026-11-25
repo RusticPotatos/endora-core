@@ -84,7 +84,7 @@ check for tampering: it exits 1 naming the first broken row.
 backup you only inspect; keep one copy that the newer binary has never opened.**
 
 Every command opens the database read-write first, and opening runs every pending schema migration (the
-current schema is version 10), so `status`, `evidence`, `verify-evidence` and `capabilities` upgrade an older file too.
+current schema is version 11), so `status`, `evidence`, `verify-evidence` and `capabilities` upgrade an older file too.
 There is no downgrade: a binary that finds a file newer than it understands refuses it (`this database
 is schema version N, newer than this program understands ... nothing was changed`), and
 [STABILITY.md](foundation/STABILITY.md) records no downgrade path.

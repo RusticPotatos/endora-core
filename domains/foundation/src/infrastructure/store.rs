@@ -11,7 +11,8 @@ use super::holders::{Held, Holders};
 use super::legacy_evidence;
 use crate::domain::{
     AcceptancePolicy, ActorKind, Check, Criterion, Evidence, Goal, GoalId, ItemId, ItemState, Kind,
-    Plan, PolicyRow, Repair, Routine, RoutineId, WorkItem, hold::may_move,
+    Notice, NoticeState, Plan, PolicyRow, Repair, Routine, RoutineId, WorkItem, hold::may_move,
+    notice_key,
 };
 
 type Res<T> = Result<T, RepositoryError>;
@@ -77,7 +78,7 @@ CREATE TRIGGER IF NOT EXISTS firings_no_replace BEFORE INSERT ON firings
 type Migration = fn(&Connection) -> Res<()>;
 
 /// The ordered history: step `n` takes a file from version `n-1` to `n`.
-const MIGRATIONS: [Migration; 10] = [
+const MIGRATIONS: [Migration; 11] = [
     migrate_to_slice4_shape,
     migrate_slice5a_watch_columns,
     migrate_actor_kind,
@@ -88,6 +89,7 @@ const MIGRATIONS: [Migration; 10] = [
     migrate_item_holder,
     migrate_routine_retired,
     migrate_repairs,
+    migrate_notices,
 ];
 
 /// The first schema version that has the hash chain (see [`refuse_laundering`]).
@@ -231,6 +233,23 @@ fn migrate_repairs(c: &Connection) -> Res<()> {
         "CREATE TABLE IF NOT EXISTS repairs (
            goal_id INTEGER PRIMARY KEY REFERENCES goals(id), call TEXT NOT NULL,
            input TEXT NOT NULL, created_ms INTEGER NOT NULL) STRICT;",
+    )
+    .map_err(backend)
+}
+
+/// Version 11: the owner-notice outbox and each watch's failing run (ADR 0152). Two new tables and
+/// nothing else: no existing table or row is touched. Not part of the evidence chain (a notice is
+/// a message about state, not a decision), and a notice never holds a probe's text.
+fn migrate_notices(c: &Connection) -> Res<()> {
+    c.execute_batch(
+        "CREATE TABLE IF NOT EXISTS watch_state (
+           routine_id INTEGER PRIMARY KEY REFERENCES routines(id),
+           failing_since_ms INTEGER NOT NULL, announced INTEGER NOT NULL DEFAULT 0) STRICT;
+         CREATE TABLE IF NOT EXISTS notices (
+           id INTEGER PRIMARY KEY AUTOINCREMENT, key TEXT NOT NULL UNIQUE,
+           routine_id INTEGER NOT NULL REFERENCES routines(id), routine_title TEXT NOT NULL,
+           state TEXT NOT NULL CHECK (state IN ('failing','recovered')), at_ms INTEGER NOT NULL,
+           delivered_ms INTEGER, attempts INTEGER NOT NULL DEFAULT 0, acked_ms INTEGER) STRICT;",
     )
     .map_err(backend)
 }
@@ -560,6 +579,200 @@ impl Store {
         )
         .map_err(backend)?;
         Ok(())
+    }
+
+    /// Records one more failed check of a watch at `now_ms` (the `failures`-th in a row): the first
+    /// of a run starts it, and a run already said keeps its start. Returns when the run began and
+    /// whether it was said.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn note_watch_failure(
+        &self,
+        r: RoutineId,
+        now_ms: i64,
+        failures: u32,
+    ) -> Res<(i64, bool)> {
+        let c = self.db.lock()?;
+        let known: Option<(i64, i64)> = c
+            .query_row(
+                "SELECT failing_since_ms, announced FROM watch_state WHERE routine_id=?1",
+                [r.0],
+                |x| Ok((x.get(0)?, x.get(1)?)),
+            )
+            .optional()
+            .map_err(backend)?;
+        match known {
+            Some((since, announced)) if announced != 0 || failures > 1 => {
+                Ok((since, announced != 0))
+            }
+            _ => {
+                c.execute(
+                    "INSERT INTO watch_state (routine_id, failing_since_ms, announced) VALUES (?1, ?2, 0)
+                     ON CONFLICT(routine_id) DO UPDATE SET failing_since_ms=?2, announced=0",
+                    params![r.0, now_ms],
+                )
+                .map_err(backend)?;
+                Ok((now_ms, false))
+            }
+        }
+    }
+
+    /// A watch's current failing run, if it has one: when it began and whether it was said.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub fn watch_run(&self, r: RoutineId) -> Res<Option<(i64, bool)>> {
+        let c = self.db.lock()?;
+        c.query_row(
+            "SELECT failing_since_ms, announced FROM watch_state WHERE routine_id=?1",
+            [r.0],
+            |x| Ok((x.get::<_, i64>(0)?, x.get::<_, i64>(1)? != 0)),
+        )
+        .optional()
+        .map_err(backend)
+    }
+
+    /// Every watch with a failing run that has not been said yet: routine, run start.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn unsaid_watch_runs(&self) -> Res<Vec<(RoutineId, i64)>> {
+        let c = self.db.lock()?;
+        col(
+            &c,
+            "SELECT routine_id, failing_since_ms FROM watch_state WHERE announced=0 ORDER BY routine_id",
+            [],
+            |x| Ok(Ok((RoutineId(x.get(0)?), x.get(1)?))),
+        )?
+        .into_iter()
+        .collect()
+    }
+
+    /// Marks a watch's failing run as said.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn mark_watch_said(&self, r: RoutineId) -> Res<()> {
+        let c = self.db.lock()?;
+        c.execute(
+            "UPDATE watch_state SET announced=1 WHERE routine_id=?1",
+            [r.0],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Ends a watch's failing run (it passed, or it was never said).
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn end_watch_run(&self, r: RoutineId) -> Res<()> {
+        let c = self.db.lock()?;
+        c.execute("DELETE FROM watch_state WHERE routine_id=?1", [r.0])
+            .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Puts a notice in the outbox. The key makes it idempotent: asking again for the same
+    /// routine, state and run changes nothing and returns `None`; a new notice returns its id.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub fn raise_notice(
+        &self,
+        r: RoutineId,
+        state: NoticeState,
+        since_ms: i64,
+        at_ms: i64,
+    ) -> Res<Option<i64>> {
+        let c = self.db.lock()?;
+        let key = notice_key(r, state, since_ms);
+        let made = c
+            .execute(
+                "INSERT OR IGNORE INTO notices (key, routine_id, routine_title, state, at_ms)
+                 SELECT ?1, id, title, ?3, ?4 FROM routines WHERE id=?2",
+                params![key, r.0, state.name(), at_ms],
+            )
+            .map_err(backend)?;
+        Ok((made == 1).then(|| c.last_insert_rowid()))
+    }
+
+    /// The outbox, oldest first: every notice, or only those the owner has not acknowledged.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`]; `Corrupt` for a stored state this build does not know.
+    pub fn notices(&self, include_acknowledged: bool) -> Res<Vec<Notice>> {
+        let c = self.db.lock()?;
+        let sql = format!(
+            "SELECT id, key, routine_id, routine_title, state, at_ms, delivered_ms, attempts, acked_ms FROM notices {} ORDER BY id",
+            if include_acknowledged {
+                ""
+            } else {
+                "WHERE acked_ms IS NULL"
+            }
+        );
+        col(&c, &sql, [], notice_row)?.into_iter().collect()
+    }
+
+    /// The notices a sink has not taken yet and the owner has not acknowledged, oldest first.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn undelivered_notices(&self) -> Res<Vec<Notice>> {
+        let c = self.db.lock()?;
+        col(
+            &c,
+            "SELECT id, key, routine_id, routine_title, state, at_ms, delivered_ms, attempts, acked_ms FROM notices WHERE delivered_ms IS NULL AND acked_ms IS NULL ORDER BY id",
+            [],
+            notice_row,
+        )?
+        .into_iter()
+        .collect()
+    }
+
+    /// Records that a sink took a notice.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn mark_notice_delivered(&self, id: i64, at_ms: i64) -> Res<()> {
+        let c = self.db.lock()?;
+        c.execute(
+            "UPDATE notices SET delivered_ms=?2 WHERE id=?1 AND delivered_ms IS NULL",
+            params![id, at_ms],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// Records one failed delivery attempt.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn count_notice_attempt(&self, id: i64) -> Res<()> {
+        let c = self.db.lock()?;
+        c.execute(
+            "UPDATE notices SET attempts = attempts + 1 WHERE id=?1",
+            [id],
+        )
+        .map_err(backend)?;
+        Ok(())
+    }
+
+    /// The owner's acknowledgement. `false` when there is no such notice or it was already
+    /// acknowledged.
+    ///
+    /// # Errors
+    /// [`RepositoryError::Backend`].
+    pub(crate) fn acknowledge_notice(&self, id: i64, at_ms: i64) -> Res<bool> {
+        let c = self.db.lock()?;
+        let n = c
+            .execute(
+                "UPDATE notices SET acked_ms=?2 WHERE id=?1 AND acked_ms IS NULL",
+                params![id, at_ms],
+            )
+            .map_err(backend)?;
+        Ok(n == 1)
     }
 
     /// Retires a routine: it never fires again and cannot be resumed.
@@ -1443,6 +1656,27 @@ fn flag(id: i64, what: &str, n: i64) -> Res<bool> {
             "routine {id} has an unreadable {what} flag {n}"
         ))),
     }
+}
+
+fn notice_row(r: &Row<'_>) -> rusqlite::Result<Res<Notice>> {
+    let id: i64 = r.get(0)?;
+    let state: String = r.get(4)?;
+    let attempts: i64 = r.get(7)?;
+    let built = || -> Res<Notice> {
+        Ok(Notice {
+            id,
+            key: r.get(1).map_err(backend)?,
+            routine: RoutineId(r.get(2).map_err(backend)?),
+            routine_title: r.get(3).map_err(backend)?,
+            state: NoticeState::from_name(&state)
+                .ok_or_else(|| corrupt(format!("notice {id} state `{state}`")))?,
+            at_ms: r.get(5).map_err(backend)?,
+            delivered_ms: r.get(6).map_err(backend)?,
+            attempts: u32_of(attempts),
+            acked_ms: r.get(8).map_err(backend)?,
+        })
+    };
+    Ok(built())
 }
 
 fn routine_row(r: &Row<'_>) -> rusqlite::Result<Res<Routine>> {
