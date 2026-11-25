@@ -1,7 +1,7 @@
 //! The one capability port. A capability DECLARES the calls it offers; Core calls it through
 //! [`Capability::call`] and nothing else. A call returns a result plus evidence.
 
-use crate::domain::{Budget, CallSpec, Fact};
+use crate::domain::{Budget, CallSpec, Fact, Notice};
 
 /// What a finished call returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,4 +90,22 @@ pub trait Capability: Send + Sync {
         let _ = budget;
         self.call(call, input)
     }
+}
+
+/// Where an owner notice is delivered: the seam for a notice channel (ADR 0152).
+///
+/// Core hands each notice that no sink has taken to [`NoticeSink::deliver`], oldest first, once
+/// per tick, and marks it taken only when the sink says `Ok`; an `Err` leaves it for the next tick.
+/// A sink must therefore be idempotent on [`Notice::key`] (asked twice, it says it once).
+///
+/// Only LOCAL sinks exist: the append-only file (`infrastructure::FileSink`) and the `notices`
+/// command's own listing. An outward sink (ntfy or any other network send) is not built: its
+/// credential and its first send are the owner's to authorise, and the decide path still refuses
+/// outward calls. A future one is a new implementation of this trait in the composition root.
+pub trait NoticeSink {
+    /// Takes one notice.
+    ///
+    /// # Errors
+    /// A short reason; the notice is then retried on the next tick.
+    fn deliver(&self, notice: &Notice) -> Result<(), String>;
 }

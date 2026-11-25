@@ -5,7 +5,8 @@ pub mod owner;
 mod ports;
 
 pub use core::{
-    Acceptance, Core, Fired, ItemListing, NewGoal, NewItem, Outcome, Ran, Recovered, WatchEnd,
+    Acceptance, Core, Delivery, Fired, ItemListing, NewGoal, NewItem, Outcome, Ran, Recovered,
+    WatchEnd,
 };
 pub use owner::{AuthError, OwnerProof};
-pub use ports::{CallFailure, CallOutput, Capability};
+pub use ports::{CallFailure, CallOutput, Capability, NoticeSink};

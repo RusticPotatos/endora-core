@@ -1,4 +1,4 @@
-Status: CURRENT · the foundation; its interfaces are rated in docs/foundation/STABILITY.md (6 FROZEN, 14 EXPERIMENTAL)
+Status: CURRENT · the foundation; its interfaces are rated in docs/foundation/STABILITY.md (6 FROZEN, 15 EXPERIMENTAL)
 
 # Endora
 

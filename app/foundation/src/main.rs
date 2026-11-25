@@ -55,7 +55,7 @@ use endora_foundation::domain::{
     AcceptancePolicy, Actor, Check, Criterion, DEFAULT_MAX_FAILURES, GoalId, ItemId, ItemState,
     PolicyRow, RoutineId,
 };
-use endora_foundation::infrastructure::SystemClock;
+use endora_foundation::infrastructure::{FileSink, SystemClock};
 use endora_foundation_git::{
     AgentExecutor, ClaudeCode, ClaudeLimits, Config as GitConfig, Confinement, GitChange, Options,
     canonical_deny_paths, mac_profile_can_read,
@@ -91,6 +91,9 @@ struct Settings {
     credential: Option<PathBuf>,
     /// `claude-arg <word>` (repeatable): extra command-line words for the CLI.
     claude_args: Vec<String>,
+    /// `notice-file <path>`: the append-only LOCAL file owner notices are written to (ADR 0152).
+    /// There is no network sink: a future one is a new `NoticeSink` the owner has authorised.
+    notice_file: Option<PathBuf>,
 }
 
 /// Reads the line-based config: `probe <name> <tcp|http|command> <target...> <interval-seconds>`
@@ -179,6 +182,7 @@ fn read_config(path: &Path) -> Result<Settings, String> {
             }
             Some("claude-credential") if t.len() == 2 => s.credential = Some(t[1].into()),
             Some("claude-arg") if t.len() == 2 => s.claude_args.push(t[1].to_owned()),
+            Some("notice-file") if t.len() == 2 => s.notice_file = Some(t[1].into()),
             Some(other) => return Err(at(&format!("cannot read `{other}`"))),
         }
     }
@@ -335,6 +339,8 @@ const SPECS: &[Spec] = &[
         &[],
     ),
     spec("publish", &[], &[], &["ITEM"]),
+    spec("notices ack", &[], &[], &["ID"]),
+    spec("notices", &[("--all", 0)], &[], &[]),
     spec("run-due", &[], &[], &[]),
     spec("serve", &[("--every", 1)], &["--every"], &[]),
     spec(
@@ -359,7 +365,7 @@ const SPECS: &[Spec] = &[
 ];
 
 /// The one-line usage an unknown command is answered with.
-const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine pause|routine resume|routine retire|repair add|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
+const USAGE_LINE: &str = "usage: endora-foundation [--db F] [--config F] [--token-file F] goal add|routine add|routine pause|routine resume|routine retire|repair add|notices|notices ack|git-task|publish|run-due|serve|status|init|accept|decline|confirm-criterion|stop|resume|resume-goal|overall-cap|evidence|verify-evidence|backup|capabilities (amounts are micro-USD: 1 USD = 1,000,000; --cap and overall-cap take them; see --help)";
 
 /// What `--help`, `-h` and `help` print (to stdout, exit 0, no database opened).
 const HELP: &str = "endora-foundation: the foundation's command line (plain text over one SQLite file)
@@ -386,6 +392,9 @@ commands (OWNER = needs the owner token file; without it, or with a wrong one: e
   routine retire ID   stop a routine for good: it cannot be resumed          OWNER
   repair add --goal ID --action NAME   a failed watch may run the configured `action`
                       once per failure episode (a `reversible` config line), then re-check; OWNER
+  notices [--all]     the owner notices (a watch failing or recovered): the ones not yet
+                      acknowledged, or every one with --all; routine name, state and time only
+  notices ack ID      acknowledge a notice (it leaves the list)                OWNER
   git-task --instruction T --test-cmd CMD [--goal ID] [--repo PATH] [--cap MICRO_USD]   OWNER
                       prepare, change (the configured agent), verify; waits for the owner
   run-due             fire due routines, start new items, run their checks
@@ -417,6 +426,10 @@ environment:
   ENDORA_OWNER_TOKEN_FILE             the path of the owner token file, when --token-file is not given
   ENDORA_FOUNDATION_EXECUTOR_IMAGE    the container image of the Docker confinement backend
 
+notices: a config line `notice-file PATH` makes run-due and serve append each notice to PATH (a local,
+append-only file, one line per notice, never twice). Without it notices wait in the database for
+`notices`. Nothing is sent over a network.
+
 exit codes: 0 ok, 1 error (a mistake in the command line, an unknown id, a failed run),
             2 refused by authority (the reason is printed).
 An unknown command, option, repeated option, extra or missing word, or an argument that is not
@@ -444,8 +457,10 @@ fn wants_help(w: &[String]) -> bool {
     }
     let Some(spec) = spec_of(w) else {
         // `goal --help` and `routine -h`: the first word of a two-word command.
-        return matches!(w.first().map(String::as_str), Some("goal" | "routine"))
-            && w.len() == 2
+        return matches!(
+            w.first().map(String::as_str),
+            Some("goal" | "routine" | "notices")
+        ) && w.len() == 2
             && is_help(&w[1]);
     };
     let mut i = spec.name.split(' ').count();
@@ -473,7 +488,7 @@ fn check_words(w: &[String]) -> Result<(), Fail> {
                 "unknown command `{}`; {USAGE_LINE}",
                 w.iter()
                     .take(
-                        if matches!(w[0].as_str(), "goal" | "routine")
+                        if matches!(w[0].as_str(), "goal" | "routine" | "notices")
                             && !w[1..].is_empty()
                             && !w[1].starts_with('-')
                         {
@@ -1022,8 +1037,10 @@ fn repair_add(core: &Core, proof: &OwnerProof, s: &Settings, w: &[String]) -> Ou
 
 /// Runs what is due and prints what it did. `Ok(true)` when it did or said anything, `Ok(false)`
 /// when there was nothing to do (`run-due` then says so; `serve` stays quiet).
-fn run_due(core: &Core) -> Result<bool, Fail> {
-    let mut acted = false;
+fn run_due(core: &Core, s: &Settings) -> Result<bool, Fail> {
+    // The owner is told first and last, and even with the stop switch on: a notice is a message
+    // about state, not a capability call.
+    let mut acted = tell_owner(core, s)?;
     let runner = core.capability_actor("runner").map_err(err)?;
     if core.store().control("stop").map_err(err)? != 0 {
         return Err(Fail::Refused(
@@ -1128,12 +1145,70 @@ fn run_due(core: &Core) -> Result<bool, Fail> {
             }
         }
     }
+    acted |= tell_owner(core, s)?;
     Ok(acted)
 }
 
+/// One notice tick: make the notices that are due, then give the undelivered ones to the local
+/// notice file when the config names one. A sink that fails does not fail the run: the notice stays
+/// in the outbox and the next tick retries it. `Ok(true)` when it made or delivered any.
+fn tell_owner(core: &Core, s: &Settings) -> Result<bool, Fail> {
+    let made = core.sweep_notices().map_err(err)?;
+    let mut acted = made > 0;
+    if let Some(path) = &s.notice_file {
+        let d = core.deliver_notices(&FileSink::new(path)).map_err(err)?;
+        if d.delivered > 0 {
+            acted = true;
+            println!("notices: {} written to {}", d.delivered, path.display());
+        }
+        if d.failed > 0 {
+            acted = true;
+            println!(
+                "notices: {} could not be written to {}: will retry next run",
+                d.failed,
+                path.display()
+            );
+        }
+    } else if made > 0 {
+        println!("notices: {made} new (list them with `notices`)");
+    }
+    Ok(acted)
+}
+
+/// `notices [--all]`: the outbox as the local sink, one line per notice.
+fn notices_list(core: &Core, w: &[String]) -> Out {
+    let all = w.iter().any(|x| x == "--all");
+    let notices = core.store().notices(all).map_err(err)?;
+    if notices.is_empty() {
+        println!("no notices");
+        return Ok(());
+    }
+    for n in notices {
+        let state = match (n.acked_ms, n.delivered_ms) {
+            (Some(_), _) => "acknowledged",
+            (None, Some(_)) => "delivered",
+            (None, None) => "new",
+        };
+        println!("#{} [{state}] {}", n.id, n.line());
+    }
+    Ok(())
+}
+
+/// `notices ack ID`: the owner acknowledges a notice.
+fn notices_ack(core: &Core, auth: &Auth, w: &[String]) -> Out {
+    let id = num(w.get(2).map_or("", String::as_str), "notice id")?;
+    let proof = auth.prove(core)?;
+    core.acknowledge_notice(&proof, id).map_err(|e| match e {
+        AppError::BadRequest { message } => Fail::Error(message),
+        other => err(other),
+    })?;
+    println!("notice {id} acknowledged");
+    Ok(())
+}
+
 /// `run-due` as a command: what `run_due` printed, or one line saying why it printed nothing.
-fn run_due_command(core: &Core) -> Out {
-    if !run_due(core)? {
+fn run_due_command(core: &Core, s: &Settings) -> Out {
+    if !run_due(core, s)? {
         let n = core.store().routines().map_err(err)?.len();
         if n == 0 {
             println!("no routines: a goal needs a routine to make items");
@@ -1171,7 +1246,7 @@ fn run_due_command(core: &Core) -> Out {
 /// `serve --every <seconds>`: `run-due` in a loop, for a container or a service manager. The owner's
 /// stop switch pauses it (said once per pause) instead of ending it; SIGTERM or SIGINT ends it
 /// cleanly between two runs (exit 0). A failed run is reported and the loop goes on.
-fn serve(core: &Core, w: &[String]) -> Out {
+fn serve(core: &Core, s: &Settings, w: &[String]) -> Out {
     let every = seconds(need(w, "--every")?, "--every")?;
     let stop = Arc::new(AtomicBool::new(false));
     for sig in [SIGTERM, SIGINT] {
@@ -1180,7 +1255,7 @@ fn serve(core: &Core, w: &[String]) -> Out {
     println!("serving: run-due every {every} s (SIGTERM stops)");
     let mut paused = false;
     while !stop.load(Ordering::Relaxed) {
-        match run_due(core) {
+        match run_due(core, s) {
             Ok(_) => paused = false,
             Err(Fail::Refused(why)) => {
                 if !paused {
@@ -1487,8 +1562,10 @@ fn dispatch(core: &Core, auth: &Auth, s: &Settings, db: &Path, w: &[String]) -> 
                 ))),
             }
         }
-        (Some("run-due"), _) => run_due_command(core),
-        (Some("serve"), _) => serve(core, w),
+        (Some("run-due"), _) => run_due_command(core, s),
+        (Some("serve"), _) => serve(core, s, w),
+        (Some("notices"), Some("ack")) => notices_ack(core, auth, w),
+        (Some("notices"), _) => notices_list(core, w),
         (Some("status"), _) => status(core, w),
         (Some("accept"), _) => {
             let proof = auth.prove(core)?;

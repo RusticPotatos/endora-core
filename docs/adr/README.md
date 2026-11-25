@@ -341,6 +341,7 @@ of an existing record and take the next number.
 | [0149](0149-owner-acceptance-of-in-review-work.md) | The owner accepts work that nobody reviews: `accept` and `send_back` on the card, an `acceptance` policy | - |
 | [0150](0150-current-architecture-the-foundation.md) | Current architecture: the foundation. What of 0050 is retained, what is superseded, what is independent; known deviations. **Proposed** | - |
 | [0151](0151-a-repair-policy-for-a-failed-watch.md) | A repair policy for a failed watch: one reversible call, an owner-made row, one use per failure episode, then the owner. **Proposed** | - |
+| [0152](0152-owner-notices-an-outbox-and-a-local-sink.md) | Owner notices: an outbox and a local sink. A watch failing for the grace is said once, its recovery once; no network sink | - |
 
 The forty-nine decisions these consolidate are in [archive/](archive/) — kept in full,
 because the reasoning that produced a rule is the reason it survives an argument later.

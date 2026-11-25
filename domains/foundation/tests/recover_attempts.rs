@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use endora_foundation::application::{CallFailure, CallOutput, Capability, Core, NewGoal};
 use endora_foundation::domain::{CallSpec, Criterion, Field, ItemId, ItemState, PolicyRow};
-use endora_foundation::infrastructure::ManualClock;
+use endora_foundation::infrastructure::{ManualClock, SCHEMA_VERSION};
 use endora_kernel::{AppError, Reversibility, Tier};
 use rusqlite::Connection;
 
@@ -233,7 +233,7 @@ fn old_files_with_a_stuck_item_are_handled_sanely_in_schema_7_and_8() {
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(v, 10);
+        assert_eq!(v, SCHEMA_VERSION);
         // The old unsettled call of attempt 1 is ignored: the item that met its criteria waits.
         for _ in 0..3 {
             assert!(core.recover_interrupted().unwrap().is_empty(), "v{version}");

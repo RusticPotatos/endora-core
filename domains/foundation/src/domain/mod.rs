@@ -6,6 +6,7 @@ pub mod contract;
 pub mod decide;
 pub mod evidence;
 pub mod hold;
+pub mod notice;
 pub mod repair;
 
 pub use accept::{AUTO_ACCEPT, AUTO_OBSERVE, AcceptFacts, AcceptRefusal, authorise};
@@ -18,4 +19,5 @@ pub use hold::{
     ItemId, ItemState, MAX_EVERY_MS, MIN_EVERY_MS, Plan, Routine, RoutineId, WorkItem, may_move,
     plan_firings, validate_criteria, validate_rhythm,
 };
+pub use notice::{FAILING_AFTER, GRACE_MS, Notice, NoticeState, failing_due, notice_key};
 pub use repair::{REPAIR_ACTOR, REPAIR_USES_PER_EPISODE, Repair, RepairRefusal, validate_repair};

@@ -7,6 +7,17 @@ tagged release.
 
 ## [Unreleased]
 
+### Added (foundation: owner notices on change, local sink only, EXPERIMENTAL)
+
+- A watch that has failed 3 checks in a row for at least 10 minutes makes ONE `failing` notice; its next
+  passing check makes ONE `recovered` notice (only for a run that was said). Notices go to an outbox table and
+  hold the routine's name, the state and the time, never a probe's text. Delivery is local: `notices [--all]`
+  lists them, `notices ack ID` acknowledges one (owner token), and a config line `notice-file PATH` makes
+  `run-due` and `serve` append each one to an append-only file, retried on the next tick without duplicates,
+  also while the stop switch is on. Nothing is sent over a network (ntfy is the owner's to authorise;
+  `NoticeSink` is the seam). Schema 11 adds two tables (`notices`, `watch_state`) and nothing else, tested
+  against real schema-9 and schema-10 files. Back up before upgrading the binary. See ADR 0152.
+
 ### Added (foundation: routine lifecycle and a bounded status, EXPERIMENTAL)
 
 - `routine pause ID`, `routine resume ID` (now also for the owner's pause) and `routine retire ID` are owner

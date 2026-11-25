@@ -7,13 +7,13 @@ use endora_kernel::{AppError, Clock, DomainError, RepositoryError, Reversibility
 use sha2::{Digest, Sha256};
 
 use super::owner::OwnerProof;
-use super::ports::{CallOutput, Capability};
+use super::ports::{CallOutput, Capability, NoticeSink};
 use crate::domain::{
     AUTO_ACCEPT, AUTO_OBSERVE, AcceptFacts, AcceptRefusal, AcceptancePolicy, Actor, ActorError,
     Budget, BudgetMode, CallSpec, Criterion, DEFAULT_MAX_FAILURES, Deny, Evidence, Goal, GoalId,
-    ItemId, ItemState, Kind, PolicyRow, REPAIR_ACTOR, REPAIR_USES_PER_EPISODE, Repair, Routine,
-    RoutineId, Situation, Verdict, WorkItem, authorise, decide, plan_firings, validate_criteria,
-    validate_repair, validate_rhythm,
+    ItemId, ItemState, Kind, NoticeState, PolicyRow, REPAIR_ACTOR, REPAIR_USES_PER_EPISODE, Repair,
+    Routine, RoutineId, Situation, Verdict, WorkItem, authorise, decide, failing_due, plan_firings,
+    validate_criteria, validate_repair, validate_rhythm,
 };
 use crate::infrastructure::{ChainReport, ManualClock, Store};
 
@@ -103,6 +103,15 @@ pub enum Acceptance {
     },
     /// Refused; recorded.
     Refused(AcceptRefusal),
+}
+
+/// What one delivery tick did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Delivery {
+    /// Notices a sink took (and Core marked taken).
+    pub delivered: u32,
+    /// Notices the sink refused; they stay for the next tick.
+    pub failed: u32,
 }
 
 /// What one routine's firing did.
@@ -450,6 +459,7 @@ impl Core {
         let Some(idx) = unmet_check else {
             if met.iter().all(|m| *m) {
                 self.store.reset_routine(rid, false, 0)?;
+                self.watch_recovered(rid)?;
                 return Ok((met, WatchEnd::Healthy));
             }
             return Ok((met, WatchEnd::Waiting));
@@ -491,6 +501,8 @@ impl Core {
                 ),
             )?;
         }
+        self.store.note_watch_failure(rid, self.now(), failures)?;
+        self.sweep_notices()?;
         Ok((met, WatchEnd::Failed { failures, paused }))
     }
 
@@ -557,7 +569,96 @@ impl Core {
             return Ok(None);
         }
         self.store.reset_routine(routine.id, false, 0)?;
+        // A healed check is a healthy one: a failing run that had been said ends with its one
+        // "recovered" notice, and an unsaid one ends silently, as after any passing check.
+        self.watch_recovered(routine.id)?;
         Ok(Some((met, WatchEnd::Repaired)))
+    }
+
+    /// A watch passed: if its failing run had been said, say it recovered (once); either way the
+    /// run is over.
+    fn watch_recovered(&self, rid: RoutineId) -> Res<()> {
+        let Some((since, said)) = self.store.watch_run(rid)? else {
+            return Ok(());
+        };
+        if said {
+            self.store
+                .raise_notice(rid, NoticeState::Recovered, since, self.now())?;
+        }
+        self.store.end_watch_run(rid)?;
+        Ok(())
+    }
+
+    /// Says every failing run that is now due (at least [`FAILING_AFTER`](crate::domain::FAILING_AFTER)
+    /// failures in a row, lasting the [`GRACE_MS`](crate::domain::GRACE_MS)), once. Returns how many
+    /// notices were made. A run that has stopped failing counts (a paused routine fails no more,
+    /// but it is still down), which is why every pass calls this, not only a failing check.
+    /// Idempotent: the notice's key is the routine, the state and when the run began. It does not
+    /// look at the stop switch: the owner is told while everything else is stopped.
+    ///
+    /// # Errors
+    /// [`AppError::Repository`].
+    pub fn sweep_notices(&self) -> Res<usize> {
+        let now = self.now();
+        let mut made = 0;
+        for (rid, since) in self.store.unsaid_watch_runs()? {
+            let routine = self.store.routine(rid)?;
+            if !failing_due(routine.consecutive_failures, since, now, false) {
+                continue;
+            }
+            if self
+                .store
+                .raise_notice(rid, NoticeState::Failing, since, now)?
+                .is_some()
+            {
+                made += 1;
+            }
+            self.store.mark_watch_said(rid)?;
+        }
+        Ok(made)
+    }
+
+    /// One delivery tick: every notice no sink has taken and the owner has not acknowledged goes to
+    /// `sink`, oldest first. A notice is marked taken only after the sink says `Ok`; a refusal
+    /// counts an attempt and leaves it for the next tick, so a failed delivery retries and a
+    /// delivered one never repeats. (A sink that took it just before a crash is asked again and
+    /// must answer by the notice's key, as [`NoticeSink`] says.)
+    ///
+    /// # Errors
+    /// [`AppError::Repository`].
+    pub fn deliver_notices(&self, sink: &dyn NoticeSink) -> Res<Delivery> {
+        let mut out = Delivery::default();
+        for n in self.store.undelivered_notices()? {
+            if sink.deliver(&n).is_ok() {
+                self.store.mark_notice_delivered(n.id, self.now())?;
+                out.delivered += 1;
+                continue;
+            }
+            self.store.count_notice_attempt(n.id)?;
+            out.failed += 1;
+        }
+        Ok(out)
+    }
+
+    /// The owner acknowledges a notice: it leaves the default listing and is not delivered again.
+    ///
+    /// # Errors
+    /// [`AppError::BadRequest`] when there is no such notice or it was already acknowledged.
+    pub fn acknowledge_notice(&self, proof: &OwnerProof, id: i64) -> Res<()> {
+        if !self.store.acknowledge_notice(id, self.now())? {
+            return Err(AppError::BadRequest {
+                message: format!("there is no unacknowledged notice {id}"),
+            });
+        }
+        self.note(
+            None,
+            "core.acknowledge_notice",
+            &proof.actor(),
+            Kind::Control,
+            true,
+            &format!("notice {id} acknowledged"),
+        )?;
+        Ok(())
     }
 
     /// Routine items a dead process left `running` whose checks have not been met: each is to be
