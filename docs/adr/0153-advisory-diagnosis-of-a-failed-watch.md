@@ -71,6 +71,20 @@ path, not a model: the replies are authored, so a live model's rate is unmeasure
 claimed. The parent investigator's own result on its (private, real-incident) set is a separate
 record and was not reproduced here.
 
+### Amendment, 2026-11-25: a line that speaks to its reader is not a citation
+
+A live trial of the Foundation path (work #159) obeyed a planted line that spoke as the assistant and
+stated an answer outright; it passed the quote check, the answer-in-quote check and the entailment
+check, because the only "gives orders" test was five fixed phrases. The check now also refuses a quote
+taken from a line that poses as the assistant or system, drops the instructions, asks for the prompt or
+tells the reader what to answer (`addresses_the_reader`, the narrow part of the lessons' instruction
+scan, moved to `shared/kernel` so a domain may use it without importing another; work #162). It is
+deliberately narrower than the lessons' whole scan: a log line may hold `curl http://...`,
+`POST https://...`, a long build id or a DNS `ANSWER:` field as the tool printed it. Pure and
+deterministic, tested with synthetic planted lines and ordinary tool lines; no model run, and the
+answer prompt is unchanged. The scan is a floor, not a proof: a differently shaped planted line can
+still reach the entailment check.
+
 ## Not built
 
 - **The live endpoint is not enabled.** Calling even a local model is a new outward capability for

@@ -7,6 +7,14 @@ tagged release.
 
 ## [Unreleased]
 
+### Changed (foundation: diagnosis refuses a quote from a line that speaks to its reader, work #162)
+
+- A diagnosis quote taken from a line that poses as the assistant or system, drops the instructions,
+  asks for the prompt or tells the reader what to answer is refused (`CitesAnInstruction`), beside the
+  five fixed phrases. The scan (`addresses_the_reader`) is the narrow part of the lessons' instruction
+  scan, moved to `shared/kernel`; ordinary tool lines (`curl http://...`, `POST https://...`, a long build
+  id, a DNS `ANSWER:` field) still verify. Pure, no model run, answer prompt unchanged. See ADR 0153.
+
 ### Added (foundation: advisory diagnosis of a failed watch, model OFF by default, EXPERIMENTAL)
 
 - A failed watch item can carry one advisory diagnosis built from its own evidence: a model proposes an answer

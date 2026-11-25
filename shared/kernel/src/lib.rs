@@ -22,6 +22,7 @@ pub mod error;
 pub mod escalation;
 pub mod exit_code;
 pub mod ids;
+pub mod instruction;
 pub mod lab;
 pub mod money;
 pub mod prompt_budget;
