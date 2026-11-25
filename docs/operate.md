@@ -46,6 +46,13 @@ rely on is the exit code (0 ok, 1 error, 2 refused by authority) and, in the tex
   (`OPEN DECISIONS` names it: `accept N | decline N`).
 - `ROUTINES`: `PAUSED after N failures in a row (routine resume ID)`. A routine pauses itself after five
   failed items in a row (the default) and stays paused until the owner runs `routine resume ID`.
+  `PAUSED by the owner` is `routine pause ID` (also lifted by `routine resume ID`); `RETIRED` is
+  `routine retire ID`, which is final: a retired routine never fires again and cannot be resumed (declare a
+  new one). `run-due` and `serve` skip paused and retired routines; all three verbs need the owner token and
+  are recorded on the evidence chain.
+- `status --short` is the glance: no evidence tail, and per goal the total with its states and only the
+  ten newest items (`--recent N` changes the ten; `--short --all` lists every item as before). Plain `status`
+  still lists everything.
 - `STOP SWITCH: ON` at the top.
 
 An alert on any of these means parsing text that may change. The container healthcheck only proves that
@@ -77,7 +84,7 @@ check for tampering: it exits 1 naming the first broken row.
 backup you only inspect; keep one copy that the newer binary has never opened.**
 
 Every command opens the database read-write first, and opening runs every pending schema migration (the
-current schema is version 8), so `status`, `evidence`, `verify-evidence` and `capabilities` upgrade an older file too.
+current schema is version 9), so `status`, `evidence`, `verify-evidence` and `capabilities` upgrade an older file too.
 There is no downgrade: a binary that finds a file newer than it understands refuses it (`this database
 is schema version N, newer than this program understands ... nothing was changed`), and
 [STABILITY.md](foundation/STABILITY.md) records no downgrade path.

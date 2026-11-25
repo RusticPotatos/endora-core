@@ -73,8 +73,11 @@ goal add --title T [--why W] --criteria TEXT [--check CALL INPUT FIELD EXPECT]
                             adds a criterion of its own (so `--criteria` + `--check` + `--probe` = 2)
 routine add --goal ID (--every SECONDS | --probe NAME) [--title T] [--max-failures N]
             [--auto-accept]
-routine resume ID           lift the pause after repeated failures (owner)
-status [--short]            goals, items, evidence tail (--short: without it), open decisions
+routine pause ID            stop a routine firing until it is resumed (owner)
+routine resume ID           lift a pause, the owner's or the one after repeated failures (owner)
+routine retire ID           stop a routine for good; it cannot be resumed (owner)
+status [--short [--recent N | --all]]  goals, items, evidence tail, open decisions
+                            (--short: no tail; per goal the totals and the 10 newest items)
 run-due                     fire due routines, start new items, run their checks
 serve --every SECONDS       run-due in a loop (a container's command); SIGTERM ends it cleanly
 git-task [--goal ID] [--repo PATH] --instruction T --test-cmd CMD [--cap MICRO_USD]
@@ -106,7 +109,7 @@ refused with exit 1 and named (`unknown option --cpa for goal add`, `unexpected 
 (`no item 9`, `no goal 99`, `item 1 has 1 criterion: there is no criterion 7`; exit 1), a move the item's
 state does not allow says what the state is (`item 3 is already failed`; exit 1 for `decline`, and `accept`
 stays a refusal, exit 2), and `run-due` with nothing to do says so (`nothing due (N routines)` or `no routines:
-a goal needs a routine to make items`). `status --short` leaves out the evidence tail. A goal on its own does nothing: `run-due` only works on work
+a goal needs a routine to make items`). `status --short` leaves out the evidence tail and lists, per goal, its totals and only the 10 newest items (`--recent N`, or `--all` for every item). A goal on its own does nothing: `run-due` only works on work
 items, and a routine is what makes them.
 
 `goal add` grants Core the observe-band calls its checks need (the owner wrote them). A routine
@@ -160,7 +163,7 @@ Running it long-term: [../operate.md](../operate.md).
 - **Back up before you upgrade the binary. A newer binary upgrades any database file it opens, including a
   backup you only inspect; keep one copy that the newer binary has never opened.** Every command, the
   read-only ones too (`status`, `evidence`, `verify-evidence`, `capabilities`), opens the file read-write
-  and runs the pending schema migrations (the current schema is version 8). An older binary then refuses
+  and runs the pending schema migrations (the current schema is version 9). An older binary then refuses
   the file, and there is no downgrade path.
 - **No machine-readable output.** `--help` and `--version` exist (see "The command line" above); there is
   no JSON mode, and `status --json` is refused as an unknown option.
