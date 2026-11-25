@@ -909,6 +909,7 @@ dependencies = [
  "endora-persistence",
  "rusqlite",
  "serde_json",
+ "sha2",
  "signal-hook",
 ]
 

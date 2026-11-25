@@ -7,6 +7,7 @@
 //! opened: an unknown command, option or extra word is refused (exit 1) naming itself.
 
 mod actions;
+mod adapters;
 mod diagnosis;
 mod probes;
 
@@ -84,6 +85,13 @@ struct Settings {
     probes: Vec<Probe>,
     /// Variables a command probe may inherit (`probe-env NAME...`); every other one is cleared.
     probe_env: Vec<String>,
+    /// `adapter <family> <probe> <tree-sha256> observe fact=<name>:<type>...`: a pinned parser
+    /// the owner classified (ADR 0154). Observe band only; the facts it may return are the ones
+    /// on the line.
+    adapters: Vec<adapters::AdapterLine>,
+    /// `adapter-image <image>`: the local image Docker runs adapters in where `bwrap` cannot
+    /// (it must hold `python3`; never pulled).
+    adapter_image: Option<String>,
     /// The repair actions the owner declared (`action NAME reversible COMMAND...`).
     actions: Vec<Action>,
     /// `registry-host <host>`: enables the read-only `registry.tags` call for that host; only an
@@ -107,6 +115,8 @@ struct Settings {
 
 /// Reads the line-based config: `probe <name> <tcp|http|command> <target...> <interval-seconds>`
 /// `probe-env <NAME>...` (variables a command probe may inherit),
+/// `adapter <family> <probe> <tree-sha256> observe fact=<name>:<type>...` (a pinned parser of a
+/// command probe's text; observe band only) and `adapter-image <image>`,
 /// `action <name> reversible <command...>` (a repair; any other declaration is refused),
 /// `registry-host <host>` (the read-only `registry.tags` call; an allow-listed host only) and
 /// `git <scratch-root> <template> -- <agent command line...>`. `#` starts a comment.
@@ -153,6 +163,12 @@ fn read_config(path: &Path) -> Result<Settings, String> {
                     )));
                 }
                 s.registry_host = Some(t[1].into());
+            }
+            Some("adapter") => s
+                .adapters
+                .push(adapters::parse_line(&t).map_err(|m| at(&m))?),
+            Some("adapter-image") if t.len() == 2 && !t[1].starts_with('-') => {
+                s.adapter_image = Some(t[1].into());
             }
             Some("probe-env") if t.len() >= 2 => {
                 s.probe_env.extend(t[1..].iter().map(|n| (*n).to_owned()));
@@ -1864,6 +1880,35 @@ fn run() -> Out {
         settings.probe_env.clone(),
     )))
     .map_err(err)?;
+    if !settings.adapters.is_empty() {
+        let root = db
+            .parent()
+            .map_or_else(|| PathBuf::from("adapters"), |p| p.join("adapters"));
+        let records = root.join(".containers");
+        let _ = endora_foundation_git::reap_containers(&records);
+        let commands: Vec<(String, String)> = settings
+            .probes
+            .iter()
+            .filter(|p| p.kind == Kind::Command)
+            .map(|p| (p.name.clone(), p.target.clone()))
+            .collect();
+        let image = settings
+            .adapter_image
+            .as_deref()
+            .unwrap_or(adapters::DEFAULT_IMAGE);
+        let loaded = adapters::Adapters::load(
+            &settings.adapters,
+            &commands,
+            &root,
+            settings.probe_env.clone(),
+            Box::new(adapters::Sandbox::new(image, records)),
+        )
+        .map_err(Fail::Error)?;
+        for why in loaded.held() {
+            eprintln!("endora-foundation: {why}");
+        }
+        core.register(Arc::new(loaded)).map_err(err)?;
+    }
     core.register(Arc::new(Actions(settings.actions.clone())))
         .map_err(err)?;
     if let Some(host) = &settings.registry_host {
